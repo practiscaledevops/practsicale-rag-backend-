@@ -74,10 +74,20 @@ strong, versioned prompts.
 
 | Repo | Purpose | Holds secrets? |
 |---|---|---|
-| **practiscale-brain** (this repo) | Back office + RAG DB + public API. The hub. | Yes — service-role key, provider keys, all data. |
-| **practiscale-chatbot** | Claude-like conversational product. Own DB (users, chats, projects). | Only a scoped Brain key + its own auth secrets. |
+| **the Brain** (this repo) | Back office + RAG DB + public API. The hub. | Yes — service-role key, provider keys, all data. |
+| **the Chatbot** | Claude-like conversational product. Own DB (users, chats, projects). | Only a scoped Brain key + its own auth secrets. |
 | **practiscale-ai-client** *(optional, later)* | Typed TS SDK for the public API, published to npm. Consumer apps import it. | No. |
 | *(one repo per future consumer app)* | Same pattern as the chatbot. | Only a scoped key. |
+
+**Actual repos & local layout** (set up 2026-07-29):
+
+| Component | GitHub | Local path |
+|---|---|---|
+| Brain (this repo) | `github.com/practiscaledevops/practsicale-rag-backend-` | `C:\Users\IT TRADERS\Desktop\Brain\practiscale-rag-backend` |
+| Chatbot | `github.com/practiscaledevops/practiscale-rag-chatbot` | `C:\Users\IT TRADERS\Desktop\Brain\practiscale-rag-chatbot` |
+
+The ERP (`C:\Users\IT TRADERS\Desktop\Finance Management`) is a separate, unrelated
+project — nothing from this platform belongs there.
 
 **Why polyrepo:** isolation is the whole point. A consumer-app developer must never
 be able to reach the Brain's internals or another tenant's data — they only ever
