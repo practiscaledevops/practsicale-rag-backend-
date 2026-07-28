@@ -1,0 +1,26 @@
+[
+  {
+    "question": "How did call 4821 score and what should the consultant improve?",
+    "expectedAnswerContains": "objection handling",
+    "expectedSourceType": "call_score"
+  },
+  {
+    "question": "What was the strongest part of the highest-scoring call?",
+    "expectedAnswerContains": "rapport",
+    "expectedSourceType": "call_score"
+  },
+  {
+    "question": "What coaching recommendation was given for slow closing rates?",
+    "expectedAnswerContains": "urgency",
+    "expectedSourceType": "coaching"
+  },
+  {
+    "question": "What does the onboarding guide say about handling pricing questions?",
+    "expectedAnswerContains": "discount",
+    "expectedSourceType": "document"
+  },
+  {
+    "question": "What is the capital of France?",
+    "expectedAnswerContains": "I don't know"
+  }
+]
