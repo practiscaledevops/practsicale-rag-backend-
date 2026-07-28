@@ -12,6 +12,8 @@
 
 import { supabaseServer } from "@/lib/supabase-server";
 import { supabaseAdmin } from "@/lib/supabase";
+import { isDemo } from "@/lib/demo/mode";
+import { DEMO_ADMIN } from "@/lib/demo/fixtures";
 
 export type AdminRole = "super_admin" | "admin";
 
@@ -34,6 +36,7 @@ export interface AdminSession {
  * redirect, API routes return 401 via requireAdmin()).
  */
 export async function getAdmin(): Promise<AdminSession | null> {
+  if (isDemo()) return DEMO_ADMIN;
   const sb = await supabaseServer();
   const {
     data: { user },

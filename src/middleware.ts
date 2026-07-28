@@ -10,6 +10,12 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 
 export async function middleware(req: NextRequest) {
+  // DEMO MODE: no Supabase session — let every route through (getAdmin() returns
+  // the demo admin, so the dashboard renders).
+  if (process.env.NEXT_PUBLIC_DEMO_MODE === "1" || process.env.DEMO_MODE === "1") {
+    return NextResponse.next({ request: req });
+  }
+
   // Start from a pass-through response we can attach refreshed cookies to.
   let res = NextResponse.next({ request: req });
 

@@ -15,6 +15,8 @@ import {
   createBrowserClient,
   type CookieOptions,
 } from "@supabase/ssr";
+import { isDemo } from "@/lib/demo/mode";
+import { fakeSupabase } from "@/lib/demo/client";
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
@@ -29,6 +31,7 @@ const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
  * cookie on each request.
  */
 export async function supabaseServer() {
+  if (isDemo()) return fakeSupabase();
   // Dynamic import so this module stays importable from Client Components (which
   // import supabaseBrowser below). A static `next/headers` import would taint
   // the client bundle and fail the build.
@@ -60,5 +63,6 @@ export async function supabaseServer() {
  * Reads/writes the session cookie in the browser.
  */
 export function supabaseBrowser() {
+  if (isDemo()) return fakeSupabase();
   return createBrowserClient(url, anonKey);
 }

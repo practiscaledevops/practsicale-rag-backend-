@@ -24,6 +24,8 @@ import { rerank } from "@/lib/rerank";
 import { GROUNDED_SYSTEM, buildContext } from "@/lib/prompts";
 import { supabaseAdmin } from "@/lib/supabase";
 import { requireAdmin, AdminAuthError } from "@/lib/auth/admin";
+import { isDemo } from "@/lib/demo/mode";
+import { demoAnswerText } from "@/lib/demo/stream";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
@@ -111,6 +113,27 @@ export async function POST(req: Request) {
     source_type: c.source_type ?? null,
     snippet: c.content.length > 240 ? c.content.slice(0, 240) + "…" : c.content,
   }));
+
+  // DEMO MODE: retrieval + citations above are real (fake store), but there is
+  // no model key — stream a canned grounded answer in the same NDJSON protocol.
+  if (isDemo()) {
+    const encoder = new TextEncoder();
+    const answer = demoAnswerText(query);
+    const parts = answer.match(/\S+\s*/g) ?? [answer];
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(encoder.encode(JSON.stringify({ type: "citations", citations }) + "\n"));
+        for (const p of parts) {
+          controller.enqueue(encoder.encode(JSON.stringify({ type: "text", value: p }) + "\n"));
+          await new Promise((r) => setTimeout(r, 22));
+        }
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      headers: { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" },
+    });
+  }
 
   const resolvedModel = modelForTier(tier);
   const modelId = resolvedModel.modelId;

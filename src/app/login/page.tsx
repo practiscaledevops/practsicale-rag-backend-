@@ -27,8 +27,9 @@ function LoginForm() {
   const params = useSearchParams();
   const redirectTo = params.get("redirectTo") || "/dashboard";
 
-  const [email, setEmail] = React.useState("");
-  const [password, setPassword] = React.useState("");
+  const demo = process.env.NEXT_PUBLIC_DEMO_MODE === "1";
+  const [email, setEmail] = React.useState(demo ? "demo@practiscale.co" : "");
+  const [password, setPassword] = React.useState(demo ? "demo" : "");
   const [error, setError] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(false);
 
@@ -36,6 +37,12 @@ function LoginForm() {
     e.preventDefault();
     setError(null);
     setLoading(true);
+    // In demo mode any credentials work — go straight to the dashboard.
+    if (demo) {
+      router.replace(redirectTo);
+      router.refresh();
+      return;
+    }
     const supabase = supabaseBrowser();
     const { error } = await supabase.auth.signInWithPassword({
       email: email.trim(),
@@ -65,7 +72,9 @@ function LoginForm() {
           <CardHeader>
             <CardTitle>Sign in</CardTitle>
             <CardDescription>
-              Admin access to the back office.
+              {demo
+                ? "Demo mode — any credentials work. Just press Sign in."
+                : "Admin access to the back office."}
             </CardDescription>
           </CardHeader>
           <CardContent>
