@@ -51,6 +51,10 @@ export async function getAdmin(): Promise<AdminSession | null> {
     .select("id, org_id, email, role, permissions, is_active")
     .eq("user_id", user.id)
     .eq("is_active", true)
+    // Deterministic pick: match the org the custom_access_token_hook injects
+    // into the JWT (it selects the earliest-created active membership). Keeps
+    // getAdmin() and the RLS org_id claim in agreement for multi-org users.
+    .order("created_at", { ascending: true })
     .limit(1)
     .maybeSingle();
 
