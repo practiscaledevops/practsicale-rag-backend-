@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FileText, Loader2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
@@ -91,7 +92,12 @@ export function DocumentsClient({ documents }: { documents: DocumentRow[] }) {
               {documents.map((d) => (
                 <Tr key={d.id}>
                   <Td className="font-medium">
-                    {d.title || <span className="text-muted-foreground">Untitled</span>}
+                    <Link
+                      href={`/dashboard/documents/${d.id}`}
+                      className="text-accent hover:underline"
+                    >
+                      {d.title || <span className="italic text-muted-foreground">Untitled</span>}
+                    </Link>
                   </Td>
                   <Td>
                     <Badge tone="accent">{sourceLabel(d.source_type)}</Badge>

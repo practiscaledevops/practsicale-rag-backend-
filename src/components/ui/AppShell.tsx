@@ -8,13 +8,14 @@ import {
   Database,
   Upload,
   FileText,
+  FolderTree,
+  Cpu,
   MessageSquareText,
   KeyRound,
   Plug,
   BarChart3,
   FlaskConical,
   Users,
-  Brain,
   LogOut,
   Menu,
   X,
@@ -40,6 +41,8 @@ const NAV: NavItem[] = [
   { href: "/dashboard/sources", label: "Data Sources", icon: Database },
   { href: "/dashboard/uploads", label: "Uploads", icon: Upload },
   { href: "/dashboard/documents", label: "Documents", icon: FileText },
+  { href: "/dashboard/collections", label: "Collections", icon: FolderTree },
+  { href: "/dashboard/processing", label: "Processing", icon: Cpu },
   { href: "/dashboard/prompts", label: "Prompts", icon: MessageSquareText },
   { href: "/dashboard/keys", label: "API Keys", icon: KeyRound },
   { href: "/dashboard/connectors", label: "Connectors", icon: Plug },
@@ -90,8 +93,8 @@ export function AppShell({
             className={cn(
               "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
               active
-                ? "bg-accent/10 text-accent"
-                : "text-muted-foreground hover:bg-surface-muted hover:text-foreground"
+                ? "bg-accent/15 text-white ring-1 ring-inset ring-accent/25"
+                : "text-sidebar-muted hover:bg-white/5 hover:text-sidebar-foreground"
             )}
           >
             <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
@@ -103,18 +106,19 @@ export function AppShell({
   );
 
   const brand = (
-    <div className="flex h-14 items-center gap-2 border-b border-border px-5">
-      <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent text-accent-foreground">
-        <Brain className="h-4 w-4" aria-hidden="true" />
-      </div>
-      <span className="text-sm font-semibold">Practiscale Brain</span>
+    <div className="sidebar-glow relative flex h-16 items-center gap-3 border-b border-sidebar-border px-5">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/logo-white.png" alt="Practiscale" className="h-7 w-auto select-none" />
+      <span className="rounded-md bg-white/10 px-1.5 py-0.5 text-[11px] font-semibold tracking-wide text-sidebar-foreground">
+        Brain
+      </span>
     </div>
   );
 
   return (
     <div className="flex min-h-screen bg-background">
-      {/* Desktop sidebar */}
-      <aside className="hidden w-60 shrink-0 flex-col border-r border-border bg-surface lg:flex">
+      {/* Desktop sidebar — constant dark rail */}
+      <aside className="hidden w-64 shrink-0 flex-col bg-sidebar text-sidebar-foreground lg:flex">
         {brand}
         {nav}
       </aside>
@@ -127,7 +131,7 @@ export function AppShell({
             aria-hidden="true"
             onClick={() => setMobileOpen(false)}
           />
-          <aside className="relative z-10 flex h-full w-60 flex-col border-r border-border bg-surface">
+          <aside className="relative z-10 flex h-full w-64 flex-col bg-sidebar text-sidebar-foreground">
             {brand}
             {nav}
           </aside>
@@ -136,7 +140,7 @@ export function AppShell({
 
       {/* Main column */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 items-center justify-between gap-3 border-b border-border bg-surface px-4 lg:px-6">
+        <header className="sticky top-0 z-30 flex h-16 items-center justify-between gap-3 border-b border-border bg-surface/85 px-4 backdrop-blur lg:px-6">
           <Button
             variant="ghost"
             size="icon"

@@ -11,6 +11,9 @@ import { chunkDocument, type Chunk } from "@/lib/chunking";
 import { embedMany } from "@/lib/embeddings";
 import { redactPII } from "@/lib/redact";
 import { createHash } from "crypto";
+// Import the internal lib entry (not the package root) to avoid pdf-parse's
+// module-level "debug" branch that tries to read a bundled test PDF from disk.
+import pdfParse from "pdf-parse/lib/pdf-parse.js";
 
 export interface IngestParams {
   orgId: string;
@@ -139,4 +142,29 @@ export async function ingestOne(db: SupabaseClient, params: IngestParams): Promi
     await db.from("documents").delete().eq("id", documentId).eq("org_id", orgId);
     throw e;
   }
+}
+
+/**
+ * Extract plain text from a PDF file buffer using pdf-parse.
+ *
+ * ingestOne() keeps its text-in contract — it never touches binary. Binary
+ * decoding lives HERE so the upload route can turn an uploaded PDF into text
+ * before calling ingestOne(). Returns the document's concatenated text (empty
+ * string if the PDF has no extractable text layer, e.g. a scanned image PDF —
+ * OCR is out of scope).
+ */
+export async function pdfToText(buffer: Buffer): Promise<string> {
+  const parsed = await pdfParse(buffer);
+  return parsed.text ?? "";
+}
+
+/**
+ * Convenience dispatcher for the upload route: decode a file buffer to text
+ * based on its MIME type. PDFs go through pdf-parse; everything else is treated
+ * as UTF-8 text (MD, TXT, etc.). ingestOne() still expects already-extracted
+ * text — this is just the decode step in front of it.
+ */
+export async function extractText(buffer: Buffer, mime?: string | null): Promise<string> {
+  if (mime === "application/pdf") return pdfToText(buffer);
+  return buffer.toString("utf-8");
 }

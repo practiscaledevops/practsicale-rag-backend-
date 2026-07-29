@@ -1,37 +1,44 @@
 "use client";
 
+// Drag-and-drop, multi-file uploader for the knowledge base.
+//
+// Layman flow: drop one or many files onto the big dashed zone (or press it /
+// tab to it and hit Enter to browse). Each file gets a row that moves through
+// queued -> uploading (with % progress) -> processing -> done (N chunks) / error.
+// Files are POSTed one at a time to /api/admin/uploads as multipart/form-data,
+// with a small concurrency so many files don't fan out into the embedder at once.
+//
+// The server resolves org_id and enforces documents:write; the client sends only
+// the raw file. XMLHttpRequest is used (not fetch) so we can show real upload
+// progress; once bytes are sent we flip to an indeterminate "processing" bar
+// while the server extracts text, embeds, and persists.
+
 import * as React from "react";
 import Link from "next/link";
-import { Upload, FileText, Loader2, CheckCircle2, XCircle, X } from "lucide-react";
+import { UploadCloud, FileText, Loader2, CheckCircle2, XCircle, X, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/Button";
-import { Label } from "@/components/ui/Label";
-import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
+import { Alert } from "@/components/ui/Alert";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/Card";
 import { cn } from "@/lib/utils";
 
-const SOURCE_TYPES: { value: string; label: string }[] = [
-  { value: "document", label: "Document" },
-  { value: "call_score", label: "Call score" },
-  { value: "coaching", label: "Coaching" },
-  { value: "transcript", label: "Transcript" },
-];
-
-// Text formats we can read in the browser and ingest right now. PDF extraction
-// needs a server-side step that is not wired yet, so PDFs are accepted into the
-// list but marked "coming soon" and never sent.
-const TEXT_EXTENSIONS = [".md", ".markdown", ".txt", ".text"];
+// Formats we can send. .pdf is extracted server-side; the rest are read as UTF-8.
 const ACCEPT = ".md,.markdown,.txt,.text,.pdf";
+const SUPPORTED = [".md", ".markdown", ".txt", ".text", ".pdf"];
+// How many files may be in flight at once (keeps the embedder from being swamped).
+const CONCURRENCY = 3;
 
-type FileStatus = "ready" | "unsupported" | "ingesting" | "done" | "error";
+type Status = "queued" | "uploading" | "processing" | "done" | "error";
 
 interface FileEntry {
   id: string;
+  file: File;
   name: string;
   size: number;
-  status: FileStatus;
-  text?: string; // populated for readable text files
-  result?: { chunks: number; skipped: boolean };
+  status: Status;
+  progress: number; // 0-100 during upload; 100 while processing
+  result?: { documentId: string; chunks: number; skipped: boolean };
   error?: string;
 }
 
@@ -39,262 +46,368 @@ const extOf = (name: string) => {
   const dot = name.lastIndexOf(".");
   return dot >= 0 ? name.slice(dot).toLowerCase() : "";
 };
-const titleFromName = (name: string) => {
-  const dot = name.lastIndexOf(".");
-  return dot > 0 ? name.slice(0, dot) : name;
-};
-const isPdf = (name: string) => extOf(name) === ".pdf";
-const isText = (name: string) => TEXT_EXTENSIONS.includes(extOf(name));
+const isSupported = (name: string) => SUPPORTED.includes(extOf(name));
 
-function StatusCell({ entry }: { entry: FileEntry }) {
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Tolerant JSON parse for XHR response bodies (never throws).
+function parseJson(text: string): Record<string, unknown> {
+  try {
+    const v: unknown = JSON.parse(text);
+    return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function StatusPill({ entry }: { entry: FileEntry }) {
   switch (entry.status) {
-    case "unsupported":
-      return <Badge tone="warning">PDF — coming soon</Badge>;
-    case "ingesting":
+    case "queued":
+      return <Badge tone="neutral">Queued</Badge>;
+    case "uploading":
       return (
-        <span className="inline-flex items-center gap-1.5 text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> Ingesting…
-        </span>
+        <Badge tone="accent" className="gap-1.5">
+          <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+          Uploading {entry.progress}%
+        </Badge>
+      );
+    case "processing":
+      return (
+        <Badge tone="accent" className="gap-1.5">
+          <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+          Processing…
+        </Badge>
       );
     case "done":
       return (
-        <span className="inline-flex items-center gap-1.5 text-success">
-          <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+        <Badge tone="success" className="gap-1.5">
+          <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
           {entry.result?.skipped
             ? "Already ingested"
-            : `Ingested (${entry.result?.chunks ?? 0} chunks)`}
-        </span>
+            : `Done · ${entry.result?.chunks ?? 0} chunks`}
+        </Badge>
       );
     case "error":
       return (
-        <span className="inline-flex items-center gap-1.5 text-danger" title={entry.error}>
-          <XCircle className="h-4 w-4" aria-hidden="true" /> {entry.error ?? "Failed"}
-        </span>
+        <Badge tone="danger" className="gap-1.5" title={entry.error}>
+          <XCircle className="h-3 w-3" aria-hidden="true" />
+          Failed
+        </Badge>
       );
-    default:
-      return <span className="text-muted-foreground">Ready</span>;
   }
 }
 
 export function UploadsClient() {
-  const [sourceType, setSourceType] = React.useState("document");
   const [entries, setEntries] = React.useState<FileEntry[]>([]);
   const [dragging, setDragging] = React.useState(false);
-  const [busy, setBusy] = React.useState(false);
-  const inputRef = React.useRef<HTMLInputElement>(null);
+  const [live, setLive] = React.useState(""); // announced via aria-live
 
-  const addFiles = React.useCallback(async (fileList: FileList | File[]) => {
-    const files = Array.from(fileList);
-    const next: FileEntry[] = [];
-    for (const file of files) {
-      const id = `${file.name}-${file.size}-${crypto.randomUUID()}`;
-      if (isPdf(file.name)) {
-        next.push({ id, name: file.name, size: file.size, status: "unsupported" });
-      } else if (isText(file.name)) {
-        try {
-          const text = await file.text();
-          next.push({ id, name: file.name, size: file.size, status: "ready", text });
-        } catch {
-          next.push({
-            id,
-            name: file.name,
-            size: file.size,
-            status: "error",
-            error: "Could not read file",
-          });
-        }
-      } else {
-        next.push({
-          id,
-          name: file.name,
-          size: file.size,
-          status: "unsupported",
-        });
-      }
-    }
-    setEntries((prev) => [...prev, ...next]);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const dragDepth = React.useRef(0);
+  // Scheduling state kept in refs so it never depends on render timing.
+  const queueRef = React.useRef<FileEntry[]>([]);
+  const activeRef = React.useRef(0);
+  const removedRef = React.useRef<Set<string>>(new Set());
+  const scheduleRef = React.useRef<() => void>(() => {});
+
+  // Patch one entry by id. setEntries updater is stable, so this needs no deps.
+  const patch = React.useCallback((id: string, p: Partial<FileEntry>) => {
+    setEntries((prev) => prev.map((e) => (e.id === id ? { ...e, ...p } : e)));
   }, []);
 
+  // Upload a single entry with XHR; report progress, then processing, then result.
+  const uploadOne = React.useCallback(
+    (entry: FileEntry) => {
+      patch(entry.id, { status: "uploading", progress: 0, error: undefined });
+      setLive(`${entry.name}: uploading`);
+
+      const done = () => {
+        activeRef.current = Math.max(0, activeRef.current - 1);
+        scheduleRef.current();
+      };
+
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/admin/uploads");
+
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable) {
+          patch(entry.id, { progress: Math.round((ev.loaded / ev.total) * 100) });
+        }
+      };
+      // Bytes are on the wire — the server is now extracting/embedding.
+      xhr.upload.onload = () => patch(entry.id, { status: "processing", progress: 100 });
+
+      xhr.onload = () => {
+        const json = parseJson(xhr.responseText || "");
+        if (xhr.status >= 200 && xhr.status < 300) {
+          const result = {
+            documentId: typeof json.documentId === "string" ? json.documentId : "",
+            chunks: typeof json.chunks === "number" ? json.chunks : Number(json.chunks) || 0,
+            skipped: json.skipped === true,
+          };
+          patch(entry.id, { status: "done", progress: 100, result });
+          setLive(
+            `${entry.name}: done, ${result.skipped ? "already ingested" : `${result.chunks} chunks`}`
+          );
+        } else {
+          const msg =
+            typeof json.error === "string" ? json.error : `Upload failed (HTTP ${xhr.status})`;
+          patch(entry.id, { status: "error", error: msg });
+          setLive(`${entry.name}: error, ${msg}`);
+        }
+        done();
+      };
+      xhr.onerror = () => {
+        patch(entry.id, { status: "error", error: "Network error" });
+        setLive(`${entry.name}: network error`);
+        done();
+      };
+
+      const fd = new FormData();
+      fd.append("file", entry.file, entry.name);
+      xhr.send(fd);
+    },
+    [patch]
+  );
+
+  // Pull queued entries into flight up to the concurrency limit.
+  const schedule = React.useCallback(() => {
+    while (activeRef.current < CONCURRENCY && queueRef.current.length > 0) {
+      const entry = queueRef.current.shift()!;
+      if (removedRef.current.has(entry.id)) continue; // dropped from the list meanwhile
+      activeRef.current += 1;
+      uploadOne(entry);
+    }
+  }, [uploadOne]);
+
+  React.useEffect(() => {
+    scheduleRef.current = schedule;
+  }, [schedule]);
+
+  const addFiles = React.useCallback((list: FileList | File[]) => {
+    const created: FileEntry[] = Array.from(list).map((file) => {
+      const supported = isSupported(file.name);
+      return {
+        id: crypto.randomUUID(),
+        file,
+        name: file.name,
+        size: file.size,
+        status: supported ? "queued" : "error",
+        progress: 0,
+        error: supported ? undefined : "Unsupported file type",
+      };
+    });
+    if (created.length === 0) return;
+    setEntries((prev) => [...prev, ...created]);
+    queueRef.current.push(...created.filter((e) => e.status === "queued"));
+    scheduleRef.current();
+  }, []);
+
+  // --- Drag & drop handlers (depth counter avoids flicker over children) -----
+  function onDragEnter(e: React.DragEvent) {
+    e.preventDefault();
+    dragDepth.current += 1;
+    setDragging(true);
+  }
+  function onDragOver(e: React.DragEvent) {
+    e.preventDefault();
+  }
+  function onDragLeave(e: React.DragEvent) {
+    e.preventDefault();
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragging(false);
+  }
   function onDrop(e: React.DragEvent) {
     e.preventDefault();
+    dragDepth.current = 0;
     setDragging(false);
-    if (e.dataTransfer.files?.length) void addFiles(e.dataTransfer.files);
+    if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files);
   }
 
   function onPick(e: React.ChangeEvent<HTMLInputElement>) {
-    if (e.target.files?.length) void addFiles(e.target.files);
+    if (e.target.files?.length) addFiles(e.target.files);
     e.target.value = ""; // allow re-selecting the same file
   }
 
   function removeEntry(id: string) {
-    setEntries((prev) => prev.filter((x) => x.id !== id));
+    removedRef.current.add(id);
+    setEntries((prev) => prev.filter((e) => e.id !== id));
   }
 
-  const readyCount = entries.filter((e) => e.status === "ready").length;
-
-  async function ingestAll() {
-    setBusy(true);
-    // Ingest ready files one at a time so a slow embed call can't fan out.
-    for (const entry of entries) {
-      if (entry.status !== "ready" || !entry.text) continue;
-      setEntries((prev) =>
-        prev.map((x) => (x.id === entry.id ? { ...x, status: "ingesting" } : x))
-      );
-      try {
-        const res = await fetch("/api/admin/uploads", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            title: titleFromName(entry.name),
-            sourceType,
-            text: entry.text,
-            metadata: { filename: entry.name },
-          }),
-        });
-        const json = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          setEntries((prev) =>
-            prev.map((x) =>
-              x.id === entry.id
-                ? { ...x, status: "error", error: json.error ?? `HTTP ${res.status}` }
-                : x
-            )
-          );
-          continue;
-        }
-        setEntries((prev) =>
-          prev.map((x) =>
-            x.id === entry.id
-              ? {
-                  ...x,
-                  status: "done",
-                  result: { chunks: json.chunks ?? 0, skipped: !!json.skipped },
-                }
-              : x
-          )
-        );
-      } catch {
-        setEntries((prev) =>
-          prev.map((x) =>
-            x.id === entry.id ? { ...x, status: "error", error: "Network error" } : x
-          )
-        );
-      }
-    }
-    setBusy(false);
+  function retry(entry: FileEntry) {
+    patch(entry.id, { status: "queued", progress: 0, error: undefined, result: undefined });
+    queueRef.current.push(entry);
+    scheduleRef.current();
   }
 
-  const anyDone = entries.some((e) => e.status === "done");
+  function clearFinished() {
+    setEntries((prev) =>
+      prev.filter((e) => e.status === "queued" || e.status === "uploading" || e.status === "processing")
+    );
+  }
+
+  const inFlight = entries.filter(
+    (e) => e.status === "queued" || e.status === "uploading" || e.status === "processing"
+  ).length;
+  const doneCount = entries.filter((e) => e.status === "done").length;
+  const errorCount = entries.filter((e) => e.status === "error").length;
+  const totalChunks = entries.reduce(
+    (n, e) => n + (e.result && !e.result.skipped ? e.result.chunks : 0),
+    0
+  );
 
   return (
     <div className="space-y-6">
+      {/* Screen-reader announcements for status changes. */}
+      <p className="sr-only" role="status" aria-live="polite">
+        {live}
+      </p>
+
       <Card>
         <CardHeader>
           <CardTitle>Upload documents</CardTitle>
           <CardDescription>
-            Add Markdown or plain-text files to the knowledge base. They are chunked,
-            embedded, and made searchable. PDF support is coming soon.
+            Drag files onto the box below (or browse) to add them to the knowledge base. They
+            are chunked, embedded, and made searchable. Supports Markdown, plain text, and PDF.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="max-w-xs space-y-1.5">
-            <Label htmlFor="up-type">Source type</Label>
-            <select
-              id="up-type"
-              className={
-                "flex h-9 w-full rounded-lg border border-border bg-surface px-3 py-1 text-sm " +
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring " +
-                "focus-visible:ring-offset-1 focus-visible:ring-offset-background"
-              }
-              value={sourceType}
-              onChange={(e) => setSourceType(e.target.value)}
-            >
-              {SOURCE_TYPES.map((t) => (
-                <option key={t.value} value={t.value}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Drop zone (also keyboard/click accessible via the button inside). */}
-          <div
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragging(true);
-            }}
-            onDragLeave={() => setDragging(false)}
+        <CardContent>
+          {/* The whole drop zone is a single focusable button: keyboard-activatable
+              (Enter/Space open the picker) with no nested interactive controls. */}
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            onDragEnter={onDragEnter}
+            onDragOver={onDragOver}
+            onDragLeave={onDragLeave}
             onDrop={onDrop}
+            aria-label="Upload files: drag and drop here, or activate to browse"
             className={cn(
-              "flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors",
-              dragging ? "border-accent bg-accent/5" : "border-border bg-surface/50"
+              "flex w-full flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-12 text-center transition-colors",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+              dragging
+                ? "border-accent bg-accent/10"
+                : "border-border bg-surface/50 hover:bg-surface-muted"
             )}
           >
-            <div className="flex h-11 w-11 items-center justify-center rounded-full bg-surface-muted">
-              <Upload className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-surface-muted">
+              <UploadCloud className="h-6 w-6 text-muted-foreground" aria-hidden="true" />
             </div>
             <div>
-              <p className="text-sm font-medium">Drag &amp; drop files here</p>
+              <p className="text-sm font-medium">
+                {dragging ? "Drop to upload" : "Drag & drop files here"}
+              </p>
               <p className="mt-1 text-sm text-muted-foreground">
-                .md and .txt are ingested now · .pdf is accepted but marked coming soon
+                or click to browse · .md, .txt, .pdf · multiple files welcome
               </p>
             </div>
-            <Button variant="outline" size="sm" onClick={() => inputRef.current?.click()}>
+            <span className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm font-medium">
               <FileText className="h-4 w-4" aria-hidden="true" />
-              Choose files
-            </Button>
-            <input
-              ref={inputRef}
-              type="file"
-              accept={ACCEPT}
-              multiple
-              className="sr-only"
-              aria-label="Choose files to upload"
-              onChange={onPick}
-            />
-          </div>
+              Browse files
+            </span>
+          </button>
+          <input
+            ref={inputRef}
+            type="file"
+            accept={ACCEPT}
+            multiple
+            className="sr-only"
+            tabIndex={-1}
+            aria-hidden="true"
+            onChange={onPick}
+          />
         </CardContent>
       </Card>
 
-      {entries.length > 0 && (
+      {entries.length === 0 ? (
+        <EmptyState
+          icon={FileText}
+          title="No uploads yet"
+          description="Files you drop or choose will appear here with live progress and results."
+        />
+      ) : (
         <Card>
           <CardHeader>
             <CardTitle>Files</CardTitle>
             <CardDescription>
-              {readyCount > 0
-                ? `${readyCount} ready to ingest.`
-                : "No text files ready to ingest."}
+              {inFlight > 0
+                ? `${inFlight} in progress…`
+                : `${doneCount} done${errorCount ? `, ${errorCount} failed` : ""} · ${totalChunks} chunks added`}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <ul className="divide-y divide-border rounded-lg border border-border">
               {entries.map((entry) => (
-                <li key={entry.id} className="flex items-center gap-3 px-3 py-2.5">
-                  <FileText className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                <li key={entry.id} className="flex items-start gap-3 px-3 py-3">
+                  <FileText
+                    className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground"
+                    aria-hidden="true"
+                  />
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium">{entry.name}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {(entry.size / 1024).toFixed(1)} KB
-                    </p>
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="truncate text-sm font-medium">{entry.name}</p>
+                      <span className="shrink-0 text-xs text-muted-foreground">
+                        {formatBytes(entry.size)}
+                      </span>
+                    </div>
+
+                    {(entry.status === "uploading" || entry.status === "processing") && (
+                      <div
+                        className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-surface-muted"
+                        role="progressbar"
+                        aria-valuenow={entry.status === "processing" ? undefined : entry.progress}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                      >
+                        <div
+                          className={cn(
+                            "h-full rounded-full bg-accent transition-all",
+                            entry.status === "processing" && "animate-pulse"
+                          )}
+                          style={{
+                            width: entry.status === "processing" ? "100%" : `${entry.progress}%`,
+                          }}
+                        />
+                      </div>
+                    )}
+
+                    <div className="mt-2 flex items-center gap-2">
+                      <StatusPill entry={entry} />
+                      {entry.status === "error" && entry.error && (
+                        <span className="truncate text-xs text-muted-foreground" title={entry.error}>
+                          {entry.error}
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <div className="shrink-0 text-sm">
-                    <StatusCell entry={entry} />
+
+                  <div className="flex shrink-0 items-center gap-1">
+                    {entry.status === "error" && isSupported(entry.name) && (
+                      <Button variant="ghost" size="sm" onClick={() => retry(entry)}>
+                        <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                        Retry
+                      </Button>
+                    )}
+                    {entry.status !== "uploading" && entry.status !== "processing" && (
+                      <button
+                        type="button"
+                        onClick={() => removeEntry(entry.id)}
+                        className="rounded p-1 text-muted-foreground hover:bg-surface-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        aria-label={`Remove ${entry.name}`}
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    )}
                   </div>
-                  {entry.status !== "ingesting" && (
-                    <button
-                      type="button"
-                      onClick={() => removeEntry(entry.id)}
-                      className="shrink-0 rounded p-1 text-muted-foreground hover:bg-surface-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      aria-label={`Remove ${entry.name}`}
-                    >
-                      <X className="h-4 w-4" />
-                    </button>
-                  )}
                 </li>
               ))}
             </ul>
 
-            {anyDone && (
+            {doneCount > 0 && (
               <Alert tone="success">
                 Ingested files are now searchable.{" "}
                 <Link href="/dashboard/documents" className="font-medium text-accent underline">
@@ -304,26 +417,14 @@ export function UploadsClient() {
               </Alert>
             )}
 
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center justify-end">
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => setEntries([])}
-                disabled={busy}
+                onClick={clearFinished}
+                disabled={doneCount + errorCount === 0}
               >
-                Clear list
-              </Button>
-              <Button onClick={ingestAll} disabled={busy || readyCount === 0}>
-                {busy ? (
-                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                ) : (
-                  <Upload className="h-4 w-4" aria-hidden="true" />
-                )}
-                {busy
-                  ? "Ingesting…"
-                  : readyCount === 1
-                    ? "Ingest 1 file"
-                    : `Ingest ${readyCount} files`}
+                Clear finished
               </Button>
             </div>
           </CardContent>

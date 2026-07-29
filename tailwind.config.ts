@@ -30,6 +30,11 @@ const config: Config = {
         success: "rgb(var(--success) / <alpha-value>)",
         warning: "rgb(var(--warning) / <alpha-value>)",
         danger: "rgb(var(--danger) / <alpha-value>)",
+        // Dark sidebar rail tokens (constant across light/dark).
+        sidebar: "rgb(var(--sidebar) / <alpha-value>)",
+        "sidebar-foreground": "rgb(var(--sidebar-foreground) / <alpha-value>)",
+        "sidebar-muted": "rgb(var(--sidebar-muted) / <alpha-value>)",
+        "sidebar-border": "rgb(var(--sidebar-border) / <alpha-value>)",
       },
       borderColor: {
         DEFAULT: "rgb(var(--border) / <alpha-value>)",
@@ -37,6 +42,12 @@ const config: Config = {
       borderRadius: {
         lg: "0.625rem",
         xl: "0.875rem",
+        "2xl": "1.125rem",
+      },
+      boxShadow: {
+        // Soft, enterprise elevation for cards + popovers.
+        soft: "0 1px 2px rgb(16 24 27 / 0.04), 0 4px 16px rgb(16 24 27 / 0.06)",
+        "soft-lg": "0 2px 8px rgb(16 24 27 / 0.06), 0 12px 32px rgb(16 24 27 / 0.10)",
       },
       fontFamily: {
         sans: ["var(--font-sans)", "ui-sans-serif", "system-ui", "sans-serif"],

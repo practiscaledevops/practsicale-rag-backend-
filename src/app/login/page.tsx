@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Brain, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { supabaseBrowser } from "@/lib/supabase-server";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -59,16 +59,22 @@ function LoginForm() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-background px-4">
-      <div className="w-full max-w-sm">
-        <div className="mb-6 flex flex-col items-center gap-2 text-center">
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-accent text-accent-foreground">
-            <Brain className="h-6 w-6" aria-hidden="true" />
-          </div>
-          <h1 className="text-lg font-semibold">Practiscale Brain</h1>
+    <main className="relative flex min-h-screen items-center justify-center bg-background px-4">
+      {/* Soft brand wash behind the card */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 top-0 h-64 bg-brand-gradient opacity-[0.06]"
+      />
+      <div className="relative w-full max-w-sm">
+        <div className="mb-6 flex flex-col items-center gap-3 text-center">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/logo.png" alt="Practiscale" className="h-8 w-auto" />
+          <span className="rounded-full bg-accent/10 px-2.5 py-0.5 text-xs font-semibold text-accent">
+            Brain · Back office
+          </span>
         </div>
 
-        <Card>
+        <Card className="shadow-soft-lg">
           <CardHeader>
             <CardTitle>Sign in</CardTitle>
             <CardDescription>

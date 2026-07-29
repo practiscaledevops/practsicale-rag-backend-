@@ -29,7 +29,9 @@ export async function hybridSearchScoped(opts: {
     p_source_types: opts.scope.sourceTypes,
     p_data_source_ids: opts.scope.dataSourceIds,
     p_collection_ids: opts.scope.collectionIds,
-    match_count: opts.matchCount ?? 40,
+    // Wider default candidate pool (60) gives the reranker more to choose from,
+    // improving top-k quality. Callers may still pass an explicit matchCount.
+    match_count: opts.matchCount ?? 60,
   });
   if (error) throw error;
   return (data ?? []) as RetrievedChunk[];

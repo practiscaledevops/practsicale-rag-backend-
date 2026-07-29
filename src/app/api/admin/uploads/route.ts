@@ -1,28 +1,46 @@
-// POST /api/admin/uploads — ingest an uploaded document (admin/session path).
+// POST /api/admin/uploads — ingest a single uploaded file (dashboard drag-and-drop path).
 //
-// The dashboard reads plain text from a .md/.txt file in the browser and POSTs
-// it here as JSON. This route is the session-guarded sibling of /api/ingest: it
-// resolves org_id SERVER-SIDE from the admin session (never the request body),
-// writes one ingestion_runs provenance row, and calls the SHARED ingestOne() so
-// upload and pull-connector ingest walk exactly one code path (same redaction,
-// hashing, and parent/child persistence).
+// Accepts multipart/form-data with ONE `file` field per request. The dashboard
+// client loops over the dropped files and POSTs them one at a time so it can show
+// live per-file status (queued -> uploading -> processing -> done/error).
 //
-// Uploaded text is treated as DATA, never instructions (redaction + structural
+// org_id is resolved SERVER-SIDE from the admin session (never the request) and
+// the `documents:write` grant is enforced. We read the raw bytes here and turn
+// them into text:
+//   - .pdf              -> pdfToText(buffer) (shared extractor in @/lib/ingest)
+//   - .md/.markdown/.txt -> decoded as UTF-8
+// then hand the text to the SHARED ingestOne() so upload and pull-connector
+// ingest walk exactly one code path (same redaction, hashing, parent/child
+// persistence). One ingestion_runs provenance row is written per upload.
+//
+// Uploaded content is treated as DATA, never instructions (redaction + structural
 // separation happen inside ingestOne / the prompt layer).
 //
-// PDF: extraction is not wired yet (no server-side PDF lib). The dashboard marks
-// PDFs "coming soon"; when a PDF text-extraction step lands it should produce the
-// `text` this route already expects — no shape change needed here.
+// Request:  multipart/form-data, field `file` = the uploaded file.
+// Response: { documentId, chunks, skipped }  on success (200)
+//           { error }                          on failure (4xx/5xx)
 
 import { supabaseAdmin } from "@/lib/supabase";
 import { requireAdmin, AdminAuthError } from "@/lib/auth/admin";
-import { ingestOne } from "@/lib/ingest";
+import { ingestOne, pdfToText } from "@/lib/ingest";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
 export const maxDuration = 60;
 
-const SOURCE_TYPES = ["transcript", "call_score", "coaching", "document"];
+// Extensions we can turn into text here. PDFs go through pdfToText(); the rest
+// are read as UTF-8. Anything else is rejected before touching the DB.
+const TEXT_EXTENSIONS = [".md", ".markdown", ".txt", ".text"];
+const ALLOWED_LABEL = ".md, .markdown, .txt, .pdf";
+
+// Hard upload ceiling. file.arrayBuffer() buffers the whole file into memory, so
+// an unbounded upload is a memory/DoS vector — cap it BEFORE reading any bytes.
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // 25 MB
+
+function extOf(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 ? name.slice(dot).toLowerCase() : "";
+}
 
 export async function POST(req: Request) {
   let admin;
@@ -34,35 +52,59 @@ export async function POST(req: Request) {
     return Response.json({ error: err.message }, { status: err.status ?? 401 });
   }
 
-  let body: Record<string, unknown>;
+  // --- Pull the file out of the multipart form ------------------------------
+  let form: FormData;
   try {
-    body = (await req.json()) as Record<string, unknown>;
+    form = await req.formData();
   } catch {
-    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+    return Response.json({ error: "Expected multipart/form-data" }, { status: 400 });
   }
 
-  const sourceType = typeof body.sourceType === "string" ? body.sourceType.trim() : "";
-  const text = typeof body.text === "string" ? body.text : "";
-  const title =
-    typeof body.title === "string" && body.title.trim() ? body.title.trim() : null;
-  const uri = typeof body.uri === "string" && body.uri.trim() ? body.uri.trim() : null;
-  const metadata =
-    body.metadata && typeof body.metadata === "object"
-      ? (body.metadata as Record<string, unknown>)
-      : {};
-  const collectionIds = Array.isArray(body.collectionIds)
-    ? (body.collectionIds as unknown[]).filter((x): x is string => typeof x === "string")
-    : [];
+  const file = form.get("file");
+  if (!(file instanceof File)) {
+    return Response.json({ error: "No file provided (field 'file')" }, { status: 400 });
+  }
 
-  // --- Validation -----------------------------------------------------------
-  if (!SOURCE_TYPES.includes(sourceType)) {
+  const name = file.name || "upload";
+  const ext = extOf(name);
+  const mime = file.type || "application/octet-stream";
+
+  // Reject oversized uploads before buffering them into memory (413).
+  if (file.size > MAX_UPLOAD_BYTES) {
     return Response.json(
-      { error: `sourceType must be one of: ${SOURCE_TYPES.join(", ")}` },
-      { status: 400 }
+      {
+        error: `File is too large (${Math.ceil(file.size / (1024 * 1024))} MB). Maximum is ${
+          MAX_UPLOAD_BYTES / (1024 * 1024)
+        } MB.`,
+      },
+      { status: 413 }
     );
   }
+
+  // --- Turn raw bytes into text --------------------------------------------
+  let text: string;
+  try {
+    if (ext === ".pdf") {
+      const buffer = Buffer.from(await file.arrayBuffer());
+      text = await pdfToText(buffer);
+    } else if (TEXT_EXTENSIONS.includes(ext)) {
+      text = await file.text();
+    } else {
+      return Response.json(
+        { error: `Unsupported file type '${ext || name}'. Allowed: ${ALLOWED_LABEL}` },
+        { status: 415 }
+      );
+    }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "Could not read file";
+    return Response.json({ error: message }, { status: 422 });
+  }
+
   if (!text.trim()) {
-    return Response.json({ error: "text is empty" }, { status: 400 });
+    return Response.json(
+      { error: "No readable text found in the file" },
+      { status: 422 }
+    );
   }
 
   const db = supabaseAdmin();
@@ -77,12 +119,10 @@ export async function POST(req: Request) {
   try {
     const res = await ingestOne(db, {
       orgId: admin.orgId,
-      sourceType,
-      title,
+      sourceType: "document",
+      title: name,
       text,
-      uri,
-      metadata: { ...metadata, uploaded_by: admin.email },
-      collectionIds,
+      metadata: { mime, filename: name, uploaded_by: admin.email },
     });
 
     await db
