@@ -17,7 +17,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { supabaseAdmin } from "@/lib/supabase";
 import { serializeRecord } from "@/lib/chunking";
-import { ingestOne } from "@/app/api/ingest/route";
+import { ingestOne } from "@/lib/ingest";
 
 export interface DataSourceRow {
   id: string;

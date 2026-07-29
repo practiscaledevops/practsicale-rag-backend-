@@ -16,7 +16,7 @@
 
 import { supabaseAdmin } from "@/lib/supabase";
 import { requireAdmin, AdminAuthError } from "@/lib/auth/admin";
-import { ingestOne } from "@/app/api/ingest/route";
+import { ingestOne } from "@/lib/ingest";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
