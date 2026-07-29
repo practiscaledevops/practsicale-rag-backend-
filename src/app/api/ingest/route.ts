@@ -73,6 +73,7 @@ export async function POST(req: Request) {
 
     return Response.json({ documentId: res.documentId, chunks: res.chunks, skipped: res.skipped });
   } catch (e) {
+    console.error("[ingest] failed:", e);
     const message = e instanceof Error ? e.message : "ingest failed";
     await db
       .from("ingestion_runs")

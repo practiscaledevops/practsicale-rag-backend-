@@ -30,18 +30,28 @@ const approxTokens = (s: string) => Math.ceil(s.length / 4);
 // Recursive character split with overlap. Baseline for documents and markdown.
 export function splitRecursive(text: string, targetTokens = 450, overlap = 60): string[] {
   const targetChars = targetTokens * 4;
-  const overlapChars = overlap * 4;
+  // Overlap must be smaller than the window, or the cursor can never move
+  // forward. Clamp it so a mis-tuned call can't wedge the loop.
+  const overlapChars = Math.min(overlap * 4, targetChars - 1);
   const out: string[] = [];
   let i = 0;
   while (i < text.length) {
     let end = Math.min(i + targetChars, text.length);
-    // try to break on a paragraph or sentence boundary
+    // Prefer breaking on a paragraph or sentence boundary within the window.
     const slice = text.slice(i, end);
     const lastBreak = Math.max(slice.lastIndexOf("\n\n"), slice.lastIndexOf(". "));
     if (lastBreak > targetChars * 0.5 && end < text.length) end = i + lastBreak + 1;
+
     out.push(text.slice(i, end).trim());
-    i = end - overlapChars;
-    if (i < 0) i = 0;
+
+    // Reached the end of the text — done. (Without this the last window,
+    // whose `end` equals text.length, would re-slice the same tail forever.)
+    if (end >= text.length) break;
+
+    // Advance with overlap, but guarantee forward progress: if the overlapped
+    // cursor wouldn't move past where we started this window, jump to `end`.
+    const next = end - overlapChars;
+    i = next > i ? next : end;
   }
   return out.filter(Boolean);
 }
