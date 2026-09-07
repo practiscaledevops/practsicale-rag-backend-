@@ -51,20 +51,23 @@ export async function GET() {
 
   const db = supabaseAdmin();
 
-  const { data, error } = await db
-    .from("ingestion_runs")
-    .select(SELECT)
-    .eq("org_id", admin.orgId)
-    .order("started_at", { ascending: false })
-    .limit(LIMIT);
+  // Runs and the source id->name map are independent — fetch them in parallel
+  // rather than waiting on one before starting the other.
+  const [runsRes, srcRes] = await Promise.all([
+    db
+      .from("ingestion_runs")
+      .select(SELECT)
+      .eq("org_id", admin.orgId)
+      .order("started_at", { ascending: false })
+      .limit(LIMIT),
+    db.from("data_sources").select("id, name").eq("org_id", admin.orgId),
+  ]);
 
+  const { data, error } = runsRes;
   if (error) return Response.json({ error: error.message }, { status: 500 });
 
   // Resolve data_source_id -> name so the monitor can show a human label.
-  const { data: srcRows } = await db
-    .from("data_sources")
-    .select("id, name")
-    .eq("org_id", admin.orgId);
+  const srcRows = srcRes.data;
   const nameById = new Map<string, string>();
   for (const s of srcRows ?? []) nameById.set(s.id as string, s.name as string);
 

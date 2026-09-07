@@ -17,6 +17,20 @@ import {
 } from "@/components/ui/Card";
 
 /**
+ * Only honor a `redirectTo` that is a same-origin, absolute PATH. Anything else
+ * — an absolute URL (`https://evil.com`), a protocol-relative URL (`//evil.com`),
+ * a backslash trick (`/\evil.com`), or a `javascript:`/`data:` scheme — is a
+ * post-login open-redirect / phishing vector, so we fall back to /dashboard.
+ */
+function safeRedirect(target: string | null): string {
+  if (!target) return "/dashboard";
+  // Must start with a single "/" and not begin a scheme/host.
+  if (!target.startsWith("/")) return "/dashboard";
+  if (target.startsWith("//") || target.startsWith("/\\")) return "/dashboard";
+  return target;
+}
+
+/**
  * Public sign-in page. Authenticates against Supabase Auth with email +
  * password using the @supabase/ssr browser client, which writes the session
  * cookie the server and middleware read. On success we go to the requested
@@ -25,7 +39,7 @@ import {
 function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
-  const redirectTo = params.get("redirectTo") || "/dashboard";
+  const redirectTo = safeRedirect(params.get("redirectTo"));
 
   const demo = process.env.NEXT_PUBLIC_DEMO_MODE === "1";
   const [email, setEmail] = React.useState(demo ? "demo@practiscale.co" : "");

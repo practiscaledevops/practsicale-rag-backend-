@@ -63,7 +63,14 @@ export async function expandParents(chunks: RetrievedChunk[]): Promise<Retrieved
   const parentIds = chunks.map((c) => c.parent_id).filter(Boolean) as string[];
   if (parentIds.length === 0) return chunks;
   const db = supabaseAdmin();
-  const { data } = await db.from("chunks").select("*").in("id", parentIds);
+  // Select only the fields the pipeline uses — never `*`, which would pull each
+  // parent's 1024-float embedding vector (heavy, and it must never leak client-
+  // side). parent_id is derived from already org-scoped chunks, so these ids
+  // never cross tenants.
+  const { data } = await db
+    .from("chunks")
+    .select("id, content, metadata, document_id, parent_id, source_type")
+    .in("id", parentIds);
   const parents = (data ?? []) as RetrievedChunk[];
   const byId = new Map(parents.map((p) => [p.id, p]));
   return chunks.map((c) => (c.parent_id && byId.get(c.parent_id)) || c);

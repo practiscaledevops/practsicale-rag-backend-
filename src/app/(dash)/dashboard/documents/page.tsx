@@ -7,6 +7,11 @@ import { DocumentsClient, type DocumentRow } from "./DocumentsClient";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic"; // always reflect current documents
 
+// Documents scale with ingested records (a pull sync writes one document per
+// record), so bound the list. 1000 comfortably covers a single-org back office;
+// pagination is the follow-up if a tenant ever outgrows it.
+const LIST_LIMIT = 1000;
+
 // Embedded aggregate: PostgREST returns chunks as [{ count: n }] per document.
 interface RawDoc {
   id: string;
@@ -26,7 +31,8 @@ export default async function DocumentsPage() {
     .from("documents")
     .select("id, title, source_type, uri, created_at, chunks(count)")
     .eq("org_id", admin.orgId)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .limit(LIST_LIMIT);
 
   const documents: DocumentRow[] = ((data as RawDoc[]) ?? []).map((d) => ({
     id: d.id,

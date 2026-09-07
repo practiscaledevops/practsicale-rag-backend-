@@ -104,7 +104,7 @@ export default function AdminsPage() {
       />
 
       {error && (
-        <Alert tone="danger" title="Something went wrong" className="mb-6">
+        <Alert tone="danger" title="Couldn't load admins" className="mb-6">
           {error}
         </Alert>
       )}

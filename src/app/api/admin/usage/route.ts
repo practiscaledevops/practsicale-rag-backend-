@@ -68,24 +68,25 @@ export async function GET(req: Request) {
 
   const db = supabaseAdmin();
 
-  // Pull the raw events for the window (capped) and aggregate in memory. A cap
-  // keeps a single request bounded; heavier reporting would move to SQL rollups.
-  const { data, error } = await db
-    .from("usage_events")
-    .select("api_key_id, kind, model, tier, input_tokens, output_tokens, cost_usd, created_at")
-    .eq("org_id", admin.orgId)
-    .gte("created_at", sinceIso)
-    .order("created_at", { ascending: true })
-    .limit(50_000);
+  // Pull the raw events for the window (capped) and the key id->name map in
+  // parallel — the name lookup doesn't depend on the events. A cap keeps a
+  // single request bounded; heavier reporting would move to SQL rollups.
+  const [eventsRes, keysRes] = await Promise.all([
+    db
+      .from("usage_events")
+      .select("api_key_id, kind, model, tier, input_tokens, output_tokens, cost_usd, created_at")
+      .eq("org_id", admin.orgId)
+      .gte("created_at", sinceIso)
+      .order("created_at", { ascending: true })
+      .limit(50_000),
+    db.from("api_keys").select("id, name, key_prefix").eq("org_id", admin.orgId),
+  ]);
 
-  if (error) return Response.json({ error: error.message }, { status: 500 });
-  const rows = (data ?? []) as UsageRow[];
+  if (eventsRes.error) return Response.json({ error: eventsRes.error.message }, { status: 500 });
+  const rows = (eventsRes.data ?? []) as UsageRow[];
 
   // Key id -> display name, so the by-key breakdown is human-readable.
-  const { data: keyRows } = await db
-    .from("api_keys")
-    .select("id, name, key_prefix")
-    .eq("org_id", admin.orgId);
+  const keyRows = keysRes.data;
   const keyName = new Map<string, string>();
   for (const k of keyRows ?? []) {
     keyName.set(k.id as string, (k.name as string) || (k.key_prefix as string) || (k.id as string).slice(0, 8));

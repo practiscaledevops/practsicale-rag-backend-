@@ -32,19 +32,21 @@ export default async function ProcessingPage() {
 
   const db = supabaseAdmin();
 
-  const { data, error } = await db
-    .from("ingestion_runs")
-    .select(SELECT)
-    .eq("org_id", admin.orgId)
-    .order("started_at", { ascending: false })
-    .limit(LIMIT);
+  // Runs and the source id->name map are independent, so fetch them together
+  // instead of one after the other. The demo client can't embed joins, so the
+  // name lookup is a second query rather than a PostgREST join.
+  const [runsRes, srcRes] = await Promise.all([
+    db
+      .from("ingestion_runs")
+      .select(SELECT)
+      .eq("org_id", admin.orgId)
+      .order("started_at", { ascending: false })
+      .limit(LIMIT),
+    db.from("data_sources").select("id, name").eq("org_id", admin.orgId),
+  ]);
+  const { data, error } = runsRes;
+  const srcRows = srcRes.data;
 
-  // Resolve data_source_id -> name with a second query (the demo client cannot
-  // embed joins), so each run can show a readable source label.
-  const { data: srcRows } = await db
-    .from("data_sources")
-    .select("id, name")
-    .eq("org_id", admin.orgId);
   const nameById = new Map<string, string>();
   for (const s of (srcRows as { id: string; name: string }[]) ?? []) {
     nameById.set(s.id, s.name);

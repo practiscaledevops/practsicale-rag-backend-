@@ -83,17 +83,22 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 
   const db = supabaseAdmin();
 
-  // Both sides must live in the caller's org before we link them.
-  if (!(await collectionInOrg(db, admin.orgId, collectionId))) {
+  // Both sides must live in the caller's org before we link them. The two
+  // checks are independent, so run them together; the 404 precedence
+  // (collection first) is unchanged.
+  const [collectionOk, docRes] = await Promise.all([
+    collectionInOrg(db, admin.orgId, collectionId),
+    db
+      .from("documents")
+      .select("id")
+      .eq("id", documentId)
+      .eq("org_id", admin.orgId)
+      .maybeSingle(),
+  ]);
+  if (!collectionOk) {
     return Response.json({ error: "Collection not found" }, { status: 404 });
   }
-  const { data: doc } = await db
-    .from("documents")
-    .select("id")
-    .eq("id", documentId)
-    .eq("org_id", admin.orgId)
-    .maybeSingle();
-  if (!doc) return Response.json({ error: "Document not found" }, { status: 404 });
+  if (!docRes.data) return Response.json({ error: "Document not found" }, { status: 404 });
 
   // Upsert the membership (PK is (document_id, collection_id)); re-adding is a
   // harmless no-op rather than a 409.

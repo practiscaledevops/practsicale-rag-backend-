@@ -15,6 +15,11 @@ export const preferredRegion = ["sin1"];
 // Embedded aggregate: PostgREST returns chunks as [{ count: n }] for each doc.
 const SELECT = "id, title, source_type, uri, created_at, chunks(count)";
 
+// Documents scale with ingested records (a pull sync writes one document per
+// record), so bound the list. 1000 comfortably covers a single-org back office;
+// pagination is the follow-up if a tenant ever outgrows it.
+const LIST_LIMIT = 1000;
+
 interface DocRow {
   id: string;
   title: string | null;
@@ -38,7 +43,8 @@ export async function GET() {
     .from("documents")
     .select(SELECT)
     .eq("org_id", admin.orgId)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .limit(LIST_LIMIT);
 
   if (error) return Response.json({ error: error.message }, { status: 500 });
 

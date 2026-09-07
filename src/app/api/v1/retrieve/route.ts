@@ -29,11 +29,18 @@ export async function POST(req: Request) {
     return Response.json({ error: "query (string) is required" }, { status: 400 });
   }
 
+  // Clamp the caller-supplied candidate pool: an unbounded matchCount would let a
+  // key force an arbitrarily heavy DB scan (cost / DoS). 1..100, default 40.
+  const rawMatch = Number(matchCount);
+  const boundedMatch = Number.isFinite(rawMatch)
+    ? Math.min(100, Math.max(1, Math.floor(rawMatch)))
+    : 40;
+
   const candidates = await hybridSearchScoped({
     orgId: ctx.orgId,
     query,
     scope: scopeFilters(ctx.key),
-    matchCount: matchCount ?? 40,
+    matchCount: boundedMatch,
   });
   const reranked = await rerank(query, candidates, 8);
   const results = expand ? await expandParents(reranked) : reranked;

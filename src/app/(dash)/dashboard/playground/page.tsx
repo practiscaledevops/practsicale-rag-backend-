@@ -142,7 +142,7 @@ export default function PlaygroundPage() {
         }
       }
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Something went wrong");
+      setError(e instanceof Error ? e.message : "The request failed. Please try again.");
       // Drop the empty assistant placeholder if nothing streamed.
       setMessages((prev) => {
         const last = prev[prev.length - 1];

@@ -136,7 +136,12 @@ export async function POST(req: Request) {
 export async function PATCH(req: Request) {
   let admin;
   try {
-    admin = await requireAdmin("members");
+    // Mutating members (permissions / active flag / role) requires the WRITE
+    // grant — not merely any presence on "members". Otherwise a member holding
+    // only members:read could edit permissions (including their own) and
+    // escalate privileges. Role changes are further restricted to super_admin
+    // below.
+    admin = await requireAdmin("members:write");
   } catch (e) {
     const err = e as AdminAuthError;
     return Response.json({ error: err.message }, { status: err.status ?? 401 });

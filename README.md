@@ -1,8 +1,8 @@
-# Practiscale AI Enterprise System
+# Practiscale Brain
 
-A worldwide, cost-controlled, knowledge-grounded AI platform built on Vercel and Supabase, powered by Claude and OpenAI, grounded in your own data.
+The back office and RAG database behind Practiscale, built on Next.js, Vercel, and Supabase. It ingests your data, retrieves the relevant pieces at query time, and answers with Claude or OpenAI — grounded in your own content, not fine-tuned.
 
-It provides a shared retrieval brain that powers a chatbot, a content generator, and a public API, all reading from one Supabase database with pgvector.
+The Brain is the hub: a chatbot, a content generator, and a public API all read from one Supabase + pgvector store through scoped keys.
 
 ## Quick start
 
