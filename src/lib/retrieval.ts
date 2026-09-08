@@ -29,8 +29,17 @@ export async function hybridSearchScoped(opts: {
 }): Promise<RetrievedChunk[]> {
   const db = supabaseAdmin();
   const query_embedding = await embed(opts.query);
+  // When no embeddings provider is configured, embed() returns a zero vector.
+  // In that case the semantic leg is pure noise (all distances equal), so we
+  // turn it OFF (semantic_weight 0) and let the lexical leg decide — otherwise
+  // arbitrary chunks outrank real keyword matches.
+  const hasVector = query_embedding.some((v) => v !== 0);
+
   const params: Record<string, unknown> = {
     p_org_id: opts.orgId,
+    // AND the terms (websearch default). Verbose questions are distilled to clean
+    // keywords by the query-rewrite stage first, so ANDing stays precise —
+    // e.g. "James Anderson" matches only his calls, not every consultant named James.
     query_text: opts.query,
     query_embedding,
     p_source_types: opts.sourceTypes ?? opts.scope.sourceTypes,
@@ -41,7 +50,8 @@ export async function hybridSearchScoped(opts: {
     match_count: opts.matchCount ?? 60,
   };
   if (typeof opts.fullTextWeight === "number") params.full_text_weight = opts.fullTextWeight;
-  if (typeof opts.semanticWeight === "number") params.semantic_weight = opts.semanticWeight;
+  if (!hasVector) params.semantic_weight = 0;
+  else if (typeof opts.semanticWeight === "number") params.semantic_weight = opts.semanticWeight;
   if (typeof opts.rrfK === "number") params.rrf_k = opts.rrfK;
 
   const { data, error } = await db.rpc("hybrid_search_scoped", params);

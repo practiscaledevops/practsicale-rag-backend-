@@ -52,11 +52,15 @@ export async function runRetrieval(opts: {
   const emit = opts.onStatus ?? (() => {});
   const { features, retrieval } = settings;
 
-  // SPEED: query rewrite only helps follow-ups (resolving "it"/"that" against
-  // prior turns). On the first message there is nothing to resolve, so we skip
-  // the extra LLM round-trip entirely — a direct time-to-first-token win.
+  // Query rewrite earns its keep in two cases:
+  //   1. follow-ups — resolve "it"/"that" against prior turns, AND
+  //   2. long/conversational first questions — distil "write a story on our
+  //      consultant James Anderson how he is doing" down to the key search terms,
+  //      so keyword retrieval isn't drowned by common words. Short, direct first
+  //      questions skip it (they retrieve fine and stay fast).
   const priorTurns = history.filter((m) => m.role === "user" || m.role === "assistant").length;
-  const willRewrite = features.queryRewrite && priorTurns > 1;
+  const wordCount = query.trim().split(/\s+/).filter(Boolean).length;
+  const willRewrite = features.queryRewrite && (priorTurns > 1 || wordCount > 6);
 
   // Load only the prompts the enabled stages need (one query).
   const needed: string[] = [];

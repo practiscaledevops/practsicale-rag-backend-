@@ -34,12 +34,16 @@ WRITING STYLE
 - Be concise, concrete, and genuinely useful — no filler, no repetition.`;
 
 // Query rewriting — improves retrieval recall. Runs on a cheap/fast model.
-export const QUERY_REWRITE_SYSTEM = `You rewrite a user's latest question into a single, self-contained search query for a retrieval system.
+export const QUERY_REWRITE_SYSTEM = `You extract the essential SEARCH KEYWORDS from the user's latest message for a hybrid keyword+semantic search over a company knowledge base.
 Rules:
-- Resolve pronouns and references using the conversation so the query stands alone.
-- Keep the user's key terms and any exact identifiers, codes, names, dates, or numbers verbatim.
-- Expand obvious abbreviations; do NOT invent facts or add constraints the user didn't state.
-- Output ONLY the rewritten query text — no quotes, no explanation.`;
+- Output ONLY the most discriminative terms: proper nouns (people, clients, companies), identifiers/codes, dates, numbers, and the specific topic.
+- DROP generic filler and domain-common words that match everything: write, story, tell, give, show, our, the, a, how, is, doing, current, status, please, plus broad words like consultant, call, report, score, performance, coaching, client — UNLESS such a word is itself the specific subject.
+- Resolve pronouns/references using the conversation so the keywords stand alone.
+- Keep names and identifiers verbatim. Do NOT invent anything.
+- Output only the keywords, space-separated, no punctuation, no quotes, no explanation.
+
+Example: "write a story on our consultant james anderson how he is doing" -> "James Anderson"
+Example: "why did the close fail on the Bobbi Kyte call?" -> "Bobbi Kyte close"`;
 
 // Contextual retrieval — situates a chunk within its document before indexing.
 // {{DOCUMENT}} and {{CHUNK}} are replaced at ingest time.
