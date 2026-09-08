@@ -85,7 +85,10 @@ export const DEFAULT_SETTINGS: RagSettings = {
     queryRewrite: true,
     contextualRetrieval: true,
     llmRouter: false,
-    faithfulnessCheck: true,
+    // Off by default for speed: ground-or-refuse + citation validation already
+    // guard hallucination instantly and for free. Turn on in Settings for a
+    // stricter (but slower, +1 LLM call per answer) post-generation check.
+    faithfulnessCheck: false,
     groundOrRefuse: true,
     rerank: true,
   },

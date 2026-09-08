@@ -17,8 +17,11 @@
 
 import { readFileSync } from "fs";
 import { createClient } from "@supabase/supabase-js";
-import { generateApiKey } from "../src/lib/auth/keys";
-import { runPull, type DataSourceRow } from "../src/lib/connectors/pull";
+// NOTE: runPull / generateApiKey are dynamically imported INSIDE main() — they
+// transitively load src/lib/supabase.ts, which builds a Supabase client at import
+// time from env. Static imports are hoisted and would run BEFORE loadEnvLocal(),
+// so the env must be loaded first, then these imported lazily.
+import type { DataSourceRow } from "../src/lib/connectors/pull";
 
 // Minimal .env.local loader (tsx doesn't auto-load it, and we avoid a dotenv dep).
 // Only sets vars that aren't already in the environment.
@@ -72,6 +75,9 @@ async function main() {
   required("SETUP_ADMIN_EMAIL", ADMIN_EMAIL);
   required("SETUP_ADMIN_PASSWORD", ADMIN_PASSWORD);
   required("SCORING_API_KEY", SCORING_KEY);
+
+  // Lazy imports (after env is loaded) — see the note at the top of this file.
+  const { generateApiKey } = await import("../src/lib/auth/keys");
 
   const db = createClient(URL!, SERVICE!, { auth: { persistSession: false } });
 
@@ -205,6 +211,7 @@ async function main() {
   // 5) Optional first backfill sync -------------------------------------
   if (DO_SYNC) {
     console.log("→ Running initial backfill sync (this calls the scoring API + embeds)…");
+    const { runPull } = await import("../src/lib/connectors/pull");
     const res = await runPull(src as DataSourceRow, { trigger: "manual", db });
     console.log(
       `✓ Sync ${res.status}: fetched ${res.recordsFetched}, ingested ${res.documentsIngested}, ` +

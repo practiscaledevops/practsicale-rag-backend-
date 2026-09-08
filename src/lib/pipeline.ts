@@ -27,9 +27,17 @@ export interface RetrievalOutput {
   sourceTypes: string[];
 }
 
+/** A real-time pipeline stage, surfaced to the UI as an activity indicator. */
+export interface RetrievalStatus {
+  stage: "planning" | "rewriting" | "routing" | "searching" | "reranking" | "expanding" | "retrieved";
+  label: string;
+  count?: number;
+}
+
 /**
  * Run the full retrieval pipeline within a key/admin scope.
  * `history` is used only for query rewriting (reference resolution).
+ * `onStatus` (optional) receives each stage as it happens, for a live UI.
  */
 export async function runRetrieval(opts: {
   orgId: string;
@@ -37,20 +45,29 @@ export async function runRetrieval(opts: {
   history?: ChatTurn[];
   scope: ScopeFilters;
   settings: RagSettings;
+  onStatus?: (s: RetrievalStatus) => void;
 }): Promise<RetrievalOutput> {
   const { orgId, query, scope, settings } = opts;
   const history = opts.history ?? [];
+  const emit = opts.onStatus ?? (() => {});
   const { features, retrieval } = settings;
+
+  // SPEED: query rewrite only helps follow-ups (resolving "it"/"that" against
+  // prior turns). On the first message there is nothing to resolve, so we skip
+  // the extra LLM round-trip entirely — a direct time-to-first-token win.
+  const priorTurns = history.filter((m) => m.role === "user" || m.role === "assistant").length;
+  const willRewrite = features.queryRewrite && priorTurns > 1;
 
   // Load only the prompts the enabled stages need (one query).
   const needed: string[] = [];
-  if (features.queryRewrite) needed.push("query_rewrite");
+  if (willRewrite) needed.push("query_rewrite");
   if (features.llmRouter) needed.push("router");
   const prompts = needed.length ? await getActivePrompts(orgId, needed) : {};
 
-  // 1. Query rewrite (recall ↑).
+  // 1. Query rewrite (recall ↑), follow-ups only.
   let effectiveQuery = query;
-  if (features.queryRewrite) {
+  if (willRewrite) {
+    emit({ stage: "rewriting", label: "Refining the question" });
     effectiveQuery = await rewriteQuery(query, history, prompts.query_rewrite, "fast");
   }
   const rewritten = effectiveQuery !== query;
@@ -58,6 +75,7 @@ export async function runRetrieval(opts: {
   // 2. Route → narrow source types WITHIN the key's allowed set (never widen).
   let sourceTypes = scope.sourceTypes;
   if (features.llmRouter) {
+    emit({ stage: "routing", label: "Choosing sources" });
     const picked = await routeQueryLLM(effectiveQuery, prompts.router, "fast");
     if (picked.length > 0) {
       const allowed = scope.sourceTypes;
@@ -68,6 +86,7 @@ export async function runRetrieval(opts: {
   }
 
   // 3. Hybrid search (scope-enforced in SQL) with configured RRF weights.
+  emit({ stage: "searching", label: "Searching the knowledge base" });
   const candidates = await hybridSearchScoped({
     orgId,
     query: effectiveQuery,
@@ -80,12 +99,21 @@ export async function runRetrieval(opts: {
   });
 
   // 4. Rerank (or just take the top-N).
-  const top = features.rerank
-    ? await rerank(effectiveQuery, candidates, retrieval.rerankTopN)
-    : candidates.slice(0, retrieval.rerankTopN);
+  let top: RetrievedChunk[];
+  if (features.rerank && candidates.length > retrieval.rerankTopN) {
+    emit({ stage: "reranking", label: "Ranking the best matches" });
+    top = await rerank(effectiveQuery, candidates, retrieval.rerankTopN);
+  } else {
+    top = candidates.slice(0, retrieval.rerankTopN);
+  }
 
   // 5. Parent expansion (fuller context for grounding).
-  const chunks = retrieval.expandParents ? await expandParents(top) : top;
+  let chunks = top;
+  if (retrieval.expandParents && top.some((c) => c.parent_id)) {
+    emit({ stage: "expanding", label: "Gathering full context" });
+    chunks = await expandParents(top);
+  }
 
+  emit({ stage: "retrieved", label: `Retrieved ${chunks.length} source${chunks.length === 1 ? "" : "s"}`, count: chunks.length });
   return { chunks, effectiveQuery, rewritten, sourceTypes };
 }
