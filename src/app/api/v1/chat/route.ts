@@ -75,13 +75,15 @@ export async function POST(req: Request) {
   const lastUser = [...(messages ?? [])].reverse().find((m: any) => m.role === "user");
   const query: string = lastUser?.content ?? "";
 
-  const [{ settings }, groundingPrompt] = await Promise.all([
+  // Resolve settings, the grounding prompt, and the model CONCURRENTLY to shave
+  // sequential DB round-trips off time-to-first-token. The client always sends a
+  // tier/model, so getModel doesn't need to wait on settings; the "recommended"
+  // fallback only applies if a request omits the tier entirely.
+  const [{ settings }, groundingPrompt, resolvedModel] = await Promise.all([
     loadSettings(ctx.orgId),
     getActivePrompt(ctx.orgId, "chat"),
+    getModel(tier ?? "recommended"),
   ]);
-
-  // Resolve the model up front so metering + headers agree on what ran.
-  const resolvedModel = await getModel(tier ?? settings.generation.defaultTier);
   const modelId = resolvedModel.modelId;
   const provider = modelId.startsWith("claude") ? "anthropic" : "openai";
   const startedAt = Date.now();
