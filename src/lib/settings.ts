@@ -89,7 +89,11 @@ export const DEFAULT_SETTINGS: RagSettings = {
     // guard hallucination instantly and for free. Turn on in Settings for a
     // stricter (but slower, +1 LLM call per answer) post-generation check.
     faithfulnessCheck: false,
-    groundOrRefuse: true,
+    // Off by default: this is a general-purpose assistant, not a data-only bot.
+    // With this off, an empty retrieval doesn't hard-refuse — the assistant still
+    // helps (brainstorm, content, ideas) and only avoids fabricating specific
+    // company facts (enforced by the prompt). Turn ON for a strict data-only mode.
+    groundOrRefuse: false,
     rerank: true,
   },
   generation: {
