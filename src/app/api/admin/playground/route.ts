@@ -1,27 +1,30 @@
 // /api/admin/playground — internal test chat for admins.
 //
-// This is the dashboard's grounded playground. Unlike the public /api/v1/chat
-// (which is authenticated by a scoped psk_ key and restricted to that key's
-// data), this route authenticates with the ADMIN SESSION and searches the FULL
+// The dashboard's grounded playground. Unlike the public /api/v1/chat (scoped by
+// a psk_ key), this authenticates with the ADMIN SESSION and searches the FULL
 // org — no scope restriction — so an admin can probe everything the Brain knows.
-// An optional source_type filter narrows retrieval for testing.
+// It runs the SAME settings-driven pipeline and DB-editable prompts as the public
+// API, so what an admin tests here is what consumers get.
 //
 // SECURITY: org_id is resolved SERVER-SIDE from the admin session (never from the
 // request body). Retrieved content is passed to the model as data, never as
-// instructions (see GROUNDED_SYSTEM).
+// instructions (see the grounding prompt).
 //
 //   GET   -> { sourceTypes: string[] }  distinct source types present in the org
-//   POST  -> NDJSON stream. First line is the citations payload, then one line
-//            per text delta:
+//   POST  -> NDJSON stream:
 //              {"type":"citations","citations":[...]}
-//              {"type":"text","value":"..."}
-//            (a trailing {"type":"error"} line is emitted if generation fails)
+//              {"type":"text","value":"..."}            (repeated)
+//              {"type":"grounding","grounded":bool,"unsupported":[...],"fabricated":[...]}
+//              {"type":"error","message":"..."}         (only on failure)
 
 import { streamText, convertToCoreMessages } from "ai";
-import { modelForTier } from "@/lib/llm";
-import { hybridSearchScoped, expandParents } from "@/lib/retrieval";
-import { rerank } from "@/lib/rerank";
-import { GROUNDED_SYSTEM, buildContext } from "@/lib/prompts";
+import { getModel } from "@/lib/llm";
+import { buildContext } from "@/lib/prompts";
+import { getActivePrompt } from "@/lib/prompts-db";
+import { loadSettings } from "@/lib/settings";
+import { runRetrieval } from "@/lib/pipeline";
+import { validateCitations, checkFaithfulness } from "@/lib/faithfulness";
+import { costUsd } from "@/lib/pricing";
 import { supabaseAdmin } from "@/lib/supabase";
 import { requireAdmin, AdminAuthError } from "@/lib/auth/admin";
 import { isDemo } from "@/lib/demo/mode";
@@ -30,22 +33,6 @@ import { demoAnswerText } from "@/lib/demo/stream";
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
 export const maxDuration = 60;
-
-// Rough per-1M-token pricing (USD) for metering playground traffic so Analytics
-// reflects it. Estimates only — the source of truth for billing is the provider.
-const PRICING: Record<string, { in: number; out: number }> = {
-  "claude-haiku": { in: 1, out: 5 },
-  "claude-sonnet": { in: 3, out: 15 },
-  "claude-opus": { in: 15, out: 75 },
-  "gpt-4o-mini": { in: 0.15, out: 0.6 },
-  "gpt-4o": { in: 2.5, out: 10 },
-};
-
-function estimateCostUsd(model: string, inputTokens: number, outputTokens: number): number {
-  const match = Object.keys(PRICING).find((k) => model.startsWith(k));
-  const p = match ? PRICING[match] : { in: 3, out: 15 }; // default ~= Sonnet
-  return (inputTokens / 1e6) * p.in + (outputTokens / 1e6) * p.out;
-}
 
 function isTierName(v: unknown): v is "fast" | "recommended" | "max" {
   return v === "fast" || v === "recommended" || v === "max";
@@ -88,45 +75,54 @@ export async function POST(req: Request) {
   const sourceType: string | undefined =
     typeof body?.sourceType === "string" && body.sourceType ? body.sourceType : undefined;
 
+  const history = messages.filter(
+    (m: { role?: string }) => m.role === "user" || m.role === "assistant"
+  );
   const lastUser = [...messages].reverse().find((m: { role?: string }) => m.role === "user");
   const query: string = lastUser?.content ?? "";
 
-  // Full-org retrieval (no key scope). An empty array on a dimension means "no
-  // restriction" (matches hybrid_search_scoped); the optional source_type narrows.
-  const candidates = await hybridSearchScoped({
+  const [{ settings }, groundingPrompt] = await Promise.all([
+    loadSettings(admin.orgId),
+    getActivePrompt(admin.orgId, "chat"),
+  ]);
+
+  // Full-org retrieval (no key scope). The optional source_type narrows testing.
+  const { chunks } = await runRetrieval({
     orgId: admin.orgId,
     query,
+    history,
     scope: {
       sourceTypes: sourceType ? [sourceType] : [],
       dataSourceIds: [],
       collectionIds: [],
     },
-    matchCount: 40,
+    settings,
   });
-  const top = await rerank(query, candidates, 8);
-  const expanded = await expandParents(top);
-  const context = buildContext(expanded);
 
-  const citations = expanded.map((c) => ({
+  const retrievedIds = chunks.map((c) => c.id);
+  const context = buildContext(chunks);
+  const citations = chunks.map((c) => ({
     id: c.id,
     document_id: c.document_id,
     source_type: c.source_type ?? null,
     snippet: c.content.length > 240 ? c.content.slice(0, 240) + "…" : c.content,
   }));
 
-  // DEMO MODE: retrieval + citations above are real (fake store), but there is
-  // no model key — stream a canned grounded answer in the same NDJSON protocol.
+  const encoder = new TextEncoder();
+  const line = (obj: unknown) => encoder.encode(JSON.stringify(obj) + "\n");
+
+  // DEMO MODE: real retrieval (fake store), canned answer, same NDJSON protocol.
   if (isDemo()) {
-    const encoder = new TextEncoder();
     const answer = demoAnswerText(query);
     const parts = answer.match(/\S+\s*/g) ?? [answer];
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
-        controller.enqueue(encoder.encode(JSON.stringify({ type: "citations", citations }) + "\n"));
+        controller.enqueue(line({ type: "citations", citations }));
         for (const p of parts) {
-          controller.enqueue(encoder.encode(JSON.stringify({ type: "text", value: p }) + "\n"));
+          controller.enqueue(line({ type: "text", value: p }));
           await new Promise((r) => setTimeout(r, 22));
         }
+        controller.enqueue(line({ type: "grounding", grounded: true, unsupported: [], fabricated: [] }));
         controller.close();
       },
     });
@@ -135,17 +131,34 @@ export async function POST(req: Request) {
     });
   }
 
-  const resolvedModel = modelForTier(tier);
+  // Ground-or-refuse guard: nothing retrieved ⇒ refuse without a model call.
+  if (settings.features.groundOrRefuse && chunks.length === 0) {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(line({ type: "citations", citations: [] }));
+        controller.enqueue(
+          line({ type: "text", value: "I don't have information about that in this org's data, so I can't answer." })
+        );
+        controller.enqueue(line({ type: "grounding", grounded: true, unsupported: [], fabricated: [] }));
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      headers: { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" },
+    });
+  }
+
+  const resolvedModel = await getModel(tier ?? settings.generation.defaultTier);
   const modelId = resolvedModel.modelId;
   const startedAt = Date.now();
 
-  // Stable content first (system + context), user's messages last -> caching-friendly.
   const result = streamText({
     model: resolvedModel,
-    system: `${GROUNDED_SYSTEM}\n\nContext:\n${context}`,
+    system: `${groundingPrompt}\n\nContext:\n${context}`,
     messages: convertToCoreMessages(messages),
+    temperature: settings.generation.temperature,
+    maxTokens: settings.generation.maxTokens,
     onFinish({ usage }) {
-      // Fire-and-forget metering so playground traffic shows in Analytics too.
       const inputTokens = usage?.promptTokens ?? 0;
       const outputTokens = usage?.completionTokens ?? 0;
       void supabaseAdmin()
@@ -156,37 +169,43 @@ export async function POST(req: Request) {
           api_key_id: null,
           kind: "chat",
           model: modelId,
-          tier: isTierName(tier) ? tier : "recommended",
+          tier: isTierName(tier) ? tier : settings.generation.defaultTier,
           input_tokens: inputTokens,
           output_tokens: outputTokens,
-          cost_usd: estimateCostUsd(modelId, inputTokens, outputTokens),
+          cost_usd: costUsd(modelId, inputTokens, outputTokens),
           latency_ms: Date.now() - startedAt,
         });
     },
   });
 
-  const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      // Citations first so the UI can render sources before the answer streams.
-      controller.enqueue(encoder.encode(JSON.stringify({ type: "citations", citations }) + "\n"));
+      controller.enqueue(line({ type: "citations", citations }));
+      let answer = "";
       try {
         for await (const delta of result.textStream) {
-          controller.enqueue(encoder.encode(JSON.stringify({ type: "text", value: delta }) + "\n"));
+          answer += delta;
+          controller.enqueue(line({ type: "text", value: delta }));
         }
+        // Anti-hallucination verdict after the answer completes.
+        const { fabricated } = validateCitations(answer, retrievedIds);
+        let grounded = true;
+        let unsupported: string[] = [];
+        if (settings.features.faithfulnessCheck) {
+          const fp = await getActivePrompt(admin.orgId, "faithfulness");
+          const verdict = await checkFaithfulness(context, answer, fp, "fast");
+          grounded = verdict.grounded;
+          unsupported = verdict.unsupported;
+        }
+        controller.enqueue(line({ type: "grounding", grounded, unsupported, fabricated }));
       } catch {
-        controller.enqueue(
-          encoder.encode(JSON.stringify({ type: "error", message: "Generation failed." }) + "\n")
-        );
+        controller.enqueue(line({ type: "error", message: "Generation failed." }));
       }
       controller.close();
     },
   });
 
   return new Response(stream, {
-    headers: {
-      "content-type": "application/x-ndjson; charset=utf-8",
-      "cache-control": "no-store",
-    },
+    headers: { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" },
   });
 }

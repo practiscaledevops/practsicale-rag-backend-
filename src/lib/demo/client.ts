@@ -14,8 +14,9 @@ class Query implements PromiseLike<{ data: any; error: any; count?: number }> {
   private filters: Filter[] = [];
   private _orders: { col: string; asc: boolean }[] = [];
   private _limit?: number;
-  private _op: "select" | "insert" | "update" | "delete" = "select";
+  private _op: "select" | "insert" | "update" | "delete" | "upsert" = "select";
   private _payload: any;
+  private _onConflict: string[] = [];
   private _count = false;
   private _head = false;
 
@@ -39,6 +40,14 @@ class Query implements PromiseLike<{ data: any; error: any; count?: number }> {
   update(obj: Row) {
     this._op = "update";
     this._payload = obj;
+    return this;
+  }
+  upsert(rows: Row | Row[], opts?: { onConflict?: string }) {
+    this._op = "upsert";
+    this._payload = Array.isArray(rows) ? rows : [rows];
+    this._onConflict = opts?.onConflict
+      ? opts.onConflict.split(",").map((s) => s.trim()).filter(Boolean)
+      : ["id"];
     return this;
   }
   delete() {
@@ -81,6 +90,24 @@ class Query implements PromiseLike<{ data: any; error: any; count?: number }> {
       const updated: Row[] = [];
       for (const r of arr) if (this.matches(r)) { Object.assign(r, this._payload); updated.push(r); }
       return { data: updated, error: null };
+    }
+    if (this._op === "upsert") {
+      const now = new Date().toISOString();
+      const result: Row[] = [];
+      for (const row of this._payload as Row[]) {
+        const existing = arr.find((r) =>
+          this._onConflict.every((c) => r[c] === row[c])
+        );
+        if (existing) {
+          Object.assign(existing, row);
+          result.push(existing);
+        } else {
+          const created = { id: genId(), created_at: now, ...row };
+          arr.push(created);
+          result.push(created);
+        }
+      }
+      return { data: result, error: null };
     }
     if (this._op === "delete") {
       const kept: Row[] = [], removed: Row[] = [];

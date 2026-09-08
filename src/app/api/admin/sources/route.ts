@@ -25,7 +25,7 @@ const HTTP_METHODS = ["GET", "POST"];
 // var NAME) — it is not a secret, and admins need to see which var a source uses.
 const SELECT =
   "id, name, slug, source_type, kind, endpoint_url, http_method, auth_type, " +
-  "auth_secret_ref, records_path, cursor_field, cursor_value, schedule_cron, " +
+  "auth_secret_ref, records_path, record_id_field, cursor_field, cursor_param, cursor_value, query_params, schedule_cron, " +
   "is_active, last_run_at, last_status, created_at";
 
 /** URL-safe slug from a display name (used for the unique (org_id, slug) key). */
@@ -82,7 +82,9 @@ export async function POST(req: Request) {
   const authType = asStr(body.auth_type) || "none";
   const authSecretRef = asStr(body.auth_secret_ref);
   const recordsPath = asStr(body.records_path);
+  const recordIdField = asStr(body.record_id_field);
   const cursorField = asStr(body.cursor_field);
+  const cursorParam = asStr(body.cursor_param);
   const scheduleCron = asStr(body.schedule_cron);
 
   // --- Validation -----------------------------------------------------------
@@ -137,7 +139,9 @@ export async function POST(req: Request) {
       auth_type: authType,
       auth_secret_ref: authSecretRef || null,
       records_path: recordsPath || null,
+      record_id_field: recordIdField || null,
       cursor_field: cursorField || null,
+      cursor_param: cursorParam || null,
       schedule_cron: scheduleCron || null,
       created_by: admin.memberId,
     })

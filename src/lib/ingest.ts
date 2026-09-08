@@ -10,6 +10,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { chunkDocument, type Chunk } from "@/lib/chunking";
 import { embedMany } from "@/lib/embeddings";
 import { redactPII } from "@/lib/redact";
+import { loadSettings } from "@/lib/settings";
+import { getActivePrompt } from "@/lib/prompts-db";
+import { contextualizeChunks } from "@/lib/contextualize";
 import { createHash } from "crypto";
 // Import the internal lib entry (not the package root) to avoid pdf-parse's
 // module-level "debug" branch that tries to read a bundled test PDF from disk.
@@ -90,14 +93,42 @@ export async function ingestOne(db: SupabaseClient, params: IngestParams): Promi
       );
     }
 
-    // Chunk -> embed -> persist, stamping scope columns so retrieval can filter fast.
+    // Chunk -> (contextualize) -> embed -> persist, stamping scope columns so
+    // retrieval can filter fast.
     const chunks = chunkDocument(cleanText, sourceType, metadata ?? {});
-    const vectors = await embedMany(chunks.map((c) => c.content));
 
-    const baseRow = (c: Chunk, embedding: number[]) => ({
+    // Contextual retrieval (Anthropic): generate a short blurb situating each
+    // chunk in the document, prepended before embedding + full-text indexing.
+    // Gated by the org's settings; graceful (empty contexts) on demo/outage/cap.
+    const { settings } = await loadSettings(orgId, db);
+    let contexts: string[] = chunks.map(() => "");
+    if (settings.features.contextualRetrieval) {
+      const systemPrompt = await getActivePrompt(orgId, "context_generation");
+      contexts = await contextualizeChunks(
+        cleanText,
+        chunks.map((c) => c.content),
+        {
+          systemPrompt,
+          tier: settings.contextual.tier,
+          concurrency: settings.contextual.concurrency,
+          maxChunksPerDoc: settings.contextual.maxChunksPerDoc,
+        }
+      );
+    }
+
+    // Embed context + content together (contextual embeddings); store `content`
+    // raw so citations/snippets stay clean, and `context` separately (the fts
+    // generated column covers both — see migration 0010).
+    const embedInputs = chunks.map((c, i) =>
+      contexts[i] ? `${contexts[i]}\n\n${c.content}` : c.content
+    );
+    const vectors = await embedMany(embedInputs);
+
+    const baseRow = (c: Chunk, embedding: number[], context: string) => ({
       org_id: orgId,
       document_id: documentId,
       content: c.content,
+      context: context || null,
       metadata: c.metadata,
       embedding,
       source_type: sourceType,
@@ -105,7 +136,11 @@ export async function ingestOne(db: SupabaseClient, params: IngestParams): Promi
       collection_ids: cols,
     });
 
-    const withVec = chunks.map((c, i) => ({ chunk: c, embedding: vectors[i] }));
+    const withVec = chunks.map((c, i) => ({
+      chunk: c,
+      embedding: vectors[i],
+      context: contexts[i] ?? "",
+    }));
     const parents = withVec.filter((x) => x.chunk.metadata?.is_parent);
     const children = withVec.filter((x) => !x.chunk.metadata?.is_parent);
 
@@ -115,7 +150,7 @@ export async function ingestOne(db: SupabaseClient, params: IngestParams): Promi
     if (parents.length > 0) {
       const { data: pRows, error: pErr } = await db
         .from("chunks")
-        .insert(parents.map((p) => baseRow(p.chunk, p.embedding)))
+        .insert(parents.map((p) => baseRow(p.chunk, p.embedding, p.context)))
         .select("id");
       if (pErr) throw new Error(pErr.message);
       (pRows ?? []).forEach((row: { id: string }, i: number) => {
@@ -126,7 +161,7 @@ export async function ingestOne(db: SupabaseClient, params: IngestParams): Promi
 
     // 2) Persist children with parent_id resolved from the local parentKey.
     const childRows = children.map((x) => {
-      const row = baseRow(x.chunk, x.embedding) as Record<string, unknown>;
+      const row = baseRow(x.chunk, x.embedding, x.context) as Record<string, unknown>;
       const pk = x.chunk.parentKey;
       row.parent_id = pk ? parentIdByKey.get(pk) ?? null : null;
       return row;

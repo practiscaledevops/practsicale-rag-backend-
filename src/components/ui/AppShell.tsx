@@ -16,6 +16,7 @@ import {
   BarChart3,
   FlaskConical,
   Users,
+  SlidersHorizontal,
   LogOut,
   Menu,
   X,
@@ -48,6 +49,7 @@ const NAV: NavItem[] = [
   { href: "/dashboard/connectors", label: "Connectors", icon: Plug },
   { href: "/dashboard/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/dashboard/playground", label: "Playground", icon: FlaskConical },
+  { href: "/dashboard/settings", label: "Settings", icon: SlidersHorizontal },
   { href: "/dashboard/admins", label: "Admins", icon: Users },
 ];
 

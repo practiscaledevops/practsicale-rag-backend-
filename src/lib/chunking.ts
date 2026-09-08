@@ -68,6 +68,13 @@ export function serializeRecord(record: Record<string, unknown>): string {
 
   const parts: string[] = [];
 
+  // A long free-text report (e.g. the call-scoring `full_report` markdown) is
+  // kept VERBATIM and appended after the structured summary, so downstream
+  // chunking can split it structure-aware instead of flattening 16KB into one
+  // giant clause. Captured here and excluded from the generic key:value loop.
+  const reportRaw = firstDefined(record, ["full_report", "report", "full_report_md", "analysis"]);
+  const report = typeof reportRaw === "string" && reportRaw.trim() ? reportRaw.trim() : "";
+
   // Preferred, human-readable framing for call-scoring / coaching records.
   const id = firstDefined(record, ["id", "call_id", "callId", "record_id"]);
   const score = firstDefined(record, ["score", "overall_score", "rating"]);
@@ -92,6 +99,8 @@ export function serializeRecord(record: Record<string, unknown>): string {
     "strengths", "strong_points", "did_well",
     "weaknesses", "weak_points", "areas_to_improve",
     "recommendation", "recommendations", "coaching", "advice",
+    // The verbatim report is appended separately, not flattened.
+    "full_report", "report", "full_report_md", "analysis",
   ]);
 
   // Generic clauses for every remaining populated field.
@@ -103,7 +112,9 @@ export function serializeRecord(record: Record<string, unknown>): string {
     parts.push(`${humanizeKey(k)}: ${value}`);
   }
 
-  return parts.join("; ");
+  const summary = parts.join("; ");
+  // Structured summary first, then the verbatim report (markdown preserved).
+  return report ? `${summary}\n\n${report}` : summary;
 }
 
 // Entry point: choose the strategy by source type. Returns child chunks (searched)
@@ -114,9 +125,25 @@ export function chunkDocument(
   metadata: Record<string, unknown> = {}
 ): Chunk[] {
   if (sourceType === "call_score" || sourceType === "coaching") {
-    // One record -> one chunk. `text` is already the serialized record (see
-    // serializeRecord, called by the ingest/pull path).
     const content = text.trim();
+    // If the record carries a markdown report (ATX headings), split it: a compact
+    // structured-summary chunk (great for "what did X score") + structure-aware
+    // chunks of the report (great for "why did the close fail"). Otherwise a
+    // small structured record stays a single chunk.
+    const headingIdx = content.search(/^#{1,6}\s+\S/m);
+    if (headingIdx !== -1) {
+      const summary = content.slice(0, headingIdx).trim();
+      const report = content.slice(headingIdx);
+      const chunks: Chunk[] = [];
+      if (summary) {
+        chunks.push({
+          content: summary,
+          metadata: { ...metadata, source_type: sourceType, is_summary: true, tokens: approxTokens(summary) },
+        });
+      }
+      chunks.push(...chunkMarkdown(report, metadata, sourceType));
+      return chunks;
+    }
     return [{ content, metadata: { ...metadata, source_type: sourceType, tokens: approxTokens(content) } }];
   }
 
@@ -167,7 +194,11 @@ function splitMarkdownSections(text: string): Section[] {
   return sections;
 }
 
-function chunkMarkdown(text: string, metadata: Record<string, unknown>): Chunk[] {
+function chunkMarkdown(
+  text: string,
+  metadata: Record<string, unknown>,
+  sourceType = "document"
+): Chunk[] {
   const sections = splitMarkdownSections(text);
   const out: Chunk[] = [];
   let parentN = 0;
@@ -181,7 +212,7 @@ function chunkMarkdown(text: string, metadata: Record<string, unknown>): Chunk[]
       const content = childTexts[0] ?? section.body;
       out.push({
         content,
-        metadata: { ...metadata, source_type: "document", heading: headingText, tokens: approxTokens(content) },
+        metadata: { ...metadata, source_type: sourceType, heading: headingText, tokens: approxTokens(content) },
       });
       continue;
     }
@@ -193,7 +224,7 @@ function chunkMarkdown(text: string, metadata: Record<string, unknown>): Chunk[]
       content: section.body,
       metadata: {
         ...metadata,
-        source_type: "document",
+        source_type: sourceType,
         is_parent: true,
         heading: headingText,
         tokens: approxTokens(section.body),
@@ -203,7 +234,7 @@ function chunkMarkdown(text: string, metadata: Record<string, unknown>): Chunk[]
       out.push({
         content,
         parentKey,
-        metadata: { ...metadata, source_type: "document", heading: headingText, tokens: approxTokens(content) },
+        metadata: { ...metadata, source_type: sourceType, heading: headingText, tokens: approxTokens(content) },
       });
     }
   }
@@ -212,7 +243,7 @@ function chunkMarkdown(text: string, metadata: Record<string, unknown>): Chunk[]
   if (out.length === 0) {
     return splitRecursive(text).map((content) => ({
       content,
-      metadata: { ...metadata, source_type: "document", tokens: approxTokens(content) },
+      metadata: { ...metadata, source_type: sourceType, tokens: approxTokens(content) },
     }));
   }
   return out;

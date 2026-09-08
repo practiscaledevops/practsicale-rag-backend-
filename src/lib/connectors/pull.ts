@@ -18,6 +18,49 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { supabaseAdmin } from "@/lib/supabase";
 import { serializeRecord } from "@/lib/chunking";
 import { ingestOne } from "@/lib/ingest";
+import { redactPII } from "@/lib/redact";
+
+// Big free-text fields belong in the chunked BODY, not in metadata.
+const OMIT_FROM_META = new Set(["full_report", "report", "full_report_md", "analysis"]);
+
+/**
+ * Structured metadata to stamp on every chunk of a record: the record's scalar
+ * fields (consultant, score, band, outcome, dates…) plus small nested objects
+ * (phase_scores, talk_ratio). This powers consultant-level retrieval/filtering
+ * and scoring analytics. String values are PII-redacted (emails/phones), and the
+ * large report text is excluded (it lives in the searchable body).
+ */
+function recordMetadata(rec: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(rec)) {
+    if (OMIT_FROM_META.has(k) || v == null || v === "") continue;
+    if (typeof v === "string") {
+      out[k] = redactPII(v);
+    } else if (typeof v === "number" || typeof v === "boolean") {
+      out[k] = v;
+    } else {
+      // Keep small nested objects/arrays (e.g. phase_scores); cap the size.
+      try {
+        if (JSON.stringify(v).length <= 3000) out[k] = v;
+      } catch {
+        /* skip unserializable */
+      }
+    }
+  }
+  return out;
+}
+
+/** A readable document title from well-known scoring fields, else a fallback. */
+function buildTitle(rec: Record<string, unknown>, sourceType: string, recordId?: string): string {
+  const consultant = rec.consultant_name ?? rec.consultant ?? null;
+  const prospect = rec.prospect_name ?? null;
+  const score = rec.overall_score ?? rec.score ?? null;
+  if (consultant || prospect || score != null) {
+    const who = [consultant, prospect].filter(Boolean).join(" → ");
+    return `${who || sourceType}${score != null ? ` (${score})` : ""}`.trim();
+  }
+  return recordId ? `${sourceType} ${recordId}` : sourceType;
+}
 
 export interface DataSourceRow {
   id: string;
@@ -35,6 +78,8 @@ export interface DataSourceRow {
   records_path: string | null;
   record_id_field: string | null;
   cursor_field: string | null;
+  /** Query-param NAME to send the watermark under (falls back to cursor_field). */
+  cursor_param: string | null;
   cursor_value: string | null;
 }
 
@@ -110,18 +155,21 @@ export async function runPull(
       const text = serializeRecord(rec);
       if (!text.trim()) continue;
 
-      const title = recordId ? `${source.source_type} ${recordId}` : source.name;
+      const title = buildTitle(rec, source.source_type, recordId);
 
       const res = await ingestOne(db, {
         orgId: source.org_id,
         sourceType: source.source_type,
         title,
         text,
-        // Provenance in metadata; kept structurally separate from any instruction.
+        // Provenance + the record's structured fields (consultant, score, band,
+        // outcome, phase_scores…). Kept structurally separate from any instruction;
+        // string values are PII-redacted in recordMetadata().
         metadata: {
           data_source: source.name,
           data_source_slug: source.slug ?? null,
           source_record_id: recordId ?? null,
+          ...recordMetadata(rec),
         },
         dataSourceId: source.id,
       });
@@ -184,36 +232,61 @@ export async function runPull(
 
 // ---- HTTP + extraction helpers -----------------------------------------------
 
+const MAX_PAGES = 40; // safety cap: MAX_PAGES * limit records per sync
+
 async function fetchRecords(source: DataSourceRow): Promise<unknown[]> {
-  const url = new URL(source.endpoint_url as string);
-
-  // Static query params from config.
-  for (const [k, v] of Object.entries(source.query_params ?? {})) {
-    if (v != null) url.searchParams.set(k, String(v));
-  }
-  // Incremental cursor: pass the last watermark as a query param named for the
-  // cursor field, so the source can return only newer rows.
-  if (source.cursor_field && source.cursor_value) {
-    url.searchParams.set(source.cursor_field, source.cursor_value);
-  }
-
   const headers = buildHeaders(source);
   const method = (source.http_method ?? "GET").toUpperCase();
 
-  const res = await fetch(url.toString(), { method, headers });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`pull request failed: ${res.status} ${res.statusText} ${body.slice(0, 200)}`);
+  // Base params: static config + the incremental watermark. The watermark is
+  // sent under cursor_param when set, else under cursor_field (back-compat).
+  const baseParams = new URLSearchParams();
+  for (const [k, v] of Object.entries(source.query_params ?? {})) {
+    if (v != null) baseParams.set(k, String(v));
+  }
+  const cursorParamName = source.cursor_param ?? source.cursor_field;
+  if (cursorParamName && source.cursor_value) {
+    baseParams.set(cursorParamName, source.cursor_value);
   }
 
-  const json: unknown = await res.json();
-  const extracted = getPath(json, source.records_path);
+  // Auto-paging: when a numeric `limit` is configured, keep fetching with an
+  // increasing `offset` until a short page (or the safety cap) — so a first-run
+  // backfill pulls everything, not just the first page.
+  const limit = Number(baseParams.get("limit"));
+  const paged = Number.isFinite(limit) && limit > 0;
+  let offset = Number(baseParams.get("offset")) || 0;
 
-  if (Array.isArray(extracted)) return extracted;
-  if (extracted && typeof extracted === "object") return [extracted]; // single-object response
-  throw new Error(
-    `records_path '${source.records_path ?? "(root)"}' did not resolve to an array or object`
-  );
+  const all: unknown[] = [];
+  for (let page = 0; page < (paged ? MAX_PAGES : 1); page++) {
+    const url = new URL(source.endpoint_url as string);
+    for (const [k, v] of baseParams) url.searchParams.set(k, v);
+    if (paged) url.searchParams.set("offset", String(offset));
+
+    const res = await fetch(url.toString(), { method, headers });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`pull request failed: ${res.status} ${res.statusText} ${body.slice(0, 200)}`);
+    }
+    const json: unknown = await res.json();
+    const extracted = getPath(json, source.records_path);
+
+    const batch = Array.isArray(extracted)
+      ? extracted
+      : extracted && typeof extracted === "object"
+        ? [extracted]
+        : null;
+    if (batch === null) {
+      throw new Error(
+        `records_path '${source.records_path ?? "(root)"}' did not resolve to an array or object`
+      );
+    }
+
+    all.push(...batch);
+    if (!paged || batch.length < limit) break; // last page reached
+    offset += limit;
+  }
+
+  return all;
 }
 
 function buildHeaders(source: DataSourceRow): Record<string, string> {

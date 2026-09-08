@@ -1210,3 +1210,64 @@ create index concurrently if not exists usage_events_org_created_idx
 -- ============================================================================
 --  END OF brain_full.sql
 -- ============================================================================
+
+-- ============================================================================
+--  §13  RAG CONFIG + CONTEXTUAL RETRIEVAL (from migration 0010)
+-- ============================================================================
+-- Appended so a fresh single-file setup includes: the org-scoped app_settings
+-- store (dashboard-editable pipeline config), the chunks.context column with an
+-- FTS index that covers context + content (Anthropic contextual retrieval), and
+-- usage_events grounding columns. Idempotent.
+
+create table if not exists public.app_settings (
+  org_id     uuid primary key,
+  data       jsonb not null default '{}',
+  updated_at timestamptz not null default now(),
+  updated_by uuid
+);
+alter table public.app_settings enable row level security;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename = 'app_settings' and policyname = 'org_isolation_app_settings'
+  ) then
+    create policy org_isolation_app_settings on public.app_settings
+      using (org_id = (auth.jwt() ->> 'org_id')::uuid)
+      with check (org_id = (auth.jwt() ->> 'org_id')::uuid);
+  end if;
+end $$;
+
+alter table public.chunks add column if not exists context text;
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_name = 'chunks' and column_name = 'fts'
+  ) then
+    execute 'alter table public.chunks drop column fts';
+  end if;
+end $$;
+alter table public.chunks
+  add column fts tsvector
+  generated always as (to_tsvector('english', coalesce(context, '') || ' ' || content)) stored;
+create index if not exists chunks_fts_idx on public.chunks using gin(fts);
+
+alter table public.prompts add column if not exists updated_at timestamptz not null default now();
+alter table public.usage_events add column if not exists grounded boolean;
+alter table public.usage_events add column if not exists fabricated_citations int;
+
+alter table public.data_sources add column if not exists cursor_param text;
+
+-- ============================================================================
+--  §14  PROVIDER API KEYS (from migration 0012) — dashboard-editable, encrypted
+-- ============================================================================
+create table if not exists public.provider_secrets (
+  provider   text primary key,
+  ciphertext text not null,
+  last4      text,
+  updated_at timestamptz not null default now(),
+  updated_by uuid
+);
+alter table public.provider_secrets enable row level security;
+-- No policies: locked to the service role; never exposed to browser roles.

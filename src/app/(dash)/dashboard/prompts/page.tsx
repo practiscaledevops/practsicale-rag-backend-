@@ -12,7 +12,7 @@
 
 import * as React from "react";
 import { Plus, Loader2, Check, Sparkles, MessageSquareText } from "lucide-react";
-import { GROUNDED_SYSTEM } from "@/lib/prompts";
+import { PROMPT_USE_CASES, defaultPromptFor } from "@/lib/prompts";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -188,7 +188,7 @@ export default function PromptsPage() {
   }
 
   const useCases = [...groups.keys()];
-  const isChatEditor = editorUseCase.trim() === "chat";
+  const knownUseCase = PROMPT_USE_CASES.some((u) => u.key === editorUseCase.trim());
 
   return (
     <div>
@@ -221,40 +221,38 @@ export default function PromptsPage() {
         </div>
       ) : (
         <div className="space-y-6">
-          {/* The built-in default for the 'chat' use case. Always shown so admins
-              can see the grounding rules that ship in the app and fork from them.
-              It applies whenever no saved 'chat' version is active. */}
-          <Card>
-            <CardHeader className="flex flex-row items-start justify-between gap-4">
-              <div className="min-w-0">
-                <CardTitle className="flex items-center gap-2">
-                  <MessageSquareText className="h-4 w-4 text-accent" aria-hidden="true" />
-                  Built-in default · chat
-                </CardTitle>
-                <CardDescription>
-                  The grounding rules compiled into the app. In effect for the{" "}
-                  <code className="font-mono">chat</code> use case whenever no saved
-                  version is active. Save a version to override it.
-                </CardDescription>
-              </div>
-              <Badge tone="neutral">built-in</Badge>
-            </CardHeader>
-            <CardContent>
-              <Preview content={GROUNDED_SYSTEM} />
-            </CardContent>
-            <CardFooter>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  openEditor({ useCase: "chat", content: GROUNDED_SYSTEM, activate: false })
-                }
-              >
-                <Sparkles className="h-4 w-4" aria-hidden="true" />
-                Create version from default
-              </Button>
-            </CardFooter>
-          </Card>
+          {/* Built-in defaults for EVERY pipeline stage. Each is editable: fork it
+              into a saved, activatable version. A stage uses its saved active
+              version when one exists, otherwise this compiled default. */}
+          {PROMPT_USE_CASES.map((uc) => (
+            <Card key={uc.key}>
+              <CardHeader className="flex flex-row items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <CardTitle className="flex items-center gap-2">
+                    <MessageSquareText className="h-4 w-4 text-accent" aria-hidden="true" />
+                    {uc.label} · <code className="font-mono text-sm">{uc.key}</code>
+                  </CardTitle>
+                  <CardDescription>{uc.description}</CardDescription>
+                </div>
+                <Badge tone={groups.get(uc.key)?.some((v) => v.is_active) ? "success" : "neutral"}>
+                  {groups.get(uc.key)?.some((v) => v.is_active) ? "overridden" : "built-in"}
+                </Badge>
+              </CardHeader>
+              <CardContent>
+                <Preview content={uc.default} />
+              </CardContent>
+              <CardFooter>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => openEditor({ useCase: uc.key, content: uc.default, activate: false })}
+                >
+                  <Sparkles className="h-4 w-4" aria-hidden="true" />
+                  Create version from default
+                </Button>
+              </CardFooter>
+            </Card>
+          ))}
 
           {/* Saved prompts, grouped by use_case. */}
           {useCases.length === 0 ? (
@@ -404,10 +402,10 @@ export default function PromptsPage() {
             <div className="space-y-1.5">
               <div className="flex items-center justify-between gap-2">
                 <Label htmlFor="content">Content</Label>
-                {isChatEditor && (
+                {knownUseCase && (
                   <button
                     type="button"
-                    onClick={() => setEditorContent(GROUNDED_SYSTEM)}
+                    onClick={() => setEditorContent(defaultPromptFor(editorUseCase.trim()))}
                     className="text-xs font-medium text-accent hover:underline"
                   >
                     Load built-in default

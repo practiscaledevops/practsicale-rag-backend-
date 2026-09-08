@@ -25,6 +25,9 @@ import { requireAdmin, AdminAuthError } from "@/lib/auth/admin";
 import { chunkDocument, type Chunk } from "@/lib/chunking";
 import { embedMany } from "@/lib/embeddings";
 import { redactPII } from "@/lib/redact";
+import { loadSettings } from "@/lib/settings";
+import { getActivePrompt } from "@/lib/prompts-db";
+import { contextualizeChunks } from "@/lib/contextualize";
 import { createHash } from "crypto";
 
 export const runtime = "nodejs";
@@ -130,9 +133,30 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
 
   let chunks: Chunk[];
   let vectors: number[][];
+  let contexts: string[];
   try {
     chunks = chunkDocument(cleanText, sourceType, chunkMeta);
-    vectors = await embedMany(chunks.map((c) => c.content));
+
+    // Contextual retrieval (gated by settings; graceful on demo/outage/cap).
+    const { settings } = await loadSettings(admin.orgId, db);
+    contexts = chunks.map(() => "");
+    if (settings.features.contextualRetrieval) {
+      const systemPrompt = await getActivePrompt(admin.orgId, "context_generation");
+      contexts = await contextualizeChunks(
+        cleanText,
+        chunks.map((c) => c.content),
+        {
+          systemPrompt,
+          tier: settings.contextual.tier,
+          concurrency: settings.contextual.concurrency,
+          maxChunksPerDoc: settings.contextual.maxChunksPerDoc,
+        }
+      );
+    }
+    const embedInputs = chunks.map((c, i) =>
+      contexts[i] ? `${contexts[i]}\n\n${c.content}` : c.content
+    );
+    vectors = await embedMany(embedInputs);
   } catch (e) {
     const message = e instanceof Error ? e.message : "embedding failed";
     return Response.json({ error: message }, { status: 502 });
@@ -150,10 +174,11 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
     .select("id")
     .single();
 
-  const baseRow = (c: Chunk, embedding: number[]) => ({
+  const baseRow = (c: Chunk, embedding: number[], context: string) => ({
     org_id: admin.orgId,
     document_id: id,
     content: c.content,
+    context: context || null,
     metadata: c.metadata,
     embedding,
     source_type: sourceType,
@@ -171,7 +196,7 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
       .eq("document_id", id);
     if (delErr) throw new Error(delErr.message);
 
-    const withVec = chunks.map((c, i) => ({ chunk: c, embedding: vectors[i] }));
+    const withVec = chunks.map((c, i) => ({ chunk: c, embedding: vectors[i], context: contexts[i] ?? "" }));
     const parents = withVec.filter((x) => x.chunk.metadata?.is_parent);
     const children = withVec.filter((x) => !x.chunk.metadata?.is_parent);
 
@@ -180,7 +205,7 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
     if (parents.length > 0) {
       const { data: pRows, error: pErr } = await db
         .from("chunks")
-        .insert(parents.map((p) => baseRow(p.chunk, p.embedding)))
+        .insert(parents.map((p) => baseRow(p.chunk, p.embedding, p.context)))
         .select("id");
       if (pErr) throw new Error(pErr.message);
       (pRows ?? []).forEach((row: { id: string }, i: number) => {
@@ -190,7 +215,7 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
     }
 
     const childRows = children.map((x) => {
-      const row = baseRow(x.chunk, x.embedding) as Record<string, unknown>;
+      const row = baseRow(x.chunk, x.embedding, x.context) as Record<string, unknown>;
       const pk = x.chunk.parentKey;
       row.parent_id = pk ? parentIdByKey.get(pk) ?? null : null;
       return row;

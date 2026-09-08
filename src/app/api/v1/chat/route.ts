@@ -4,21 +4,29 @@
 // Scope: enforced by the key (capability 'chat' + source_types/data_sources/collections).
 // Body:  { messages: [{role, content}], model?: "fast"|"recommended"|"max"|"<id>" }
 //
-// Response: the Vercel AI SDK data stream (toDataStreamResponse). Its `finish`
-// part carries token usage for the consumer app. We ALSO surface the resolved
-// model on two response headers so a consumer can label the turn without parsing
-// the stream:
-//   x-model     resolved model id (e.g. "claude-opus-4-8")
-//   x-provider  "anthropic" | "openai"
-// On finish we meter the call into usage_events (org from ctx, key from ctx.key).
+// Pipeline: the org's editable RagSettings + prompts drive every stage — query
+// rewrite → route → hybrid search → rerank → parent expansion (see lib/pipeline),
+// then a grounded, DB-editable system prompt. When grounding is required and
+// retrieval finds nothing, we REFUSE without calling the model (guaranteed no
+// hallucination, zero generation cost). After the stream finishes we validate the
+// model's citations and (optionally) score faithfulness, and meter the call.
+//
+// Response headers:
+//   x-model       resolved model id (e.g. "claude-opus-4-8")
+//   x-provider    "anthropic" | "openai"
+//   x-context-ids comma-joined retrieved chunk ids (so a consumer can map [id] cites)
+//   x-rewritten   "1" when the query was rewritten for retrieval
 
 import { streamText, convertToCoreMessages } from "ai";
-import { modelForTier } from "@/lib/llm";
-import { hybridSearchScoped, expandParents } from "@/lib/retrieval";
-import { rerank } from "@/lib/rerank";
-import { GROUNDED_SYSTEM, buildContext } from "@/lib/prompts";
+import { getModel } from "@/lib/llm";
+import { buildContext } from "@/lib/prompts";
+import { getActivePrompt } from "@/lib/prompts-db";
+import { loadSettings } from "@/lib/settings";
+import { runRetrieval } from "@/lib/pipeline";
+import { validateCitations, checkFaithfulness } from "@/lib/faithfulness";
 import { resolveContext, AuthError } from "@/lib/auth/context";
 import { requireCapability, scopeFilters } from "@/lib/auth/scope";
+import { checkRateLimit, rateLimitHeaders } from "@/lib/ratelimit";
 import { costUsd } from "@/lib/pricing";
 import { supabaseAdmin } from "@/lib/supabase";
 import { isDemo } from "@/lib/demo/mode";
@@ -30,6 +38,29 @@ export const maxDuration = 60;
 
 function isTierName(v: unknown): v is "fast" | "recommended" | "max" {
   return v === "fast" || v === "recommended" || v === "max";
+}
+
+/** A grounded refusal streamed in the AI SDK data-stream format (no model call). */
+function refusalResponse(headers: Record<string, string>): Response {
+  const text =
+    "I don't have information about that in the knowledge available to me, so I can't answer.";
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const enc = new TextEncoder();
+      // AI SDK data-stream text part: 0:"...."\n
+      controller.enqueue(enc.encode(`0:${JSON.stringify(text)}\n`));
+      // finish part with zero usage.
+      controller.enqueue(
+        enc.encode(
+          `d:${JSON.stringify({ finishReason: "stop", usage: { promptTokens: 0, completionTokens: 0 } })}\n`
+        )
+      );
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    headers: { ...headers, "content-type": "text/plain; charset=utf-8", "x-vercel-ai-data-stream": "v1" },
+  });
 }
 
 export async function POST(req: Request) {
@@ -49,24 +80,65 @@ export async function POST(req: Request) {
     return Response.json({ error: err.message }, { status: err.status ?? 401 });
   }
 
+  // Per-key rate limit (the key's own rate_limit_per_min).
+  const rl = checkRateLimit(ctx.key.id, ctx.key.rate_limit_per_min);
+  if (!rl.ok) {
+    return Response.json(
+      { error: "Rate limit exceeded. Try again shortly." },
+      { status: 429, headers: rateLimitHeaders(rl) }
+    );
+  }
+
   const { messages, model: tier } = await req.json();
+  const history = (messages ?? []).filter(
+    (m: any) => m?.role === "user" || m?.role === "assistant"
+  );
   const lastUser = [...(messages ?? [])].reverse().find((m: any) => m.role === "user");
   const query: string = lastUser?.content ?? "";
 
-  // Retrieve within the key's scope -> rerank -> expand to parent context.
-  // Wider candidate pool (60) than the default so rerank has more to work with.
-  const candidates = await hybridSearchScoped({
+  // Load the org's settings + active grounding prompt (dashboard-editable).
+  const [{ settings }, groundingPrompt] = await Promise.all([
+    loadSettings(ctx.orgId),
+    getActivePrompt(ctx.orgId, "chat"),
+  ]);
+
+  // Run the full, settings-driven retrieval pipeline within the key's scope.
+  const { chunks, rewritten } = await runRetrieval({
     orgId: ctx.orgId,
     query,
+    history,
     scope: scopeFilters(ctx.key),
-    matchCount: 60,
+    settings,
   });
-  const top = await rerank(query, candidates, 8);
-  const context = buildContext(await expandParents(top));
 
-  // Resolve the concrete model (tier name OR explicit id) once, so metering and
-  // the response headers agree on exactly what ran.
-  const resolvedModel = modelForTier(tier);
+  const retrievedIds = chunks.map((c) => c.id);
+  const context = buildContext(chunks);
+
+  const baseHeaders: Record<string, string> = {
+    "x-context-ids": retrievedIds.join(","),
+    "x-rewritten": rewritten ? "1" : "0",
+  };
+
+  // Ground-or-refuse: if there is nothing to ground on, refuse WITHOUT a model
+  // call. Guarantees no hallucination and costs nothing.
+  if (settings.features.groundOrRefuse && chunks.length === 0) {
+    void supabaseAdmin().from("usage_events").insert({
+      org_id: ctx.orgId,
+      api_key_id: ctx.key.id,
+      kind: "chat",
+      model: "none",
+      tier: isTierName(tier) ? tier : settings.generation.defaultTier,
+      input_tokens: 0,
+      output_tokens: 0,
+      cost_usd: 0,
+      latency_ms: 0,
+      grounded: true,
+      fabricated_citations: 0,
+    });
+    return refusalResponse(baseHeaders);
+  }
+
+  const resolvedModel = await getModel(tier ?? settings.generation.defaultTier);
   const modelId = resolvedModel.modelId;
   const provider = modelId.startsWith("claude") ? "anthropic" : "openai";
   const startedAt = Date.now();
@@ -74,13 +146,23 @@ export async function POST(req: Request) {
   // Stable content first (system + context), user's messages last -> caching-friendly.
   const result = streamText({
     model: resolvedModel,
-    system: `${GROUNDED_SYSTEM}\n\nContext:\n${context}`,
+    system: `${groundingPrompt}\n\nContext:\n${context}`,
     messages: convertToCoreMessages(messages ?? []),
-    onFinish({ usage }) {
-      // Fire-and-forget metering. usage_events is org-scoped (ctx.orgId) and
-      // attributed to the calling key (ctx.key.id). Never blocks the response.
+    temperature: settings.generation.temperature,
+    maxTokens: settings.generation.maxTokens,
+    async onFinish({ usage, text }) {
       const inputTokens = usage?.promptTokens ?? 0;
       const outputTokens = usage?.completionTokens ?? 0;
+
+      // Anti-hallucination checks (best-effort; never block the response).
+      const { fabricated } = validateCitations(text ?? "", retrievedIds);
+      let grounded: boolean | null = null;
+      if (settings.features.faithfulnessCheck) {
+        const fp = await getActivePrompt(ctx.orgId, "faithfulness");
+        const verdict = await checkFaithfulness(context, text ?? "", fp, "fast");
+        grounded = verdict.checked ? verdict.grounded : null;
+      }
+
       void supabaseAdmin()
         .from("usage_events")
         .insert({
@@ -88,17 +170,18 @@ export async function POST(req: Request) {
           api_key_id: ctx.key.id,
           kind: "chat",
           model: modelId,
-          tier: isTierName(tier) ? tier : "recommended",
+          tier: isTierName(tier) ? tier : settings.generation.defaultTier,
           input_tokens: inputTokens,
           output_tokens: outputTokens,
           cost_usd: costUsd(modelId, inputTokens, outputTokens),
           latency_ms: Date.now() - startedAt,
+          grounded,
+          fabricated_citations: fabricated.length,
         });
     },
   });
 
-  // Keep the AI SDK data stream (finish part carries usage) and add model headers.
   return result.toDataStreamResponse({
-    headers: { "x-model": modelId, "x-provider": provider },
+    headers: { ...baseHeaders, "x-model": modelId, "x-provider": provider },
   });
 }

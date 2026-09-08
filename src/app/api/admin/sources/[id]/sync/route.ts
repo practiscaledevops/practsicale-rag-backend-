@@ -31,7 +31,7 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
   const { data: source, error } = await db
     .from("data_sources")
     .select(
-      "id, org_id, name, slug, source_type, kind, endpoint_url, http_method, auth_type, auth_secret_ref, headers, query_params, records_path, record_id_field, cursor_field, cursor_value"
+      "id, org_id, name, slug, source_type, kind, endpoint_url, http_method, auth_type, auth_secret_ref, headers, query_params, records_path, record_id_field, cursor_field, cursor_param, cursor_value"
     )
     .eq("id", id)
     .eq("org_id", admin.orgId)

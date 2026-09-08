@@ -1,4 +1,5 @@
 import type { RetrievedChunk } from "./retrieval";
+import { getProviderKey } from "@/lib/secrets";
 
 // Cross-encoder reranking of retrieval candidates with Cohere.
 //
@@ -18,7 +19,7 @@ export async function rerank(
   chunks: RetrievedChunk[],
   topN = 8
 ): Promise<RetrievedChunk[]> {
-  const key = process.env.COHERE_API_KEY;
+  const key = await getProviderKey("cohere");
   if (!key || chunks.length <= topN) return chunks.slice(0, topN);
 
   const res = await fetch("https://api.cohere.com/v2/rerank", {

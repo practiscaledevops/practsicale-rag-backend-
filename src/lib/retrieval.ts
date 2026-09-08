@@ -19,20 +19,32 @@ export async function hybridSearchScoped(opts: {
   query: string;
   scope: ScopeFilters;
   matchCount?: number;
+  /** Optional RRF tuning (from settings); the SQL function defaults them. */
+  fullTextWeight?: number;
+  semanticWeight?: number;
+  rrfK?: number;
+  /** Optional narrowing of source types (e.g. from the router), pre-intersected
+   *  with the key's scope by the caller. Overrides scope.sourceTypes when given. */
+  sourceTypes?: string[];
 }): Promise<RetrievedChunk[]> {
   const db = supabaseAdmin();
   const query_embedding = await embed(opts.query);
-  const { data, error } = await db.rpc("hybrid_search_scoped", {
+  const params: Record<string, unknown> = {
     p_org_id: opts.orgId,
     query_text: opts.query,
     query_embedding,
-    p_source_types: opts.scope.sourceTypes,
+    p_source_types: opts.sourceTypes ?? opts.scope.sourceTypes,
     p_data_source_ids: opts.scope.dataSourceIds,
     p_collection_ids: opts.scope.collectionIds,
     // Wider default candidate pool (60) gives the reranker more to choose from,
     // improving top-k quality. Callers may still pass an explicit matchCount.
     match_count: opts.matchCount ?? 60,
-  });
+  };
+  if (typeof opts.fullTextWeight === "number") params.full_text_weight = opts.fullTextWeight;
+  if (typeof opts.semanticWeight === "number") params.semantic_weight = opts.semanticWeight;
+  if (typeof opts.rrfK === "number") params.rrf_k = opts.rrfK;
+
+  const { data, error } = await db.rpc("hybrid_search_scoped", params);
   if (error) throw error;
   return (data ?? []) as RetrievedChunk[];
 }
