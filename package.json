@@ -11,7 +11,8 @@
     "ingest": "tsx scripts/ingest-file.ts",
     "seed": "tsx scripts/seed.ts",
     "eval": "tsx scripts/eval.ts",
-    "setup:live": "tsx scripts/setup-live.ts"
+    "setup:live": "tsx scripts/setup-live.ts",
+    "ingest:knowledge": "tsx scripts/ingest-knowledge.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

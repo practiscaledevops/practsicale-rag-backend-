@@ -181,8 +181,13 @@ function splitMarkdownSections(text: string): Section[] {
     if (body) sections.push({ heading, body });
   };
 
+  // Split only on top-level headings (# and ##). Deeper sub-headings (###+) stay
+  // as body text within their parent section, so tightly-related content is kept
+  // together — e.g. a product name and its price tiers, or a scorecard phase and
+  // its detail — instead of being orphaned into separate chunks. Long sections
+  // are still sub-split into child chunks by chunkMarkdown's recursive splitter.
   for (const line of lines) {
-    if (/^#{1,6}\s+\S/.test(line)) {
+    if (/^#{1,2}\s+\S/.test(line)) {
       flush();
       heading = line.trim();
       buf = [];

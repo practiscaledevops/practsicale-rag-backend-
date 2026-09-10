@@ -54,9 +54,42 @@ export async function hybridSearchScoped(opts: {
   else if (typeof opts.semanticWeight === "number") params.semantic_weight = opts.semanticWeight;
   if (typeof opts.rrfK === "number") params.rrf_k = opts.rrfK;
 
+  // Pass 1: AND (websearch default) — precise. "James Anderson" matches only his
+  // calls, not every consultant named James.
+  let results = await runSearch(db, params);
+
+  // Pass 2: if AND was too sparse, retry ORing the terms — recall. This rescues
+  // queries where a legitimate term isn't in the target chunk (e.g. "Buildout
+  // pricing" when the price chunk never says the word "pricing"). ts_rank_cd
+  // still ranks chunks matching MORE terms higher, so the right chunk surfaces.
+  if (results.length < 3) {
+    const orText = toOrQuery(opts.query);
+    if (orText && orText !== opts.query) {
+      const orResults = await runSearch(db, { ...params, query_text: orText });
+      if (orResults.length > results.length) results = orResults;
+    }
+  }
+  return results;
+}
+
+async function runSearch(
+  db: ReturnType<typeof supabaseAdmin>,
+  params: Record<string, unknown>
+): Promise<RetrievedChunk[]> {
   const { data, error } = await db.rpc("hybrid_search_scoped", params);
   if (error) throw error;
   return (data ?? []) as RetrievedChunk[];
+}
+
+/** Join a query's significant terms with the websearch OR operator. */
+function toOrQuery(query: string): string {
+  const terms = query
+    .toLowerCase()
+    .split(/\s+/)
+    .map((t) => t.replace(/[^\p{L}\p{N}]+/gu, ""))
+    .filter((t) => t.length > 1 && t !== "or" && t !== "and")
+    .slice(0, 32);
+  return terms.length ? terms.join(" OR ") : query;
 }
 
 // Hybrid retrieval: vector + full text, fused by Reciprocal Rank Fusion in SQL.
