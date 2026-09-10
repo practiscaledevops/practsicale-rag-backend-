@@ -48,8 +48,52 @@ export async function rewriteQuery(
     const rewritten = text.trim();
     // Guard against a model that returns nothing useful or an over-long blob.
     if (!rewritten || rewritten.length > 500) return query;
-    return rewritten;
+    // If the model returned multiple lines (multi-topic), keep the first here;
+    // callers that support multi-query use rewriteQueries() instead.
+    return rewritten.split(/\r?\n/)[0].trim() || query;
   } catch {
     return query;
+  }
+}
+
+/**
+ * Like rewriteQuery, but returns 1-4 focused search queries — one per distinct
+ * topic in a compound question. Enables multi-query retrieval so a question like
+ * "what is PractiScale and who is Afra?" retrieves BOTH the company overview and
+ * the founder profile, instead of collapsing into one keyword blob.
+ * Graceful: demo / errors / trivial input return [query].
+ */
+export async function rewriteQueries(
+  query: string,
+  history: ChatTurn[],
+  systemPrompt: string,
+  tier: "fast" | "recommended" | "max" = "fast"
+): Promise<string[]> {
+  if (isDemo() || !query.trim()) return [query];
+
+  const recent = history
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .slice(-6)
+    .map((m) => `${m.role}: ${m.content}`)
+    .join("\n");
+
+  try {
+    const { text } = await generateText({
+      model: await getModel(tier),
+      system: systemPrompt,
+      prompt: recent
+        ? `Conversation so far:\n${recent}\n\nLatest question: ${query}\n\nSearch queries:`
+        : `Question: ${query}\n\nSearch queries:`,
+      temperature: 0,
+      maxTokens: 160,
+    });
+    const lines = text
+      .split(/\r?\n/)
+      .map((l) => l.replace(/^\s*[-*\d.]+\s*/, "").trim()) // strip any list markers
+      .filter((l) => l.length > 1 && l.length <= 200)
+      .slice(0, 4);
+    return lines.length > 0 ? lines : [query];
+  } catch {
+    return [query];
   }
 }

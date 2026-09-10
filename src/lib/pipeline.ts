@@ -11,7 +11,7 @@
 
 import { hybridSearchScoped, expandParents, type RetrievedChunk } from "@/lib/retrieval";
 import { rerank } from "@/lib/rerank";
-import { rewriteQuery, type ChatTurn } from "@/lib/query-transform";
+import { rewriteQueries, type ChatTurn } from "@/lib/query-transform";
 import { routeQueryLLM } from "@/lib/router";
 import { getActivePrompts } from "@/lib/prompts-db";
 import type { RagSettings } from "@/lib/settings";
@@ -68,19 +68,21 @@ export async function runRetrieval(opts: {
   if (features.llmRouter) needed.push("router");
   const prompts = needed.length ? await getActivePrompts(orgId, needed) : {};
 
-  // 1. Query rewrite (recall ↑), follow-ups only.
-  let effectiveQuery = query;
+  // 1. Query rewrite → one or MORE focused search queries. A compound question
+  //    ("what is PractiScale and who is Afra?") becomes several queries so each
+  //    distinct topic gets retrieved, instead of collapsing into one keyword blob.
+  let queries = [query];
   if (willRewrite) {
     emit({ stage: "rewriting", label: "Refining the question" });
-    effectiveQuery = await rewriteQuery(query, history, prompts.query_rewrite, "fast");
+    queries = await rewriteQueries(query, history, prompts.query_rewrite, "fast");
   }
-  const rewritten = effectiveQuery !== query;
+  const rewritten = queries.length > 1 || queries[0] !== query;
 
   // 2. Route → narrow source types WITHIN the key's allowed set (never widen).
   let sourceTypes = scope.sourceTypes;
   if (features.llmRouter) {
     emit({ stage: "routing", label: "Choosing sources" });
-    const picked = await routeQueryLLM(effectiveQuery, prompts.router, "fast");
+    const picked = await routeQueryLLM(queries[0], prompts.router, "fast");
     if (picked.length > 0) {
       const allowed = scope.sourceTypes;
       const narrowed = allowed.length > 0 ? picked.filter((p) => allowed.includes(p)) : picked;
@@ -89,24 +91,32 @@ export async function runRetrieval(opts: {
     }
   }
 
-  // 3. Hybrid search (scope-enforced in SQL) with configured RRF weights.
-  emit({ stage: "searching", label: "Searching the knowledge base" });
-  const candidates = await hybridSearchScoped({
-    orgId,
-    query: effectiveQuery,
-    scope,
-    sourceTypes,
-    matchCount: retrieval.matchCount,
-    fullTextWeight: retrieval.fullTextWeight,
-    semanticWeight: retrieval.semanticWeight,
-    rrfK: retrieval.rrfK,
+  // 3. Hybrid search per sub-query, then interleave so each topic is represented.
+  emit({
+    stage: "searching",
+    label: queries.length > 1 ? `Searching ${queries.length} topics` : "Searching the knowledge base",
   });
+  const perQuery = await Promise.all(
+    queries.map((q) =>
+      hybridSearchScoped({
+        orgId,
+        query: q,
+        scope,
+        sourceTypes,
+        matchCount: retrieval.matchCount,
+        fullTextWeight: retrieval.fullTextWeight,
+        semanticWeight: retrieval.semanticWeight,
+        rrfK: retrieval.rrfK,
+      })
+    )
+  );
+  const candidates = interleaveDedupe(perQuery, retrieval.matchCount);
 
-  // 4. Rerank (or just take the top-N).
+  // 4. Rerank against the original question (or just take the top-N).
   let top: RetrievedChunk[];
   if (features.rerank && candidates.length > retrieval.rerankTopN) {
     emit({ stage: "reranking", label: "Ranking the best matches" });
-    top = await rerank(effectiveQuery, candidates, retrieval.rerankTopN);
+    top = await rerank(query, candidates, retrieval.rerankTopN);
   } else {
     top = candidates.slice(0, retrieval.rerankTopN);
   }
@@ -119,5 +129,27 @@ export async function runRetrieval(opts: {
   }
 
   emit({ stage: "retrieved", label: `Retrieved ${chunks.length} source${chunks.length === 1 ? "" : "s"}`, count: chunks.length });
-  return { chunks, effectiveQuery, rewritten, sourceTypes };
+  return { chunks, effectiveQuery: queries.join(" | "), rewritten, sourceTypes };
+}
+
+/**
+ * Interleave several ranked result lists round-robin, de-duplicating by chunk id,
+ * up to `limit`. This gives each sub-query (topic) fair representation in the
+ * merged pool rather than letting one topic dominate the top-k.
+ */
+function interleaveDedupe(lists: RetrievedChunk[][], limit: number): RetrievedChunk[] {
+  const seen = new Set<string>();
+  const out: RetrievedChunk[] = [];
+  const maxLen = lists.reduce((m, l) => Math.max(m, l.length), 0);
+  for (let i = 0; i < maxLen && out.length < limit; i++) {
+    for (const list of lists) {
+      const c = list[i];
+      if (c && !seen.has(c.id)) {
+        seen.add(c.id);
+        out.push(c);
+        if (out.length >= limit) break;
+      }
+    }
+  }
+  return out;
 }

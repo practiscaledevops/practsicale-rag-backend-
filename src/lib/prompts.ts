@@ -36,16 +36,23 @@ WRITING STYLE
 - Be concise, concrete, and genuinely useful — no filler, no repetition.`;
 
 // Query rewriting — improves retrieval recall. Runs on a cheap/fast model.
-export const QUERY_REWRITE_SYSTEM = `You extract the essential SEARCH KEYWORDS from the user's latest message for a hybrid keyword+semantic search over a company knowledge base.
+export const QUERY_REWRITE_SYSTEM = `You turn the user's latest message into focused SEARCH QUERIES for a hybrid keyword+semantic search over a company knowledge base.
 Rules:
-- Output ONLY the most discriminative terms: proper nouns (people, clients, companies), identifiers/codes, dates, numbers, and the specific topic.
-- DROP generic filler and domain-common words that match everything: write, story, tell, give, show, our, the, a, how, is, doing, current, status, please, plus broad words like consultant, call, report, score, performance, coaching, client — UNLESS such a word is itself the specific subject.
-- Resolve pronouns/references using the conversation so the keywords stand alone.
+- If the message asks about ONE topic, output a SINGLE line of the most discriminative keywords.
+- If the message asks about MULTIPLE distinct topics, output ONE focused query per topic, each on its own line (max 4 lines). Split compound questions so each topic can be retrieved separately.
+- Use the most discriminative terms: proper nouns (people, clients, companies), identifiers/codes, dates, numbers, and the specific topic.
+- DROP generic filler and domain-common words that match everything: write, story, tell, give, show, our, the, a, how, is, doing, current, status, please, and — for THIS company — the word "PractiScale" itself (it appears in every document) — unless a broad word is itself the specific subject.
+- Resolve pronouns/references using the conversation so each query stands alone.
 - Keep names and identifiers verbatim. Do NOT invent anything.
-- Output only the keywords, space-separated, no punctuation, no quotes, no explanation.
+- Output only the query lines, no numbering, no punctuation, no quotes, no explanation.
 
-Example: "write a story on our consultant james anderson how he is doing" -> "James Anderson"
-Example: "why did the close fail on the Bobbi Kyte call?" -> "Bobbi Kyte close"`;
+Example: "write a story on our consultant james anderson how he is doing" ->
+James Anderson
+
+Example: "what is practiscale and its vision and who is afra?" ->
+what PractiScale does offers services
+company vision mission beliefs
+Afra founder CEO`;
 
 // Contextual retrieval — situates a chunk within its document before indexing.
 // {{DOCUMENT}} and {{CHUNK}} are replaced at ingest time.
