@@ -57,6 +57,7 @@ const KNOWLEDGE_DIR = "knowledge";
 // approved_examples are style references only.
 const MANIFEST: Entry[] = [
   // ---- company_truth ----
+  { file: "00_FOUNDER_PROFILE.md", scope: "company_truth", title: "Founder Profile — Afra", authoritative: true },
   { file: "04_SALES_AND_PERSUASION_PHILOSOPHY.md", scope: "company_truth", title: "PractiScale Company Brain — What PractiScale Does", authoritative: true },
   { file: "05_SALES_PROCESS.md", scope: "company_truth", title: "Offers and Pricing", authoritative: true },
   { file: "06_OPERATIONS_AND_DELIVERY.md", scope: "company_truth", title: "Audiences and Customer Psychology", authoritative: true },
