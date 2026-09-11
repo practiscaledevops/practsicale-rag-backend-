@@ -80,11 +80,16 @@ export async function resolveContext(req: Request): Promise<RequestContext> {
     throw new AuthError("API key has expired", 403);
   }
 
-  // Best-effort usage bump + last_used stamp. Never blocks the request.
+  // Best-effort usage bump + last_used stamp. Never blocks the request, and its
+  // rejection is handled so it can't surface as an unhandled promise rejection.
   void db
     .from("api_keys")
     .update({ last_used_at: new Date().toISOString(), request_count: key.request_count + 1 })
-    .eq("id", key.id);
+    .eq("id", key.id)
+    .then(
+      ({ error }) => error && console.error("[auth] key usage bump failed:", error.message),
+      (e) => console.error("[auth] key usage bump error:", e)
+    );
 
   return { orgId: key.org_id, key };
 }

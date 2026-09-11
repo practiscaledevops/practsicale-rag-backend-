@@ -177,7 +177,11 @@ export async function POST(req: Request) {
           output_tokens: outputTokens,
           cost_usd: costUsd(modelId, inputTokens, outputTokens),
           latency_ms: Date.now() - startedAt,
-        });
+        })
+        .then(
+          ({ error }) => error && console.error("[usage] insert failed:", error.message),
+          (e) => console.error("[usage] insert error:", e)
+        );
     },
   });
 

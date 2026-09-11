@@ -137,7 +137,10 @@ export async function POST(req: Request) {
           latency_ms: Date.now() - startedAt,
           grounded: true,
           fabricated_citations: 0,
-        });
+        }).then(
+          ({ error }) => error && console.error("[usage] insert failed:", error.message),
+          (e) => console.error("[usage] insert error:", e)
+        );
         return;
       }
 
@@ -177,7 +180,10 @@ export async function POST(req: Request) {
             latency_ms: Date.now() - startedAt,
             grounded,
             fabricated_citations: fabricated.length,
-          });
+          }).then(
+            ({ error }) => error && console.error("[usage] insert failed:", error.message),
+            (e) => console.error("[usage] insert error:", e)
+          );
         },
       });
 
