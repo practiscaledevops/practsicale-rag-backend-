@@ -19,6 +19,7 @@ import { supabaseAdmin } from "@/lib/supabase";
 import { serializeRecord } from "@/lib/chunking";
 import { ingestOne } from "@/lib/ingest";
 import { redactPII } from "@/lib/redact";
+import { assertPublicUrl } from "@/lib/net-guard";
 
 // Big free-text fields belong in the chunked BODY, not in metadata.
 const OMIT_FROM_META = new Set(["full_report", "report", "full_report_md", "analysis"]);
@@ -235,6 +236,10 @@ export async function runPull(
 const MAX_PAGES = 40; // safety cap: MAX_PAGES * limit records per sync
 
 async function fetchRecords(source: DataSourceRow): Promise<unknown[]> {
+  // SSRF guard: never let an admin-configured endpoint point the server at a
+  // private/loopback/link-local address (e.g. cloud metadata at 169.254.169.254).
+  await assertPublicUrl(source.endpoint_url as string);
+
   const headers = buildHeaders(source);
   const method = (source.http_method ?? "GET").toUpperCase();
 

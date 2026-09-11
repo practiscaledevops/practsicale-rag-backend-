@@ -11,6 +11,7 @@
 // Schedule: every 20 minutes (vercel.json). Locally, hit it on an interval
 // (see README / scripts) since Vercel Cron only runs on Vercel.
 
+import { timingSafeEqual } from "node:crypto";
 import { supabaseAdmin } from "@/lib/supabase";
 import { runPull, type DataSourceRow } from "@/lib/connectors/pull";
 import { isDemo } from "@/lib/demo/mode";
@@ -23,11 +24,20 @@ const SOURCE_COLUMNS =
   "id, org_id, name, slug, source_type, kind, endpoint_url, http_method, auth_type, " +
   "auth_secret_ref, headers, query_params, records_path, record_id_field, cursor_field, cursor_param, cursor_value";
 
+/** Constant-time string compare (length check first — a length mismatch is not secret). */
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
 function authorized(req: Request): boolean {
   const secret = process.env.CRON_SECRET;
   if (!secret) return false; // fail closed — never an open endpoint
   const header = req.headers.get("authorization") ?? "";
-  return header === `Bearer ${secret}`;
+  // Constant-time compare so a timing side-channel can't reveal the secret.
+  return safeEqual(header, `Bearer ${secret}`);
 }
 
 async function handle(req: Request): Promise<Response> {
