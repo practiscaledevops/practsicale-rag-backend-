@@ -22,17 +22,38 @@ export async function rerank(
   const key = await getProviderKey("cohere");
   if (!key || chunks.length <= topN) return chunks.slice(0, topN);
 
-  const res = await fetch("https://api.cohere.com/v2/rerank", {
-    method: "POST",
-    headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      model: "rerank-v3.5",
-      query,
-      documents: chunks.map((c) => c.content),
-      top_n: topN,
-    }),
-  });
-  if (!res.ok) return chunks.slice(0, topN);
-  const json = (await res.json()) as { results: { index: number }[] };
-  return json.results.map((r) => chunks[r.index]);
+  // Never let a rerank hiccup (network error, timeout, non-200, malformed body,
+  // or an out-of-range index) crash retrieval — fall back to the top-N pool. A
+  // thrown error here would otherwise bubble into the chat stream as an empty,
+  // un-metered answer.
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    let res: Response;
+    try {
+      res = await fetch("https://api.cohere.com/v2/rerank", {
+        method: "POST",
+        headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "rerank-v3.5",
+          query,
+          documents: chunks.map((c) => c.content),
+          top_n: topN,
+        }),
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!res.ok) return chunks.slice(0, topN);
+
+    const json = (await res.json()) as { results?: { index: number }[] };
+    const ranked = (json.results ?? [])
+      .map((r) => chunks[r.index])
+      .filter((c): c is RetrievedChunk => Boolean(c));
+    // If Cohere returned nothing usable, keep the original top-N.
+    return ranked.length > 0 ? ranked.slice(0, topN) : chunks.slice(0, topN);
+  } catch {
+    return chunks.slice(0, topN);
+  }
 }
