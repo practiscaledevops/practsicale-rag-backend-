@@ -10,6 +10,7 @@
 
 import { generateText } from "ai";
 import { getModel } from "@/lib/llm";
+import { generationParams } from "@/lib/models-catalog";
 import { isDemo } from "@/lib/demo/mode";
 
 export type SourceType = "transcript" | "call_score" | "coaching" | "document" | null;
@@ -39,12 +40,12 @@ export async function routeQueryLLM(
   if (isDemo() || !query.trim()) return keywordGuess ? [keywordGuess] : [];
 
   try {
+    const m = await getModel(tier);
     const { text } = await generateText({
-      model: await getModel(tier),
+      model: m,
       system: systemPrompt,
       prompt: `Question: ${query}\n\nSource types to search:`,
-      temperature: 0,
-      maxTokens: 40,
+      ...generationParams(m.modelId, { temperature: 0, maxTokens: 40 }),
     });
     const raw = text.toLowerCase();
     if (raw.includes("all")) return [];

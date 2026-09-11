@@ -14,6 +14,7 @@
 
 import { generateText } from "ai";
 import { getModel } from "@/lib/llm";
+import { generationParams } from "@/lib/models-catalog";
 import { isDemo } from "@/lib/demo/mode";
 
 export interface FaithfulnessVerdict {
@@ -63,12 +64,12 @@ export async function checkFaithfulness(
   if (isDemo() || !answer.trim() || !context.trim()) return permissive;
 
   try {
+    const m = await getModel(tier);
     const { text } = await generateText({
-      model: await getModel(tier),
+      model: m,
       system: systemPrompt,
       prompt: `CONTEXT:\n${context}\n\nANSWER:\n${answer}\n\nJSON verdict:`,
-      temperature: 0,
-      maxTokens: 300,
+      ...generationParams(m.modelId, { temperature: 0, maxTokens: 300 }),
     });
     const parsed = safeParseVerdict(text);
     if (!parsed) return permissive;

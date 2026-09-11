@@ -8,6 +8,7 @@
 
 import { generateText } from "ai";
 import { getModel } from "@/lib/llm";
+import { generationParams } from "@/lib/models-catalog";
 import { isDemo } from "@/lib/demo/mode";
 
 export interface ChatTurn {
@@ -36,14 +37,14 @@ export async function rewriteQuery(
     .join("\n");
 
   try {
+    const m = await getModel(tier);
     const { text } = await generateText({
-      model: await getModel(tier),
+      model: m,
       system: systemPrompt,
       prompt: recent
         ? `Conversation so far:\n${recent}\n\nLatest question: ${query}\n\nRewritten standalone search query:`
         : `Question: ${query}\n\nRewritten standalone search query:`,
-      temperature: 0,
-      maxTokens: 128,
+      ...generationParams(m.modelId, { temperature: 0, maxTokens: 128 }),
     });
     const rewritten = text.trim();
     // Guard against a model that returns nothing useful or an over-long blob.
@@ -78,14 +79,14 @@ export async function rewriteQueries(
     .join("\n");
 
   try {
+    const m = await getModel(tier);
     const { text } = await generateText({
-      model: await getModel(tier),
+      model: m,
       system: systemPrompt,
       prompt: recent
         ? `Conversation so far:\n${recent}\n\nLatest question: ${query}\n\nSearch queries:`
         : `Question: ${query}\n\nSearch queries:`,
-      temperature: 0,
-      maxTokens: 160,
+      ...generationParams(m.modelId, { temperature: 0, maxTokens: 160 }),
     });
     const lines = text
       .split(/\r?\n/)

@@ -20,6 +20,7 @@
 
 import { createDataStreamResponse, streamText, convertToCoreMessages, formatDataStreamPart } from "ai";
 import { getModel } from "@/lib/llm";
+import { generationParams } from "@/lib/models-catalog";
 import { buildContext } from "@/lib/prompts";
 import { getActivePrompt } from "@/lib/prompts-db";
 import { loadSettings } from "@/lib/settings";
@@ -148,8 +149,12 @@ export async function POST(req: Request) {
         model: resolvedModel,
         system: `${groundingPrompt}\n\nContext:\n${context}`,
         messages: convertToCoreMessages(messages ?? []),
-        temperature: settings.generation.temperature,
-        maxTokens: settings.generation.maxTokens,
+        // Omit `temperature` for models that reject it (Opus 4.8 + Claude 5 family)
+        // so switching to them never 400s into an empty stream.
+        ...generationParams(modelId, {
+          temperature: settings.generation.temperature,
+          maxTokens: settings.generation.maxTokens,
+        }),
         async onFinish({ usage, text }) {
           const inputTokens = usage?.promptTokens ?? 0;
           const outputTokens = usage?.completionTokens ?? 0;

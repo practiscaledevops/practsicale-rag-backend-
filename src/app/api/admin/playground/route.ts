@@ -19,6 +19,7 @@
 
 import { streamText, convertToCoreMessages } from "ai";
 import { getModel } from "@/lib/llm";
+import { generationParams } from "@/lib/models-catalog";
 import { buildContext } from "@/lib/prompts";
 import { getActivePrompt } from "@/lib/prompts-db";
 import { loadSettings } from "@/lib/settings";
@@ -156,8 +157,10 @@ export async function POST(req: Request) {
     model: resolvedModel,
     system: `${groundingPrompt}\n\nContext:\n${context}`,
     messages: convertToCoreMessages(messages),
-    temperature: settings.generation.temperature,
-    maxTokens: settings.generation.maxTokens,
+    ...generationParams(modelId, {
+      temperature: settings.generation.temperature,
+      maxTokens: settings.generation.maxTokens,
+    }),
     onFinish({ usage }) {
       const inputTokens = usage?.promptTokens ?? 0;
       const outputTokens = usage?.completionTokens ?? 0;

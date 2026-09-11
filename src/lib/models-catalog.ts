@@ -57,6 +57,49 @@ export function availability(provider: Provider): Availability {
   return present ? { status: "available" } : { status: "unavailable", reason: "no api key" };
 }
 
+// Models that REJECT a custom `temperature` (and other sampling params). The
+// newest Anthropic models (Opus 4.8 and the Claude 5 family) return HTTP 400
+// "`temperature` is deprecated for this model." if temperature is sent. Passing
+// sampling params to these must be avoided or the whole generation 400s and the
+// client gets an empty/errored stream. (The @ai-sdk/openai provider already
+// strips temperature for OpenAI reasoning models like gpt-5/o-series, so this
+// guard is only needed for Anthropic — but it is written to be safe for any id.)
+const NO_TEMPERATURE_IDS = new Set<string>([
+  "claude-opus-4-8",
+  "claude-sonnet-5",
+  "claude-opus-5",
+]);
+
+/**
+ * Whether a model accepts a custom `temperature`. Defaults to true; false for
+ * the known newer models that deprecate sampling params, and for any future
+ * Claude 5.x+ id (guarded by pattern so new versions don't reintroduce the bug).
+ */
+export function supportsTemperature(modelId: string | undefined | null): boolean {
+  if (!modelId) return true;
+  if (NO_TEMPERATURE_IDS.has(modelId)) return false;
+  // Claude 5+ (any variant) deprecates temperature; be safe for future ids.
+  if (/^claude-(?:opus|sonnet|haiku)-(?:[5-9]|\d{2,})/.test(modelId)) return false;
+  return true;
+}
+
+/**
+ * Build the sampling/generation params to spread into streamText/generateText for
+ * a given model. Omits `temperature` for models that reject it, always sets
+ * `maxTokens`. Use everywhere a model is called so switching models never 400s.
+ */
+export function generationParams(
+  modelId: string | undefined | null,
+  opts: { temperature?: number; maxTokens?: number }
+): { temperature?: number; maxTokens?: number } {
+  const params: { temperature?: number; maxTokens?: number } = {};
+  if (typeof opts.maxTokens === "number") params.maxTokens = opts.maxTokens;
+  if (typeof opts.temperature === "number" && supportsTemperature(modelId)) {
+    params.temperature = opts.temperature;
+  }
+  return params;
+}
+
 /** The full catalog with per-model availability resolved from the environment. */
 export function getCatalog(): CatalogModel[] {
   return MODELS.map((m) => ({ ...m, availability: availability(m.provider) }));

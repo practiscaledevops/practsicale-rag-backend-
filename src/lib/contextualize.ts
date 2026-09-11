@@ -11,6 +11,7 @@
 
 import { generateText } from "ai";
 import { getModel } from "@/lib/llm";
+import { generationParams } from "@/lib/models-catalog";
 import { isDemo } from "@/lib/demo/mode";
 
 export interface ContextualizeOptions {
@@ -63,12 +64,12 @@ async function oneContext(
   chunk: string,
   opts: ContextualizeOptions
 ): Promise<string> {
+  const m = await getModel(opts.tier);
   const { text } = await generateText({
-    model: await getModel(opts.tier),
+    model: m,
     system: opts.systemPrompt,
     prompt: `<document>\n${doc}\n</document>\n\n<chunk>\n${chunk}\n</chunk>\n\nContext for this chunk:`,
-    temperature: 0,
-    maxTokens: 120,
+    ...generationParams(m.modelId, { temperature: 0, maxTokens: 120 }),
   });
   const ctx = text.trim();
   // Guard: never let context balloon past the chunk itself.
