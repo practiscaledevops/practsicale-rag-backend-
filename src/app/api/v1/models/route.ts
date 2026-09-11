@@ -6,7 +6,8 @@
 //        there is no capability gate. org_id is still resolved server-side.
 // Returns: { models: CatalogModel[] }  (id, provider, label, tier?, availability)
 
-import { getCatalog } from "@/lib/models-catalog";
+import { getCatalog, type Provider } from "@/lib/models-catalog";
+import { getProviderKey } from "@/lib/secrets";
 import { resolveContext, AuthError } from "@/lib/auth/context";
 
 export const runtime = "nodejs";
@@ -21,5 +22,23 @@ export async function GET(req: Request) {
     return Response.json({ error: err.message }, { status: err.status ?? 401 });
   }
 
-  return Response.json({ models: getCatalog() });
+  // Availability must reflect the RESOLVED provider key (DB store -> env), not
+  // just the env var — otherwise a key set via the dashboard / DB (which
+  // generation actually uses) would still show models as "unavailable" and the
+  // consumer's switcher would disable a model that in fact works.
+  const catalog = getCatalog();
+  const providers = [...new Set(catalog.map((m) => m.provider))];
+  const present = new Map<Provider, boolean>();
+  await Promise.all(
+    providers.map(async (p) => present.set(p, Boolean(await getProviderKey(p))))
+  );
+
+  const models = catalog.map((m) => ({
+    ...m,
+    availability: present.get(m.provider)
+      ? { status: "available" as const }
+      : { status: "unavailable" as const, reason: "no api key" },
+  }));
+
+  return Response.json({ models });
 }

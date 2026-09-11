@@ -26,7 +26,7 @@ function loadEnvLocal(path = ".env.local"): void {
 }
 loadEnvLocal();
 
-const NEW_MAX_TOKENS = 2048; // headroom for full content pieces + multi-part answers
+const NEW_MAX_TOKENS = 4096; // generous ceiling for detailed answers + full content pieces
 
 async function main() {
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
