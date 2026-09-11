@@ -540,7 +540,7 @@ function CreateKeyDialog({
         {caps.size === 0 && (
           <div className="flex items-center gap-2 text-xs text-warning">
             <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
-            A key with no capability can't do anything.
+            A key with no capability can&apos;t do anything.
           </div>
         )}
       </div>
