@@ -1,31 +1,49 @@
 import type { RetrievedChunk } from "./retrieval";
 import { getProviderKey } from "@/lib/secrets";
+import { llmRerank } from "@/lib/llm-rerank";
 
-// Cross-encoder reranking of retrieval candidates with Cohere.
+// Reranking of retrieval candidates — the second stage of the RAG pipeline.
+// hybridSearchScoped() returns a wide candidate pool, then rerank() picks the top
+// N most relevant. Wired into both grounded paths (POST /api/v1/retrieve and
+// /api/v1/chat) and the admin playground, so quality is consistent.
 //
-// This is the second stage of the RAG pipeline: hybridSearchScoped() returns a
-// wide candidate pool, then rerank() picks the top N most relevant. It is wired
-// into BOTH grounded paths — the public POST /api/v1/retrieve and POST
-// /api/v1/chat, and the admin playground — so retrieval quality is consistent.
-//
-// Graceful degradation: with no COHERE_API_KEY (or on any Cohere error) it
-// simply returns the first N candidates unchanged, so retrieval still works
-// end-to-end without a rerank provider. No key is required for the Brain to run.
+// Provider order (all graceful):
+//   1. Cohere cross-encoder — if a COHERE_API_KEY is configured (fastest, paid).
+//   2. LLM rerank with the "fast" tier (e.g. Haiku) — FREE (reuses existing model
+//      spend), no extra vendor. This is the default when no Cohere key is set.
+//   3. Plain top-N — if neither is available or both fail.
+// Each reranked chunk carries a `score` in [0,1] used for the confidence signal.
 
-// Rerank candidates with Cohere. Returns the top N most relevant.
-// If no key is set, returns the input unchanged (graceful degradation).
 export async function rerank(
   query: string,
   chunks: RetrievedChunk[],
   topN = 8
 ): Promise<RetrievedChunk[]> {
-  const key = await getProviderKey("cohere");
-  if (!key || chunks.length <= topN) return chunks.slice(0, topN);
+  if (chunks.length <= topN) return chunks.slice(0, topN);
 
-  // Never let a rerank hiccup (network error, timeout, non-200, malformed body,
-  // or an out-of-range index) crash retrieval — fall back to the top-N pool. A
-  // thrown error here would otherwise bubble into the chat stream as an empty,
-  // un-metered answer.
+  const key = await getProviderKey("cohere");
+
+  // 1. Cohere, when configured.
+  if (key) {
+    const cohere = await cohereRerank(query, chunks, topN, key);
+    if (cohere) return cohere;
+  }
+
+  // 2. Free LLM rerank (Haiku). Null on failure ⇒ fall through to top-N.
+  const llm = await llmRerank(query, chunks, topN, "fast");
+  if (llm && llm.length > 0) return llm;
+
+  // 3. Plain top-N.
+  return chunks.slice(0, topN);
+}
+
+/** Cohere v2 rerank. Returns null on any failure so the caller can fall back. */
+async function cohereRerank(
+  query: string,
+  chunks: RetrievedChunk[],
+  topN: number,
+  key: string
+): Promise<RetrievedChunk[] | null> {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 8000);
@@ -45,15 +63,21 @@ export async function rerank(
     } finally {
       clearTimeout(timer);
     }
-    if (!res.ok) return chunks.slice(0, topN);
+    if (!res.ok) return null;
 
-    const json = (await res.json()) as { results?: { index: number }[] };
-    const ranked = (json.results ?? [])
-      .map((r) => chunks[r.index])
-      .filter((c): c is RetrievedChunk => Boolean(c));
-    // If Cohere returned nothing usable, keep the original top-N.
-    return ranked.length > 0 ? ranked.slice(0, topN) : chunks.slice(0, topN);
+    const json = (await res.json()) as {
+      results?: { index: number; relevance_score?: number }[];
+    };
+    const ranked: RetrievedChunk[] = [];
+    for (const r of json.results ?? []) {
+      const c = chunks[r.index];
+      if (!c) continue;
+      ranked.push(
+        typeof r.relevance_score === "number" ? { ...c, score: r.relevance_score } : c
+      );
+    }
+    return ranked.length > 0 ? ranked.slice(0, topN) : null;
   } catch {
-    return chunks.slice(0, topN);
+    return null;
   }
 }

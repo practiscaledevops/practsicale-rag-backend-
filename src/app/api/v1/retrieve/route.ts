@@ -60,7 +60,7 @@ export async function POST(req: Request) {
     },
   };
 
-  const { chunks, effectiveQuery, rewritten } = await runRetrieval({
+  const { chunks, effectiveQuery, rewritten, confidence } = await runRetrieval({
     orgId: ctx.orgId,
     query,
     scope: scopeFilters(ctx.key),
@@ -70,12 +70,14 @@ export async function POST(req: Request) {
   return Response.json({
     query: effectiveQuery,
     rewritten,
+    confidence,
     results: chunks.map((c) => ({
       id: c.id,
       content: c.content,
       source_type: c.source_type ?? null,
       document_id: c.document_id,
       metadata: c.metadata,
+      score: c.score ?? null,
     })),
   });
 }

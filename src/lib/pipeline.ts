@@ -25,6 +25,28 @@ export interface RetrievalOutput {
   rewritten: boolean;
   /** Source types retrieval was narrowed to ([] = all in scope). */
   sourceTypes: string[];
+  /**
+   * Retrieval confidence in [0,1] — the mean reranker score of the top chunks,
+   * or null when no reranker ran (so scores are unavailable). A low value means
+   * the knowledge base had little that was clearly relevant; the UI can surface
+   * this as a "low-confidence" hint and the answer should hedge accordingly.
+   */
+  confidence: number | null;
+}
+
+/**
+ * Confidence from the top chunks' reranker scores: the mean of the best few
+ * scores. Returns null if no chunk carries a score (no reranker ran).
+ */
+function confidenceFrom(chunks: RetrievedChunk[]): number | null {
+  const scores = chunks
+    .map((c) => c.score)
+    .filter((s): s is number => typeof s === "number");
+  if (scores.length === 0) return null;
+  // Average the top 3 (or fewer) — the answer leans on the strongest evidence.
+  const topScores = scores.slice(0, 3);
+  const mean = topScores.reduce((a, b) => a + b, 0) / topScores.length;
+  return Math.max(0, Math.min(1, mean));
 }
 
 /** A real-time pipeline stage, surfaced to the UI as an activity indicator. */
@@ -121,6 +143,10 @@ export async function runRetrieval(opts: {
     top = candidates.slice(0, retrieval.rerankTopN);
   }
 
+  // Confidence is read from the RERANKED chunks (they carry the scores); parent
+  // expansion below swaps in parent chunks that don't, so capture it here.
+  const confidence = confidenceFrom(top);
+
   // 5. Parent expansion (fuller context for grounding).
   let chunks = top;
   if (retrieval.expandParents && top.some((c) => c.parent_id)) {
@@ -129,7 +155,7 @@ export async function runRetrieval(opts: {
   }
 
   emit({ stage: "retrieved", label: `Retrieved ${chunks.length} source${chunks.length === 1 ? "" : "s"}`, count: chunks.length });
-  return { chunks, effectiveQuery: queries.join(" | "), rewritten, sourceTypes };
+  return { chunks, effectiveQuery: queries.join(" | "), rewritten, sourceTypes, confidence };
 }
 
 /**

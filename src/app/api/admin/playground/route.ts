@@ -88,7 +88,7 @@ export async function POST(req: Request) {
   ]);
 
   // Full-org retrieval (no key scope). The optional source_type narrows testing.
-  const { chunks } = await runRetrieval({
+  const { chunks, confidence } = await runRetrieval({
     orgId: admin.orgId,
     query,
     history,
@@ -106,6 +106,7 @@ export async function POST(req: Request) {
     id: c.id,
     document_id: c.document_id,
     source_type: c.source_type ?? null,
+    score: c.score ?? null,
     snippet: c.content.length > 240 ? c.content.slice(0, 240) + "…" : c.content,
   }));
 
@@ -187,7 +188,7 @@ export async function POST(req: Request) {
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      controller.enqueue(line({ type: "citations", citations }));
+      controller.enqueue(line({ type: "citations", citations, confidence }));
       let answer = "";
       try {
         for await (const delta of result.textStream) {

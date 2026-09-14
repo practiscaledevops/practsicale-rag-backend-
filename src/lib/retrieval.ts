@@ -9,6 +9,8 @@ export interface RetrievedChunk {
   document_id: string;
   parent_id: string | null;
   source_type?: string | null;
+  /** Reranker relevance score in [0,1], when a reranker ran. Drives confidence. */
+  score?: number;
 }
 
 // Scope-aware hybrid retrieval. This is the ONLY retrieval path the public API

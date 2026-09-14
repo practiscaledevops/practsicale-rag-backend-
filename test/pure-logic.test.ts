@@ -4,6 +4,7 @@ import { extractCitationIds, validateCitations } from "@/lib/faithfulness";
 import { mergeSettings, DEFAULT_SETTINGS } from "@/lib/settings";
 import { splitRecursive } from "@/lib/chunking";
 import { costUsd } from "@/lib/pricing";
+import { modeInstruction, isWorkMode, MODE_LABELS, WORK_MODES } from "@/lib/prompts";
 
 describe("redactPII", () => {
   it("masks emails, SSNs and phone numbers, and never leaks the raw value", () => {
@@ -64,6 +65,31 @@ describe("splitRecursive (chunking)", () => {
     expect(chunks.every((c) => c.trim().length > 0)).toBe(true);
     // Every chunk is drawn from the source text (no fabricated content).
     expect(chunks.every((c) => text.includes(c.trim().split("\n")[0].slice(0, 20)) || c.length > 0)).toBe(true);
+  });
+});
+
+describe("modeInstruction (work modes)", () => {
+  it("names the active mode in the overlay for EVERY known mode (mode-awareness)", () => {
+    for (const mode of WORK_MODES) {
+      const block = modeInstruction(mode);
+      expect(block, `mode ${mode} should produce a non-empty overlay`).not.toBe("");
+      // The overlay must state which mode is active so the assistant is aware of
+      // it and can acknowledge it — this is what makes switching modes visible.
+      expect(block).toContain(`ACTIVE WORK MODE: ${MODE_LABELS[mode]}`);
+    }
+  });
+
+  it("distinct modes produce distinct overlays (switching actually changes behaviour)", () => {
+    expect(modeInstruction("copywriter")).not.toBe(modeInstruction("ceo"));
+    expect(modeInstruction("copywriter")).toContain("copywriter");
+    expect(modeInstruction("ceo")).toContain("co-pilot");
+  });
+
+  it("returns an empty overlay only for an unknown/missing mode", () => {
+    expect(modeInstruction(undefined)).toBe("");
+    expect(modeInstruction("not-a-mode")).toBe("");
+    expect(isWorkMode("ceo")).toBe(true);
+    expect(isWorkMode("nope")).toBe(false);
   });
 });
 

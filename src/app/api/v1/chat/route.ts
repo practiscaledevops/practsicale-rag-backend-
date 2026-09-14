@@ -7,7 +7,7 @@
 // Response: an AI SDK data stream that interleaves THREE things a rich client can
 // render live:
 //   • status events   2:[{type:"status",stage,label,count}]   (planning→searching→…)
-//   • a sources event  2:[{type:"sources",sources:[…],rewritten}]
+//   • a sources event  2:[{type:"sources",sources:[…],rewritten,confidence}]
 //   • the answer text  0:"…"                                    (streamed tokens)
 // Plain text clients still work — they just read the 0:"…" parts.
 //
@@ -120,7 +120,7 @@ export async function POST(req: Request) {
       dataStream.writeData({ type: "status", stage: "planning", label: "Understanding the request" });
 
       // Retrieval with live per-stage status events.
-      const { chunks, rewritten } = await runRetrieval({
+      const { chunks, rewritten, confidence } = await runRetrieval({
         orgId: ctx.orgId,
         query,
         history,
@@ -150,6 +150,7 @@ export async function POST(req: Request) {
       dataStream.writeData({
         type: "sources",
         rewritten,
+        confidence,
         sources: chunks.map((c) => ({
           id: c.id,
           source_type: c.source_type ?? null,
