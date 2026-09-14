@@ -15,6 +15,7 @@ import {
   Plug,
   BarChart3,
   FlaskConical,
+  Sparkles,
   Users,
   SlidersHorizontal,
   LogOut,
@@ -71,6 +72,7 @@ const NAV_GROUPS: NavGroup[] = [
     title: "Intelligence",
     items: [
       { href: "/dashboard/analytics", label: "Analytics", icon: BarChart3 },
+      { href: "/dashboard/quality", label: "Query intelligence", icon: Sparkles },
       { href: "/dashboard/playground", label: "RAG playground", icon: FlaskConical },
     ],
   },
