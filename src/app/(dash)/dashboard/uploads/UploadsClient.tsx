@@ -15,13 +15,45 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { UploadCloud, FileText, Loader2, CheckCircle2, XCircle, X, RotateCcw } from "lucide-react";
+import { UploadCloud, FileText, Loader2, CheckCircle2, XCircle, X, RotateCcw, Tags } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Alert } from "@/components/ui/Alert";
+import { Input } from "@/components/ui/Input";
+import { Label } from "@/components/ui/Label";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/Card";
+import { CATEGORIES, ACCESS_LEVELS, DEPARTMENTS } from "@/lib/knowledge-taxonomy";
 import { cn } from "@/lib/utils";
+
+export interface CollectionOption {
+  id: string;
+  name: string;
+}
+
+/** The classification applied to a batch of uploads (all optional). */
+interface Classification {
+  collectionId: string;
+  category: string;
+  department: string;
+  access: string;
+  owner: string;
+  reviewDate: string;
+  tags: string;
+}
+
+const EMPTY_CLASSIFICATION: Classification = {
+  collectionId: "",
+  category: "",
+  department: "",
+  access: "",
+  owner: "",
+  reviewDate: "",
+  tags: "",
+};
+
+const selectCls =
+  "w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 // Formats we can send. .pdf is extracted server-side; the rest are read as UTF-8.
 const ACCEPT = ".md,.markdown,.txt,.text,.pdf";
@@ -101,10 +133,20 @@ function StatusPill({ entry }: { entry: FileEntry }) {
   }
 }
 
-export function UploadsClient() {
+export function UploadsClient({ collections = [] }: { collections?: CollectionOption[] }) {
   const [entries, setEntries] = React.useState<FileEntry[]>([]);
   const [dragging, setDragging] = React.useState(false);
   const [live, setLive] = React.useState(""); // announced via aria-live
+
+  // Classification applied to every file in the batch. Kept in a ref too so an
+  // in-flight upload always reads the latest values at send time.
+  const [classify, setClassify] = React.useState<Classification>(EMPTY_CLASSIFICATION);
+  const classifyRef = React.useRef(classify);
+  React.useEffect(() => {
+    classifyRef.current = classify;
+  }, [classify]);
+  const setField = (k: keyof Classification, v: string) =>
+    setClassify((c) => ({ ...c, [k]: v }));
 
   const inputRef = React.useRef<HTMLInputElement>(null);
   const dragDepth = React.useRef(0);
@@ -169,6 +211,15 @@ export function UploadsClient() {
 
       const fd = new FormData();
       fd.append("file", entry.file, entry.name);
+      // Attach the batch classification (only non-empty fields).
+      const c = classifyRef.current;
+      if (c.collectionId) fd.append("collection_id", c.collectionId);
+      if (c.category) fd.append("category", c.category);
+      if (c.department) fd.append("department", c.department);
+      if (c.access) fd.append("access", c.access);
+      if (c.owner) fd.append("owner", c.owner);
+      if (c.reviewDate) fd.append("review_date", c.reviewDate);
+      if (c.tags) fd.append("tags", c.tags);
       xhr.send(fd);
     },
     [patch]
@@ -267,6 +318,90 @@ export function UploadsClient() {
         {live}
       </p>
 
+      {/* Step 1 — classify the batch. Applied to every file uploaded below. */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Tags className="h-4 w-4 text-accent" aria-hidden="true" />
+            Classify this batch
+          </CardTitle>
+          <CardDescription>
+            These are applied to every file you upload next, and populate the Documents
+            table and governance views. All optional — set what you know.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="up-collection">Collection</Label>
+              <select id="up-collection" className={selectCls} value={classify.collectionId} onChange={(e) => setField("collectionId", e.target.value)}>
+                <option value="">No collection</option>
+                {collections.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="up-category">Category</Label>
+              <select id="up-category" className={selectCls} value={classify.category} onChange={(e) => setField("category", e.target.value)}>
+                <option value="">Uncategorized</option>
+                {CATEGORIES.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="up-access">Access level</Label>
+              <select id="up-access" className={selectCls} value={classify.access} onChange={(e) => setField("access", e.target.value)}>
+                <option value="">Team (default)</option>
+                {ACCESS_LEVELS.map((a) => (
+                  <option key={a.value} value={a.value}>{a.label} — {a.scope}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="up-department">Department</Label>
+              <select id="up-department" className={selectCls} value={classify.department} onChange={(e) => setField("department", e.target.value)}>
+                <option value="">Any</option>
+                {DEPARTMENTS.map((d) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="up-owner">Source owner</Label>
+              <Input id="up-owner" placeholder="e.g. Afra" value={classify.owner} onChange={(e) => setField("owner", e.target.value)} />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="up-review">Review date</Label>
+              <Input id="up-review" type="date" value={classify.reviewDate} onChange={(e) => setField("reviewDate", e.target.value)} />
+            </div>
+
+            <div className="space-y-1.5 sm:col-span-2 lg:col-span-3">
+              <Label htmlFor="up-tags">Tags</Label>
+              <Input id="up-tags" placeholder="comma, separated, tags" value={classify.tags} onChange={(e) => setField("tags", e.target.value)} />
+            </div>
+          </div>
+
+          {(classify.collectionId || classify.category || classify.access) && (
+            <div className="mt-3 flex items-center justify-between gap-2">
+              <p className="text-xs text-muted-foreground">
+                New uploads inherit this classification.
+              </p>
+              <Button variant="ghost" size="sm" onClick={() => setClassify(EMPTY_CLASSIFICATION)}>
+                Clear
+              </Button>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Step 2 — upload the files. */}
       <Card>
         <CardHeader>
           <CardTitle>Upload documents</CardTitle>

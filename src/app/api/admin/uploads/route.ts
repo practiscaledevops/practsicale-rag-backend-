@@ -65,6 +65,20 @@ export async function POST(req: Request) {
     return Response.json({ error: "No file provided (field 'file')" }, { status: 400 });
   }
 
+  // Optional classification the uploader applies to the batch (all fields
+  // optional; backward compatible with the plain drag-and-drop path). These land
+  // in the document's metadata + collection membership so the Documents table and
+  // governance views are populated at ingest.
+  const str = (v: FormDataEntryValue | null): string => (typeof v === "string" ? v.trim() : "");
+  const collectionId = str(form.get("collection_id"));
+  const category = str(form.get("category"));
+  const department = str(form.get("department"));
+  const access = str(form.get("access"));
+  const owner = str(form.get("owner"));
+  const reviewDate = str(form.get("review_date"));
+  const tagsRaw = str(form.get("tags"));
+  const titleOverride = str(form.get("title"));
+
   const name = file.name || "upload";
   const ext = extOf(name);
   const mime = file.type || "application/octet-stream";
@@ -117,12 +131,27 @@ export async function POST(req: Request) {
     .single();
 
   try {
+    const tags = tagsRaw
+      ? tagsRaw.split(",").map((t) => t.trim()).filter(Boolean)
+      : undefined;
+
     const res = await ingestOne(db, {
       orgId: admin.orgId,
       sourceType: "document",
-      title: name,
+      title: titleOverride || name,
       text,
-      metadata: { mime, filename: name, uploaded_by: admin.email },
+      metadata: {
+        mime,
+        filename: name,
+        uploaded_by: admin.email,
+        ...(category ? { category } : {}),
+        ...(department ? { department } : {}),
+        ...(access ? { confidentiality: access } : {}),
+        ...(owner ? { source_owner: owner } : {}),
+        ...(reviewDate ? { review_date: reviewDate } : {}),
+        ...(tags && tags.length ? { tags } : {}),
+      },
+      collectionIds: collectionId ? [collectionId] : undefined,
     });
 
     await db
