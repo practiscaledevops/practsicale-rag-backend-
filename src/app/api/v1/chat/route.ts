@@ -27,7 +27,7 @@ import { loadSettings } from "@/lib/settings";
 import { runRetrieval } from "@/lib/pipeline";
 import { validateCitations, checkFaithfulness } from "@/lib/faithfulness";
 import { resolveContext, AuthError } from "@/lib/auth/context";
-import { requireCapability, scopeFilters } from "@/lib/auth/scope";
+import { requireCapability, narrowScope } from "@/lib/auth/scope";
 import { checkRateLimit, rateLimitHeaders } from "@/lib/ratelimit";
 import { costUsd } from "@/lib/pricing";
 import { supabaseAdmin } from "@/lib/supabase";
@@ -75,6 +75,15 @@ export async function POST(req: Request) {
   // role server-side and passes a mode; we never infer it from chat.
   const mode: string | undefined = typeof body?.mode === "string" ? body.mode : undefined;
   const modeBlock = modeInstruction(mode);
+  // Optional caller-requested knowledge narrowing (role-based partitioning from a
+  // trusted spoke). These can only RESTRICT below the key's scope, never widen it.
+  const reqSourceTypes = Array.isArray(body?.sourceTypes)
+    ? (body.sourceTypes as unknown[]).filter((s): s is string => typeof s === "string")
+    : undefined;
+  const reqCollectionIds = Array.isArray(body?.collectionIds)
+    ? (body.collectionIds as unknown[]).filter((s): s is string => typeof s === "string")
+    : undefined;
+  const scope = narrowScope(ctx.key, { sourceTypes: reqSourceTypes, collectionIds: reqCollectionIds });
   const history = (messages ?? []).filter(
     (m: any) => m?.role === "user" || m?.role === "assistant"
   );
@@ -108,7 +117,7 @@ export async function POST(req: Request) {
         orgId: ctx.orgId,
         query,
         history,
-        scope: scopeFilters(ctx.key),
+        scope,
         settings,
         onStatus: (s) => dataStream.writeData({ type: "status", ...s }),
       });

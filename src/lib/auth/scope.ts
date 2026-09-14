@@ -46,3 +46,48 @@ export function intersectSourceType(key: ApiKeyRecord, requested?: string | null
   }
   return [requested];
 }
+
+// A sentinel that matches no row, used when a narrowing intersection is empty —
+// because an EMPTY filter array means "no restriction" (all) in the SQL, so we
+// must never collapse "nothing allowed" to []. This value can't equal any real
+// source_type or collection uuid.
+const MATCH_NOTHING = "__none__";
+
+/**
+ * Narrow one scope dimension (source_types or collection_ids) by a caller-
+ * requested allow-list. NARROWING ONLY — the result is always a subset of what
+ * the key permits, so a trusted caller (e.g. a spoke applying role-based access)
+ * can restrict but never widen. Rules, given the key set (empty = all) and the
+ * request (undefined/empty = "not specified"):
+ *   - request not specified          -> the key's set unchanged
+ *   - key unrestricted (all)         -> the requested set
+ *   - both restricted                -> their intersection, or [MATCH_NOTHING]
+ *                                       if the intersection is empty (never []).
+ */
+function narrowDim(keyAllowed: string[], requested?: string[] | null): string[] {
+  if (requested == null) return keyAllowed;
+  const req = requested.filter((s) => typeof s === "string" && s.length > 0);
+  if (req.length === 0) return keyAllowed;
+  if (keyAllowed.length === 0) return req;
+  const inter = keyAllowed.filter((s) => req.includes(s));
+  return inter.length > 0 ? inter : [MATCH_NOTHING];
+}
+
+/**
+ * The key's scope narrowed by a caller-requested allow-list (source_types /
+ * collection_ids). Used to apply role-based knowledge partitioning from a trusted
+ * spoke: the spoke resolves the user's role and passes the allowed sets; this can
+ * only ever restrict below the key's grant, never widen it.
+ */
+export function narrowScope(
+  key: ApiKeyRecord,
+  requested?: { sourceTypes?: string[] | null; collectionIds?: string[] | null } | null
+): ScopeFilters {
+  const base = scopeFilters(key);
+  if (!requested) return base;
+  return {
+    sourceTypes: narrowDim(base.sourceTypes, requested.sourceTypes),
+    dataSourceIds: base.dataSourceIds,
+    collectionIds: narrowDim(base.collectionIds, requested.collectionIds),
+  };
+}
