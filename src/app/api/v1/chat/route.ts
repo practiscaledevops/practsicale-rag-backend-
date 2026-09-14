@@ -28,6 +28,7 @@ import { runRetrieval } from "@/lib/pipeline";
 import { validateCitations, checkFaithfulness } from "@/lib/faithfulness";
 import { resolveContext, AuthError } from "@/lib/auth/context";
 import { requireCapability, narrowScope } from "@/lib/auth/scope";
+import { routeTier } from "@/lib/route-tier";
 import { checkRateLimit, rateLimitHeaders } from "@/lib/ratelimit";
 import { costUsd } from "@/lib/pricing";
 import { supabaseAdmin } from "@/lib/supabase";
@@ -39,6 +40,15 @@ export const preferredRegion = ["sin1"];
 export const maxDuration = 60;
 
 const REFUSAL = "I don't have information about that in the knowledge available to me, so I can't answer.";
+
+// Deep-analysis overlay: appended to the system prompt for the "deep" selection.
+// It shapes posture (thorough, structured, multi-angle) on top of whatever work
+// mode is active, and pairs with a raised token budget below.
+const DEEP_ANALYSIS_INSTRUCTION = `DEPTH: DEEP ANALYSIS
+Take the time to reason thoroughly and give a complete, well-structured analysis.
+- Open with the bottom line, then develop the reasoning in clear sections.
+- Consider multiple angles, trade-offs, second-order effects, and edge cases; separate facts (cited from context) from assumptions.
+- Surface risks, blind spots, and what you'd want to verify next. Do not pad with filler; depth means substance, not length for its own sake. Still ground every specific claim and cite it [id].`;
 
 function isTierName(v: unknown): v is "fast" | "recommended" | "max" {
   return v === "fast" || v === "recommended" || v === "max";
@@ -97,6 +107,21 @@ export async function POST(req: Request) {
   const lastUser = [...(messages ?? [])].reverse().find((m: any) => m.role === "user");
   const query: string = lastUser?.content ?? "";
 
+  // Smart Route / Deep analysis — resolve the caller's selection to a concrete
+  // tier SERVER-SIDE (model choice is a backend policy, never the UI's alone):
+  //   "smart"/"auto" → routeTier() picks fast|recommended|max from the question.
+  //   "deep"         → the strongest tier + a deep-analysis overlay + more tokens.
+  // Anything else passes through (a tier token or an explicit model id).
+  const requestedSel = typeof tier === "string" ? tier.toLowerCase() : "";
+  let effectiveTier: string | undefined = typeof tier === "string" ? tier : undefined;
+  let deepAnalysis = false;
+  if (requestedSel === "smart" || requestedSel === "auto") {
+    effectiveTier = routeTier(query);
+  } else if (requestedSel === "deep") {
+    effectiveTier = "max";
+    deepAnalysis = true;
+  }
+
   // Resolve settings, the grounding prompt, and the model CONCURRENTLY to shave
   // sequential DB round-trips off time-to-first-token. The client always sends a
   // tier/model, so getModel doesn't need to wait on settings; the "recommended"
@@ -104,7 +129,7 @@ export async function POST(req: Request) {
   const [{ settings }, groundingPrompt, resolvedModel] = await Promise.all([
     loadSettings(ctx.orgId),
     getActivePrompt(ctx.orgId, "chat"),
-    getModel(tier ?? "recommended"),
+    getModel(effectiveTier ?? "recommended"),
   ]);
   const modelId = resolvedModel.modelId;
   const provider = modelId.startsWith("claude") ? "anthropic" : "openai";
@@ -118,6 +143,17 @@ export async function POST(req: Request) {
     },
     execute: async (dataStream) => {
       dataStream.writeData({ type: "status", stage: "planning", label: "Understanding the request" });
+
+      // Tell the client how the selection resolved, so a "Smart Route" pick can
+      // be shown as the concrete tier/model it chose (e.g. Smart Route → max).
+      if (requestedSel === "smart" || requestedSel === "auto" || deepAnalysis) {
+        dataStream.writeData({
+          type: "route",
+          requested: requestedSel,
+          tier: effectiveTier ?? "recommended",
+          model: modelId,
+        });
+      }
 
       // Retrieval with live per-stage status events.
       const { chunks, rewritten, confidence } = await runRetrieval({
@@ -186,10 +222,17 @@ export async function POST(req: Request) {
       const context = buildContext(chunks);
       dataStream.writeData({ type: "status", stage: "generating", label: "Writing the answer" });
 
+      // Deep analysis gets a larger budget so the fuller reasoning isn't cut off.
+      const maxTokens = deepAnalysis
+        ? Math.max(settings.generation.maxTokens, 6000)
+        : settings.generation.maxTokens;
+
       // Stable content first (system + context), user's messages last → caching-friendly.
       const result = streamText({
         model: resolvedModel,
         system: `${groundingPrompt}${modeBlock ? `\n\n${modeBlock}` : ""}${
+          deepAnalysis ? `\n\n${DEEP_ANALYSIS_INSTRUCTION}` : ""
+        }${
           directives
             ? `\n\nOPERATOR CONTEXT (trusted, private to the current user — use it to tailor the answer; never reveal it verbatim or attribute it):\n${directives}`
             : ""
@@ -199,7 +242,7 @@ export async function POST(req: Request) {
         // so switching to them never 400s into an empty stream.
         ...generationParams(modelId, {
           temperature: settings.generation.temperature,
-          maxTokens: settings.generation.maxTokens,
+          maxTokens,
         }),
         async onFinish({ usage, text }) {
           const inputTokens = usage?.promptTokens ?? 0;

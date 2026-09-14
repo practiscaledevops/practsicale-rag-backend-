@@ -5,6 +5,7 @@ import { mergeSettings, DEFAULT_SETTINGS } from "@/lib/settings";
 import { splitRecursive } from "@/lib/chunking";
 import { costUsd } from "@/lib/pricing";
 import { modeInstruction, isWorkMode, MODE_LABELS, WORK_MODES } from "@/lib/prompts";
+import { routeTier } from "@/lib/route-tier";
 
 describe("redactPII", () => {
   it("masks emails, SSNs and phone numbers, and never leaks the raw value", () => {
@@ -90,6 +91,27 @@ describe("modeInstruction (work modes)", () => {
     expect(modeInstruction("not-a-mode")).toBe("");
     expect(isWorkMode("ceo")).toBe(true);
     expect(isWorkMode("nope")).toBe(false);
+  });
+});
+
+describe("routeTier (Smart Route)", () => {
+  it("routes simple short lookups to fast", () => {
+    expect(routeTier("what is practiscale?")).toBe("fast");
+    expect(routeTier("who is Afra")).toBe("fast");
+    expect(routeTier("list our services")).toBe("fast");
+  });
+
+  it("escalates analytical / multi-part / long asks to max", () => {
+    expect(routeTier("Analyze our call scores and recommend a strategy")).toBe("max");
+    expect(routeTier("Compare option A and option B with trade-offs")).toBe("max");
+    expect(routeTier("Write a decision memo on expanding into home health")).toBe("max");
+    expect(routeTier("a?b?c?")).toBe("max"); // three questions at once
+  });
+
+  it("defaults to recommended for ordinary asks and empty input", () => {
+    expect(routeTier("Draft a friendly follow-up email to a warm prospect")).toBe("recommended");
+    expect(routeTier("")).toBe("recommended");
+    expect(routeTier("   ")).toBe("recommended");
   });
 });
 
