@@ -37,20 +37,52 @@ interface NavItem {
   icon: LucideIcon;
 }
 
-const NAV: NavItem[] = [
-  { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
-  { href: "/dashboard/sources", label: "Data Sources", icon: Database },
-  { href: "/dashboard/uploads", label: "Uploads", icon: Upload },
-  { href: "/dashboard/documents", label: "Documents", icon: FileText },
-  { href: "/dashboard/collections", label: "Collections", icon: FolderTree },
-  { href: "/dashboard/processing", label: "Processing", icon: Cpu },
-  { href: "/dashboard/prompts", label: "Prompts", icon: MessageSquareText },
-  { href: "/dashboard/keys", label: "API Keys", icon: KeyRound },
-  { href: "/dashboard/connectors", label: "Connectors", icon: Plug },
-  { href: "/dashboard/analytics", label: "Analytics", icon: BarChart3 },
-  { href: "/dashboard/playground", label: "Playground", icon: FlaskConical },
-  { href: "/dashboard/settings", label: "Settings", icon: SlidersHorizontal },
-  { href: "/dashboard/admins", label: "Admins", icon: Users },
+interface NavGroup {
+  title: string;
+  items: NavItem[];
+}
+
+/**
+ * Grouped navigation (a RAG "control tower" rather than a flat list): Control
+ * center for knowledge, Operations for ingestion, Intelligence for analytics +
+ * testing, Governance for policy/access. Only links to pages that exist — new
+ * sections (call-scoring connector, data quality, model policy…) are added here
+ * as their routes land.
+ */
+const NAV_GROUPS: NavGroup[] = [
+  {
+    title: "Control center",
+    items: [
+      { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
+      { href: "/dashboard/sources", label: "Knowledge sources", icon: Database },
+      { href: "/dashboard/documents", label: "Documents", icon: FileText },
+      { href: "/dashboard/collections", label: "Collections", icon: FolderTree },
+    ],
+  },
+  {
+    title: "Operations",
+    items: [
+      { href: "/dashboard/uploads", label: "Upload & ingest", icon: Upload },
+      { href: "/dashboard/processing", label: "Processing runs", icon: Cpu },
+      { href: "/dashboard/connectors", label: "Connectors", icon: Plug },
+    ],
+  },
+  {
+    title: "Intelligence",
+    items: [
+      { href: "/dashboard/analytics", label: "Analytics", icon: BarChart3 },
+      { href: "/dashboard/playground", label: "RAG playground", icon: FlaskConical },
+    ],
+  },
+  {
+    title: "Governance",
+    items: [
+      { href: "/dashboard/prompts", label: "Prompts & modes", icon: MessageSquareText },
+      { href: "/dashboard/keys", label: "API keys", icon: KeyRound },
+      { href: "/dashboard/admins", label: "Access & audit", icon: Users },
+      { href: "/dashboard/settings", label: "Settings", icon: SlidersHorizontal },
+    ],
+  },
 ];
 
 /** Is `href` the active route? Overview matches exactly; others match prefix. */
@@ -84,26 +116,33 @@ export function AppShell({
   }
 
   const nav = (
-    <nav className="flex-1 space-y-1 px-3 py-4" aria-label="Primary">
-      {NAV.map(({ href, label, icon: Icon }) => {
-        const active = isActive(pathname, href);
-        return (
-          <Link
-            key={href}
-            href={href}
-            aria-current={active ? "page" : undefined}
-            className={cn(
-              "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
-              active
-                ? "bg-accent/15 text-white ring-1 ring-inset ring-accent/25"
-                : "text-sidebar-muted hover:bg-white/5 hover:text-sidebar-foreground"
-            )}
-          >
-            <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
-            {label}
-          </Link>
-        );
-      })}
+    <nav className="flex-1 space-y-5 overflow-y-auto px-3 py-4" aria-label="Primary">
+      {NAV_GROUPS.map((group) => (
+        <div key={group.title} className="space-y-1">
+          <p className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-sidebar-muted/70">
+            {group.title}
+          </p>
+          {group.items.map(({ href, label, icon: Icon }) => {
+            const active = isActive(pathname, href);
+            return (
+              <Link
+                key={href}
+                href={href}
+                aria-current={active ? "page" : undefined}
+                className={cn(
+                  "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                  active
+                    ? "bg-accent/15 text-white ring-1 ring-inset ring-accent/25"
+                    : "text-sidebar-muted hover:bg-white/5 hover:text-sidebar-foreground"
+                )}
+              >
+                <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+                {label}
+              </Link>
+            );
+          })}
+        </div>
+      ))}
     </nav>
   );
 
