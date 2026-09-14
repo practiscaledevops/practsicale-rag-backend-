@@ -133,7 +133,7 @@ export function ControlTower({ data, email }: { data: ControlTowerData; email: s
                   const badge = KIND_BADGE[s.kind] ?? KIND_BADGE.upload;
                   return (
                     <li key={s.id} className="flex items-center gap-3 py-3">
-                      <span className="min-w-0 flex-1">
+                      <Link href={`/dashboard/sources/${s.id}`} className="min-w-0 flex-1 rounded-md transition-colors hover:opacity-80">
                         <span className="flex items-center gap-1.5 text-sm font-medium">
                           {s.name}
                           {s.sourceType === "call_score" && <Lock size={12} className="text-muted-foreground" aria-hidden />}
@@ -141,7 +141,7 @@ export function ControlTower({ data, email }: { data: ControlTowerData; email: s
                         <span className="text-xs text-muted-foreground">
                           {s.sourceType.replace(/_/g, " ")} · synced {relTime(s.lastRunAt)}
                         </span>
-                      </span>
+                      </Link>
                       <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide", badge.cls)}>
                         {badge.label}
                       </span>

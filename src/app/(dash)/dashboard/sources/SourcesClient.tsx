@@ -1,8 +1,9 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Database, Loader2, Plus, RefreshCw } from "lucide-react";
+import { Activity, Database, Loader2, Plus, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Label } from "@/components/ui/Label";
@@ -356,7 +357,11 @@ export function SourcesClient({ sources }: { sources: DataSource[] }) {
               <TBody>
                 {sources.map((s) => (
                   <Tr key={s.id}>
-                    <Td className="font-medium">{s.name}</Td>
+                    <Td className="font-medium">
+                      <Link href={`/dashboard/sources/${s.id}`} className="text-accent hover:underline">
+                        {s.name}
+                      </Link>
+                    </Td>
                     <Td>
                       <Badge tone="accent">{sourceTypeLabel(s.source_type)}</Badge>
                     </Td>
@@ -371,20 +376,29 @@ export function SourcesClient({ sources }: { sources: DataSource[] }) {
                       {s.last_run_at ? new Date(s.last_run_at).toLocaleString() : "Never"}
                     </Td>
                     <Td className="text-right">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => onSync(s)}
-                        disabled={syncingId === s.id}
-                        aria-label={`Sync ${s.name} now`}
-                      >
-                        {syncingId === s.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                        ) : (
-                          <RefreshCw className="h-4 w-4" aria-hidden="true" />
-                        )}
-                        {syncingId === s.id ? "Syncing…" : "Sync now"}
-                      </Button>
+                      <div className="flex items-center justify-end gap-2">
+                        <Link
+                          href={`/dashboard/sources/${s.id}`}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-surface-muted hover:text-foreground"
+                        >
+                          <Activity className="h-4 w-4" aria-hidden="true" />
+                          Health
+                        </Link>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => onSync(s)}
+                          disabled={syncingId === s.id}
+                          aria-label={`Sync ${s.name} now`}
+                        >
+                          {syncingId === s.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                          ) : (
+                            <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                          )}
+                          {syncingId === s.id ? "Syncing…" : "Sync now"}
+                        </Button>
+                      </div>
                     </Td>
                   </Tr>
                 ))}
