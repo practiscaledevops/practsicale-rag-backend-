@@ -27,6 +27,7 @@ import {
 import { cn } from "@/lib/utils";
 import { supabaseBrowser } from "@/lib/supabase-server";
 import { Button } from "./Button";
+import { NotificationsBell } from "./NotificationsBell";
 
 /**
  * Complete navigation for the dashboard. Defined ONCE here so section page
@@ -201,6 +202,7 @@ export function AppShell({
           </Button>
 
           <div className="ml-auto flex items-center gap-3">
+            <NotificationsBell />
             <span
               className="hidden text-sm text-muted-foreground sm:inline"
               title={email}
