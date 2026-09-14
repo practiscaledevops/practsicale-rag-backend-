@@ -16,6 +16,7 @@ import {
   BarChart3,
   FlaskConical,
   Sparkles,
+  ShieldAlert,
   Users,
   SlidersHorizontal,
   LogOut,
@@ -65,6 +66,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/dashboard/uploads", label: "Upload & ingest", icon: Upload },
       { href: "/dashboard/processing", label: "Processing runs", icon: Cpu },
+      { href: "/dashboard/quality-data", label: "Data quality", icon: ShieldAlert },
       { href: "/dashboard/connectors", label: "Connectors", icon: Plug },
     ],
   },

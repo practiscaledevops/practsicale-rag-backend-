@@ -190,10 +190,10 @@ export function ControlTower({ data, email }: { data: ControlTowerData; email: s
                     <Attention icon={AlertTriangle} tone="bad" title="Verify failed or delayed runs" body={`${data.runStats.error} run${data.runStats.error === 1 ? "" : "s"} errored recently. Open the run log and retry safely.`} href="/dashboard/processing" />
                   )}
                   {data.needsReview > 0 && (
-                    <Attention icon={AlertTriangle} tone="warn" title="Review stale knowledge" body={`${data.needsReview} source${data.needsReview === 1 ? "" : "s"} need an owner or review cycle.`} href="/dashboard/sources" />
+                    <Attention icon={AlertTriangle} tone="warn" title="Review stale knowledge" body={`${data.needsReview} source${data.needsReview === 1 ? "" : "s"} need an owner or review cycle.`} href="/dashboard/quality-data" />
                   )}
                   {embeddedPct !== null && embeddedPct < 100 && (
-                    <Attention icon={Layers} tone="warn" title="Some knowledge isn't searchable yet" body={`${embeddedPct}% of chunks are embedded. Check processing for stragglers.`} href="/dashboard/processing" />
+                    <Attention icon={Layers} tone="warn" title="Some knowledge isn't searchable yet" body={`${embeddedPct}% of chunks are embedded. Check data quality for stragglers.`} href="/dashboard/quality-data" />
                   )}
                   {data.usage.costUsd > 0 && (
                     <Attention icon={DollarSign} tone="info" title="Model cost this month" body={`${money(data.usage.costUsd)} — ${money(data.usage.byProvider.anthropic)} Anthropic, ${money(data.usage.byProvider.openai)} OpenAI.`} href="/dashboard/analytics" />
