@@ -19,7 +19,34 @@ interface RawCollection {
   slug: string | null;
   description: string | null;
   created_at: string;
+  settings?: Record<string, unknown> | null;
   document_collections: { count: number }[] | null;
+}
+
+const BASE_COLS = "id, name, slug, description, created_at, document_collections(count)";
+
+/**
+ * Load collections, preferring the governance `settings` column but degrading to
+ * the base columns if migration 0013 hasn't been applied (undefined_column). The
+ * `enabled` flag tells the client whether to offer the governance editor.
+ */
+async function loadCollections(db: ReturnType<typeof supabaseAdmin>, orgId: string) {
+  const withSettings = await db
+    .from("collections")
+    .select(`${BASE_COLS}, settings`)
+    .eq("org_id", orgId)
+    .order("created_at", { ascending: false });
+
+  if (!withSettings.error) {
+    return { data: withSettings.data as RawCollection[] | null, error: null, enabled: true };
+  }
+  // 42703 = undefined_column → settings not migrated yet. Fall back gracefully.
+  const base = await db
+    .from("collections")
+    .select(BASE_COLS)
+    .eq("org_id", orgId)
+    .order("created_at", { ascending: false });
+  return { data: base.data as RawCollection[] | null, error: base.error, enabled: false };
 }
 
 export default async function CollectionsPage() {
@@ -48,14 +75,10 @@ export default async function CollectionsPage() {
 
   const db = supabaseAdmin();
 
-  // Load, in parallel: collections (+counts), all org documents (for the picker),
-  // and the full membership map (which document is in which collection).
+  // Load, in parallel: collections (+counts +governance settings), all org
+  // documents (for the picker), and the full membership map.
   const [collectionsRes, documentsRes, membershipRes] = await Promise.all([
-    db
-      .from("collections")
-      .select("id, name, slug, description, created_at, document_collections(count)")
-      .eq("org_id", admin.orgId)
-      .order("created_at", { ascending: false }),
+    loadCollections(db, admin.orgId),
     db
       .from("documents")
       .select("id, title, source_type")
@@ -68,17 +91,17 @@ export default async function CollectionsPage() {
   ]);
 
   const error = collectionsRes.error ?? documentsRes.error ?? membershipRes.error;
+  const governanceEnabled = collectionsRes.enabled;
 
-  const collections: CollectionRow[] = ((collectionsRes.data as RawCollection[]) ?? []).map(
-    (c) => ({
-      id: c.id,
-      name: c.name,
-      slug: c.slug,
-      description: c.description,
-      created_at: c.created_at,
-      document_count: c.document_collections?.[0]?.count ?? 0,
-    })
-  );
+  const collections: CollectionRow[] = (collectionsRes.data ?? []).map((c) => ({
+    id: c.id,
+    name: c.name,
+    slug: c.slug,
+    description: c.description,
+    created_at: c.created_at,
+    document_count: c.document_collections?.[0]?.count ?? 0,
+    settings: (c.settings ?? {}) as CollectionRow["settings"],
+  }));
 
   const documents: DocumentOption[] = ((documentsRes.data as DocumentOption[]) ?? []).map(
     (d) => ({ id: d.id, title: d.title, source_type: d.source_type })
@@ -108,6 +131,7 @@ export default async function CollectionsPage() {
           collections={collections}
           documents={documents}
           membership={membership}
+          governanceEnabled={governanceEnabled}
         />
       )}
     </div>

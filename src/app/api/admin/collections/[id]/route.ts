@@ -75,8 +75,14 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
   }
 
   // Build a partial update. `name` (when present) also refreshes the slug;
-  // `description` can be cleared by sending an empty string.
-  const patch: { name?: string; slug?: string; description?: string | null } = {};
+  // `description` can be cleared by sending an empty string; `settings` (the
+  // governance config, migration 0013) replaces the jsonb blob wholesale.
+  const patch: {
+    name?: string;
+    slug?: string;
+    description?: string | null;
+    settings?: Record<string, unknown>;
+  } = {};
 
   if (typeof body.name === "string") {
     const name = body.name.trim();
@@ -96,17 +102,26 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     patch.description = body.description.trim() === "" ? null : body.description.trim();
   }
 
+  const wantsSettings =
+    body.settings != null && typeof body.settings === "object" && !Array.isArray(body.settings);
+  if (wantsSettings) {
+    patch.settings = body.settings as Record<string, unknown>;
+  }
+
   if (Object.keys(patch).length === 0) {
     return Response.json({ error: "Nothing to update" }, { status: 400 });
   }
 
   const db = supabaseAdmin();
+  const selectCols = wantsSettings
+    ? "id, name, slug, description, created_at, settings"
+    : "id, name, slug, description, created_at";
   const { data, error } = await db
     .from("collections")
     .update(patch)
     .eq("id", id)
     .eq("org_id", admin.orgId) // tenant scope
-    .select("id, name, slug, description, created_at")
+    .select(selectCols)
     .maybeSingle();
 
   if (error) {
@@ -114,6 +129,13 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
       return Response.json(
         { error: "A collection with a similar name already exists." },
         { status: 409 }
+      );
+    }
+    // 42703 = undefined_column → governance settings need migration 0013.
+    if ((error as { code?: string }).code === "42703") {
+      return Response.json(
+        { error: "Governance settings aren't enabled yet — run migration 0013_collection_settings.sql.", needsMigration: true },
+        { status: 400 }
       );
     }
     return Response.json({ error: error.message }, { status: 500 });

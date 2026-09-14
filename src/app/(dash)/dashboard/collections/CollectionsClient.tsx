@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { FolderOpen, Layers, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import { FolderOpen, Layers, Loader2, Pencil, Plus, Trash2, ShieldCheck, Lock } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Label } from "@/components/ui/Label";
@@ -17,6 +17,21 @@ import {
   CardDescription,
 } from "@/components/ui/Card";
 import { Table, THead, TBody, Tr, Th, Td } from "@/components/ui/Table";
+import { ACCESS_LEVELS } from "@/lib/knowledge-taxonomy";
+import { WORK_MODES, MODE_LABELS } from "@/lib/prompts";
+
+/** Governance config for a collection (stored in collections.settings jsonb). */
+export interface CollectionSettings {
+  owner?: string;
+  access_level?: string;
+  allowed_work_modes?: string[];
+  review_interval_days?: number | null;
+  retention_days?: number | null;
+  default_source_type?: string;
+  ceo_copilot_eligible?: boolean;
+  employee_chat_eligible?: boolean;
+  client_facing_eligible?: boolean;
+}
 
 /** One collection row (document_count is aggregated server-side). */
 export interface CollectionRow {
@@ -26,6 +41,7 @@ export interface CollectionRow {
   description: string | null;
   created_at: string;
   document_count: number;
+  settings?: CollectionSettings;
 }
 
 /** A document offered in the assign-documents picker. */
@@ -43,14 +59,18 @@ const SOURCE_LABELS: Record<string, string> = {
 };
 const sourceLabel = (v: string) => SOURCE_LABELS[v] ?? v;
 
+const accessLabel = (v?: string) => ACCESS_LEVELS.find((a) => a.value === v)?.label ?? "Team";
+
 export function CollectionsClient({
   collections: initialCollections,
   documents,
   membership: initialMembership,
+  governanceEnabled = true,
 }: {
   collections: CollectionRow[];
   documents: DocumentOption[];
   membership: Record<string, string[]>;
+  governanceEnabled?: boolean;
 }) {
   // Local, authoritative state — mutations update it directly from API responses,
   // so counts and membership stay live without a full server round-trip.
@@ -70,6 +90,7 @@ export function CollectionsClient({
   const [renameTarget, setRenameTarget] = React.useState<CollectionRow | null>(null);
   const [deleteTarget, setDeleteTarget] = React.useState<CollectionRow | null>(null);
   const [manageTarget, setManageTarget] = React.useState<CollectionRow | null>(null);
+  const [settingsTarget, setSettingsTarget] = React.useState<CollectionRow | null>(null);
 
   const docCount = (id: string) => membership[id]?.length ?? 0;
 
@@ -137,42 +158,76 @@ export function CollectionsClient({
         onSubmit={onCreate}
       />
 
+      {!governanceEnabled && (
+        <Alert tone="warning">
+          Governance settings (owner, access level, work modes, review &amp; retention) are
+          disabled — run migration <code>0013_collection_settings.sql</code> to enable them.
+        </Alert>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>Collections</CardTitle>
-          <CardDescription>Groups of documents used for scoped-key access.</CardDescription>
+          <CardDescription>
+            A collection is the governance unit for knowledge: owner, access level, which work
+            modes may use it, and review &amp; retention. Scoped API keys can be limited to one.
+          </CardDescription>
         </CardHeader>
         <CardContent className="p-0">
           <Table>
             <THead>
               <Tr>
                 <Th>Name</Th>
-                <Th>Description</Th>
+                <Th>Access</Th>
+                <Th>Owner</Th>
                 <Th className="text-right">Documents</Th>
-                <Th>Created</Th>
+                <Th>Eligibility</Th>
                 <Th className="text-right">Actions</Th>
               </Tr>
             </THead>
             <TBody>
-              {collections.map((c) => (
+              {collections.map((c) => {
+                const s = c.settings ?? {};
+                const restricted = ["restricted", "confidential", "ceo_only"].includes(s.access_level ?? "");
+                return (
                 <Tr key={c.id}>
                   <Td className="font-medium">
                     {c.name}
-                    {c.slug && (
-                      <span className="ml-2 text-xs text-muted-foreground">{c.slug}</span>
+                    {c.description && (
+                      <span className="block max-w-[32ch] truncate text-xs text-muted-foreground" title={c.description}>
+                        {c.description}
+                      </span>
                     )}
                   </Td>
-                  <Td className="max-w-[36ch] truncate text-muted-foreground" title={c.description ?? ""}>
-                    {c.description || "—"}
+                  <Td>
+                    <span className="inline-flex items-center gap-1 text-sm text-muted-foreground">
+                      {restricted && <Lock className="h-3 w-3" aria-hidden="true" />}
+                      {accessLabel(s.access_level)}
+                    </span>
                   </Td>
+                  <Td className="text-muted-foreground">{s.owner || "—"}</Td>
                   <Td className="text-right tabular-nums">
                     <Badge tone="accent">{docCount(c.id)}</Badge>
                   </Td>
-                  <Td className="text-muted-foreground">
-                    {new Date(c.created_at).toLocaleDateString()}
+                  <Td>
+                    <div className="flex flex-wrap gap-1">
+                      {s.ceo_copilot_eligible !== false && <Badge tone="neutral">Copilot</Badge>}
+                      {s.employee_chat_eligible !== false && <Badge tone="neutral">Team chat</Badge>}
+                      {s.client_facing_eligible && <Badge tone="warning">Client-facing</Badge>}
+                    </div>
                   </Td>
                   <Td>
                     <div className="flex justify-end gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setSettingsTarget(c)}
+                        aria-label={`Governance settings for ${c.name}`}
+                        disabled={!governanceEnabled}
+                        title={governanceEnabled ? "Governance settings" : "Run migration 0013 to enable governance"}
+                      >
+                        <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                      </Button>
                       <Button
                         variant="outline"
                         size="sm"
@@ -201,7 +256,8 @@ export function CollectionsClient({
                     </div>
                   </Td>
                 </Tr>
-              ))}
+                );
+              })}
             </TBody>
           </Table>
         </CardContent>
@@ -246,6 +302,16 @@ export function CollectionsClient({
               else current.delete(documentId);
               return { ...prev, [manageTarget.id]: [...current] };
             })
+          }
+        />
+      )}
+
+      {settingsTarget && (
+        <GovernanceDialog
+          target={settingsTarget}
+          onClose={() => setSettingsTarget(null)}
+          onSaved={(id, settings) =>
+            setCollections((prev) => prev.map((c) => (c.id === id ? { ...c, settings } : c)))
           }
         />
       )}
@@ -464,6 +530,184 @@ function DeleteDialog({
         </div>
       )}
     </Dialog>
+  );
+}
+
+// --- Governance settings dialog ----------------------------------------------
+
+const SOURCE_TYPES = ["document", "call_score", "coaching", "transcript"] as const;
+
+function GovernanceDialog({
+  target,
+  onClose,
+  onSaved,
+}: {
+  target: CollectionRow;
+  onClose: () => void;
+  onSaved: (id: string, settings: CollectionSettings) => void;
+}) {
+  const init = target.settings ?? {};
+  const [owner, setOwner] = React.useState(init.owner ?? "");
+  const [accessLevelV, setAccessLevelV] = React.useState(init.access_level ?? "team");
+  const [modes, setModes] = React.useState<Set<string>>(() => new Set(init.allowed_work_modes ?? []));
+  const [reviewDays, setReviewDays] = React.useState(init.review_interval_days?.toString() ?? "");
+  const [retentionDays, setRetentionDays] = React.useState(init.retention_days?.toString() ?? "");
+  const [defaultSource, setDefaultSource] = React.useState(init.default_source_type ?? "");
+  const [ceoCopilot, setCeoCopilot] = React.useState(init.ceo_copilot_eligible !== false);
+  const [employeeChat, setEmployeeChat] = React.useState(init.employee_chat_eligible !== false);
+  const [clientFacing, setClientFacing] = React.useState(init.client_facing_eligible === true);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  function toggleMode(id: string) {
+    setModes((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function onSave() {
+    setSaving(true);
+    setError(null);
+    const settings: CollectionSettings = {
+      owner: owner.trim() || undefined,
+      access_level: accessLevelV,
+      allowed_work_modes: [...modes],
+      review_interval_days: reviewDays ? Math.max(0, parseInt(reviewDays, 10)) : null,
+      retention_days: retentionDays ? Math.max(0, parseInt(retentionDays, 10)) : null,
+      default_source_type: defaultSource || undefined,
+      ceo_copilot_eligible: ceoCopilot,
+      employee_chat_eligible: employeeChat,
+      client_facing_eligible: clientFacing,
+    };
+    try {
+      const res = await fetch(`/api/admin/collections/${encodeURIComponent(target.id)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ settings }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(json.error ?? `Save failed (${res.status})`);
+        return;
+      }
+      onSaved(target.id, settings);
+      onClose();
+    } catch {
+      setError("Network error — please try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const selectCls =
+    "w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+  return (
+    <Dialog
+      open
+      onClose={() => (saving ? undefined : onClose())}
+      title={`Governance — “${target.name}”`}
+      description="Who owns this knowledge, who can retrieve it, and how it's reviewed and retained."
+      className="max-w-2xl"
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button onClick={onSave} disabled={saving}>
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ShieldCheck className="h-4 w-4" aria-hidden="true" />}
+            {saving ? "Saving…" : "Save governance"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4 py-1">
+        {error && <Alert tone="danger">{error}</Alert>}
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="gov-owner">Owner</Label>
+            <Input id="gov-owner" value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="e.g. Afra" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="gov-access">Access level</Label>
+            <select id="gov-access" className={selectCls} value={accessLevelV} onChange={(e) => setAccessLevelV(e.target.value)}>
+              {ACCESS_LEVELS.map((a) => (
+                <option key={a.value} value={a.value}>{a.label} — {a.scope}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="space-y-1.5">
+          <Label>Allowed work modes</Label>
+          <p className="text-xs text-muted-foreground">Which chatbot personas may retrieve from this collection. None ticked = no restriction.</p>
+          <div className="flex flex-wrap gap-2">
+            {WORK_MODES.map((m) => {
+              const on = modes.has(m);
+              return (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => toggleMode(m)}
+                  className={
+                    "rounded-full border px-3 py-1 text-xs font-medium transition-colors " +
+                    (on ? "border-accent bg-accent/10 text-accent" : "border-border text-muted-foreground hover:bg-surface-muted")
+                  }
+                >
+                  {MODE_LABELS[m]}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="gov-review">Review interval (days)</Label>
+            <Input id="gov-review" type="number" min={0} value={reviewDays} onChange={(e) => setReviewDays(e.target.value)} placeholder="e.g. 90" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="gov-retention">Retention (days)</Label>
+            <Input id="gov-retention" type="number" min={0} value={retentionDays} onChange={(e) => setRetentionDays(e.target.value)} placeholder="blank = keep" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="gov-source">Default source type</Label>
+            <select id="gov-source" className={selectCls} value={defaultSource} onChange={(e) => setDefaultSource(e.target.value)}>
+              <option value="">Any</option>
+              {SOURCE_TYPES.map((t) => (
+                <option key={t} value={t}>{sourceLabel(t)}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="space-y-2 rounded-lg border border-border p-3">
+          <p className="text-sm font-medium">Eligible for</p>
+          <Check id="gov-copilot" label="CEO Copilot (executive mode)" checked={ceoCopilot} onChange={setCeoCopilot} />
+          <Check id="gov-team" label="General employee chat" checked={employeeChat} onChange={setEmployeeChat} />
+          <Check id="gov-client" label="Client-facing generation" checked={clientFacing} onChange={setClientFacing} />
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+function Check({ id, label, checked, onChange }: { id: string; label: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label htmlFor={id} className="flex cursor-pointer items-center gap-2.5 text-sm">
+      <input
+        id={id}
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="h-4 w-4 rounded border-border accent-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      />
+      {label}
+    </label>
   );
 }
 
