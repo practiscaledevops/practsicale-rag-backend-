@@ -21,7 +21,7 @@
 import { createDataStreamResponse, streamText, convertToCoreMessages, formatDataStreamPart } from "ai";
 import { getModel } from "@/lib/llm";
 import { generationParams } from "@/lib/models-catalog";
-import { buildContext } from "@/lib/prompts";
+import { buildContext, modeInstruction } from "@/lib/prompts";
 import { getActivePrompt } from "@/lib/prompts-db";
 import { loadSettings } from "@/lib/settings";
 import { runRetrieval } from "@/lib/pipeline";
@@ -69,7 +69,12 @@ export async function POST(req: Request) {
     );
   }
 
-  const { messages, model: tier } = await req.json();
+  const body = await req.json();
+  const { messages, model: tier } = body;
+  // Optional persona overlay. The caller (a trusted spoke) resolves the user's
+  // role server-side and passes a mode; we never infer it from chat.
+  const mode: string | undefined = typeof body?.mode === "string" ? body.mode : undefined;
+  const modeBlock = modeInstruction(mode);
   const history = (messages ?? []).filter(
     (m: any) => m?.role === "user" || m?.role === "assistant"
   );
@@ -150,7 +155,7 @@ export async function POST(req: Request) {
       // Stable content first (system + context), user's messages last → caching-friendly.
       const result = streamText({
         model: resolvedModel,
-        system: `${groundingPrompt}\n\nContext:\n${context}`,
+        system: `${groundingPrompt}${modeBlock ? `\n\n${modeBlock}` : ""}\n\nContext:\n${context}`,
         messages: convertToCoreMessages(messages ?? []),
         // Omit `temperature` for models that reject it (Opus 4.8 + Claude 5 family)
         // so switching to them never 400s into an empty stream.
