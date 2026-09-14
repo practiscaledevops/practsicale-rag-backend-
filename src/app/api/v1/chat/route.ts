@@ -29,6 +29,7 @@ import { validateCitations, checkFaithfulness } from "@/lib/faithfulness";
 import { resolveContext, AuthError } from "@/lib/auth/context";
 import { requireCapability, narrowScope } from "@/lib/auth/scope";
 import { routeTier } from "@/lib/route-tier";
+import { logQuery } from "@/lib/query-log";
 import { checkRateLimit, rateLimitHeaders } from "@/lib/ratelimit";
 import { costUsd } from "@/lib/pricing";
 import { supabaseAdmin } from "@/lib/supabase";
@@ -161,7 +162,7 @@ export async function POST(req: Request) {
       }
 
       // Retrieval with live per-stage status events.
-      const { chunks, rewritten, confidence } = await runRetrieval({
+      const { chunks, rewritten, confidence, sourceTypes: retrievedSourceTypes } = await runRetrieval({
         orgId: ctx.orgId,
         query,
         history,
@@ -221,6 +222,18 @@ export async function POST(req: Request) {
           ({ error }) => error && console.error("[usage] insert failed:", error.message),
           (e) => console.error("[usage] insert error:", e)
         );
+        // Knowledge-gap signal: a refused question is a candidate gap.
+        void logQuery({
+          orgId: ctx.orgId,
+          apiKeyId: ctx.key.id,
+          query,
+          mode,
+          sourceTypes: retrievedSourceTypes,
+          retrievedDocIds: [],
+          grounded: true,
+          confidence,
+          refused: true,
+        });
         return;
       }
 
@@ -277,6 +290,18 @@ export async function POST(req: Request) {
             ({ error }) => error && console.error("[usage] insert failed:", error.message),
             (e) => console.error("[usage] insert error:", e)
           );
+          // Per-answer log for knowledge intelligence (most-used sources, gaps).
+          void logQuery({
+            orgId: ctx.orgId,
+            apiKeyId: ctx.key.id,
+            query,
+            mode,
+            sourceTypes: retrievedSourceTypes,
+            retrievedDocIds: docIds,
+            grounded,
+            confidence,
+            refused: false,
+          });
         },
       });
 

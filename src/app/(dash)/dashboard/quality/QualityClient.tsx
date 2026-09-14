@@ -11,18 +11,28 @@ import {
   CartesianGrid,
   Tooltip,
 } from "recharts";
-import { ShieldCheck, ShieldOff, AlertTriangle, Timer, MessageSquare } from "lucide-react";
+import Link from "next/link";
+import { ShieldCheck, ShieldOff, AlertTriangle, Timer, MessageSquare, FileText, HelpCircle } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
+import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { cn } from "@/lib/utils";
 import type { RagQuality } from "@/lib/rag-quality";
+import type { KnowledgeInsights } from "@/lib/knowledge-insights";
+
+const SOURCE_LABELS: Record<string, string> = {
+  document: "Document",
+  call_score: "Call score",
+  coaching: "Coaching",
+  transcript: "Transcript",
+};
 
 const RANGES = [7, 30, 90] as const;
 
 const pct = (v: number | null) => (v === null ? "—" : `${Math.round(v * 100)}%`);
 const ms = (v: number | null) => (v === null ? "—" : v < 1000 ? `${v}ms` : `${(v / 1000).toFixed(1)}s`);
 
-export function QualityClient({ data }: { data: RagQuality }) {
+export function QualityClient({ data, insights }: { data: RagQuality; insights: KnowledgeInsights }) {
   const router = useRouter();
   const params = useSearchParams();
   const days = Number(params.get("days")) || data.days;
@@ -102,6 +112,74 @@ export function QualityClient({ data }: { data: RagQuality }) {
             </CardContent>
           </Card>
 
+          {/* Knowledge intelligence from the per-answer query log (migration 0014). */}
+          {insights.enabled ? (
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <FileText className="h-4 w-4 text-accent" /> Most-used knowledge sources
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {insights.mostUsedSources.length === 0 ? (
+                    <p className="py-6 text-center text-sm text-muted-foreground">No source usage recorded yet.</p>
+                  ) : (
+                    <ul className="space-y-1">
+                      {insights.mostUsedSources.map((s, i) => (
+                        <li key={s.documentId} className="flex items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-surface-muted">
+                          <span className="w-5 shrink-0 text-center text-xs font-semibold text-muted-foreground">{i + 1}</span>
+                          <Link href={`/dashboard/documents/${s.documentId}`} className="min-w-0 flex-1 truncate text-sm font-medium text-accent hover:underline">
+                            {s.title || "Untitled"}
+                          </Link>
+                          {s.sourceType && <Badge tone="neutral">{SOURCE_LABELS[s.sourceType] ?? s.sourceType}</Badge>}
+                          <span className="w-16 shrink-0 text-right text-sm tabular-nums text-muted-foreground">{s.uses} uses</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <HelpCircle className="h-4 w-4 text-amber-500" /> Top unanswered questions
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {insights.topUnanswered.length === 0 ? (
+                    <p className="py-6 text-center text-sm text-muted-foreground">
+                      No knowledge gaps — every question found support. 🎉
+                    </p>
+                  ) : (
+                    <ul className="space-y-1.5">
+                      {insights.topUnanswered.map((g, i) => (
+                        <li key={i} className="flex items-start gap-3 rounded-lg px-2 py-1.5">
+                          <span className="mt-0.5 shrink-0 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-semibold text-amber-500">{g.count}×</span>
+                          <span className="min-w-0 flex-1 text-sm">{g.query}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="mt-3 text-xs text-muted-foreground">
+                    Questions the chatbot refused or couldn&apos;t ground — the knowledge to add next.
+                  </p>
+                </CardContent>
+              </Card>
+            </div>
+          ) : (
+            <Card>
+              <CardContent className="p-5">
+                <p className="text-sm font-medium">Most-used sources &amp; knowledge gaps aren&apos;t enabled yet</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Run migration <code>0014_query_log.sql</code> to start logging which sources answers use and which
+                  questions go unanswered.
+                </p>
+              </CardContent>
+            </Card>
+          )}
+
           <Card>
             <CardContent className="p-5">
               <h2 className="text-base font-semibold">What these mean</h2>
@@ -110,9 +188,6 @@ export function QualityClient({ data }: { data: RagQuality }) {
                 <li><strong className="text-foreground">Ungrounded / refused</strong> — the model either couldn&apos;t support its answer or correctly refused. A rising count can mean a knowledge gap.</li>
                 <li><strong className="text-foreground">Citation issues</strong> — answers that cited an id that wasn&apos;t in the retrieved set (caught + counted, never shown as a real source).</li>
               </ul>
-              <p className="mt-3 text-xs text-muted-foreground">
-                Coming next (needs per-answer logging): top unanswered questions and most-used knowledge sources.
-              </p>
             </CardContent>
           </Card>
         </>
