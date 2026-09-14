@@ -4,7 +4,15 @@ import { extractCitationIds, validateCitations } from "@/lib/faithfulness";
 import { mergeSettings, DEFAULT_SETTINGS } from "@/lib/settings";
 import { splitRecursive } from "@/lib/chunking";
 import { costUsd } from "@/lib/pricing";
-import { modeInstruction, isWorkMode, MODE_LABELS, WORK_MODES } from "@/lib/prompts";
+import {
+  modeInstruction,
+  isWorkMode,
+  MODE_LABELS,
+  WORK_MODES,
+  outputInstruction,
+  isOutputType,
+  OUTPUT_TYPES,
+} from "@/lib/prompts";
 import { routeTier } from "@/lib/route-tier";
 
 describe("redactPII", () => {
@@ -91,6 +99,24 @@ describe("modeInstruction (work modes)", () => {
     expect(modeInstruction("not-a-mode")).toBe("");
     expect(isWorkMode("ceo")).toBe(true);
     expect(isWorkMode("nope")).toBe(false);
+  });
+});
+
+describe("outputInstruction (output types)", () => {
+  it("returns a format overlay for every non-answer type, empty for answer/unknown", () => {
+    for (const t of OUTPUT_TYPES) {
+      const block = outputInstruction(t);
+      if (t === "answer") expect(block).toBe("");
+      else expect(block, `type ${t}`).toContain("OUTPUT FORMAT");
+    }
+    expect(outputInstruction(undefined)).toBe("");
+    expect(outputInstruction("not-a-type")).toBe("");
+  });
+
+  it("table format forbids inventing cells (grounding preserved)", () => {
+    expect(outputInstruction("table").toLowerCase()).toContain("never invent");
+    expect(isOutputType("table")).toBe(true);
+    expect(isOutputType("nope")).toBe(false);
   });
 });
 

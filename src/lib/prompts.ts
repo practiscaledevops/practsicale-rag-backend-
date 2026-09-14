@@ -180,6 +180,61 @@ export function modeInstruction(mode: string | undefined | null): string {
   return `${header}\n\n${MODE_INSTRUCTIONS[mode]}`;
 }
 
+// ---------------------------------------------------------------------------
+// Output types (response format)
+//
+// An OVERLAY that shapes the FORMAT of the answer, chosen per turn from the UI
+// (a selector above the message box). Orthogonal to work modes: a mode decides
+// the JOB, an output type decides the SHAPE. Every format still obeys grounding
+// — never invent rows/fields to fill a structure. "answer" is the free-form
+// default (no overlay).
+// ---------------------------------------------------------------------------
+
+export type OutputType =
+  | "answer"
+  | "table"
+  | "memo"
+  | "email"
+  | "checklist"
+  | "summary"
+  | "steps";
+
+export const OUTPUT_TYPES: OutputType[] = [
+  "answer",
+  "table",
+  "memo",
+  "email",
+  "checklist",
+  "summary",
+  "steps",
+];
+
+const OUTPUT_INSTRUCTIONS: Record<OutputType, string> = {
+  answer: "",
+  table: `OUTPUT FORMAT: TABLE
+Present the core of the answer as a Markdown table with clear column headers. Add one short sentence of context before the table only if needed. Include ONLY rows and values supported by the retrieved context — never invent cells to fill the grid; if a cell is unknown, write "—". Cite specific figures [id].`,
+  memo: `OUTPUT FORMAT: MEMO
+Write a crisp professional memo: a one-line **Subject**, a one-line **Bottom line**, then short labeled sections (e.g. Context, Details, Recommendation, Next step). Keep it tight and skimmable.`,
+  email: `OUTPUT FORMAT: EMAIL
+Write a ready-to-send email in PractiScale's brand voice: a **Subject** line, a short greeting, a focused body, and a sign-off. Use placeholders like [Name] only where a real value isn't in the context. No pre-amble about being an email — just write it.`,
+  checklist: `OUTPUT FORMAT: CHECKLIST
+Format the answer as an actionable checklist using Markdown checkboxes ("- [ ] item"), grouped under short headings when helpful. Each item is one concrete action. Keep any framing to a single line above the list.`,
+  summary: `OUTPUT FORMAT: SUMMARY
+Give a concise summary: a one-line headline, then 3 to 7 tight bullets. Lead with the most important point. No long paragraphs.`,
+  steps: `OUTPUT FORMAT: STEP-BY-STEP
+Format the answer as a numbered step-by-step guide. Each step is a clear, self-contained action, in order. Add a one-line intro only if it aids understanding.`,
+};
+
+/** Whether a string is a known output type. */
+export function isOutputType(v: unknown): v is OutputType {
+  return typeof v === "string" && (OUTPUT_TYPES as string[]).includes(v);
+}
+
+/** The format overlay for an output type (empty for "answer"/unknown). */
+export function outputInstruction(type: string | undefined | null): string {
+  return isOutputType(type) ? OUTPUT_INSTRUCTIONS[type] : "";
+}
+
 /** Build the context block passed to the model. Each chunk is tagged by id. */
 export function buildContext(chunks: { id: string; content: string }[]): string {
   return chunks.map((c) => `[${c.id}]\n${c.content}`).join("\n\n---\n\n");

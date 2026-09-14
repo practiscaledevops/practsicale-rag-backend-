@@ -21,7 +21,7 @@
 import { createDataStreamResponse, streamText, convertToCoreMessages, formatDataStreamPart } from "ai";
 import { getModel } from "@/lib/llm";
 import { generationParams } from "@/lib/models-catalog";
-import { buildContext, modeInstruction } from "@/lib/prompts";
+import { buildContext, modeInstruction, outputInstruction } from "@/lib/prompts";
 import { getActivePrompt } from "@/lib/prompts-db";
 import { loadSettings } from "@/lib/settings";
 import { runRetrieval } from "@/lib/pipeline";
@@ -85,6 +85,11 @@ export async function POST(req: Request) {
   // role server-side and passes a mode; we never infer it from chat.
   const mode: string | undefined = typeof body?.mode === "string" ? body.mode : undefined;
   const modeBlock = modeInstruction(mode);
+  // Optional output-type overlay (response FORMAT: table/memo/email/…), chosen in
+  // the UI. Orthogonal to the mode; still grounded (never invents to fill a shape).
+  const outputBlock = outputInstruction(
+    typeof body?.outputType === "string" ? body.outputType : undefined
+  );
   // Optional caller-requested knowledge narrowing (role-based partitioning from a
   // trusted spoke). These can only RESTRICT below the key's scope, never widen it.
   const reqSourceTypes = Array.isArray(body?.sourceTypes)
@@ -231,6 +236,8 @@ export async function POST(req: Request) {
       const result = streamText({
         model: resolvedModel,
         system: `${groundingPrompt}${modeBlock ? `\n\n${modeBlock}` : ""}${
+          outputBlock ? `\n\n${outputBlock}` : ""
+        }${
           deepAnalysis ? `\n\n${DEEP_ANALYSIS_INSTRUCTION}` : ""
         }${
           directives
