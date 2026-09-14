@@ -15,6 +15,7 @@ import {
   Plug,
   BarChart3,
   FlaskConical,
+  Filter,
   Sparkles,
   ShieldAlert,
   Users,
@@ -83,6 +84,8 @@ const NAV_GROUPS: NavGroup[] = [
     title: "Governance",
     items: [
       { href: "/dashboard/prompts", label: "Prompts & modes", icon: MessageSquareText },
+      { href: "/dashboard/model-policy", label: "Model policy", icon: Cpu },
+      { href: "/dashboard/retrieval-policy", label: "Retrieval policy", icon: Filter },
       { href: "/dashboard/keys", label: "API keys", icon: KeyRound },
       { href: "/dashboard/admins", label: "Access & audit", icon: Users },
       { href: "/dashboard/settings", label: "Settings", icon: SlidersHorizontal },
