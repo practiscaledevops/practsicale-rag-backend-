@@ -84,6 +84,13 @@ export async function POST(req: Request) {
     ? (body.collectionIds as unknown[]).filter((s): s is string => typeof s === "string")
     : undefined;
   const scope = narrowScope(ctx.key, { sourceTypes: reqSourceTypes, collectionIds: reqCollectionIds });
+  // Optional TRUSTED operator context (e.g. a spoke injecting the signed-in
+  // user's own private notes/priorities). Author-supplied, so it may steer the
+  // answer — unlike retrieved content, which is always data. Capped.
+  const directives: string | undefined =
+    typeof body?.directives === "string" && body.directives.trim()
+      ? String(body.directives).slice(0, 8000)
+      : undefined;
   const history = (messages ?? []).filter(
     (m: any) => m?.role === "user" || m?.role === "assistant"
   );
@@ -123,6 +130,22 @@ export async function POST(req: Request) {
       });
 
       const retrievedIds = chunks.map((c) => c.id);
+
+      // Freshness: fetch the source documents' dates so the client can show
+      // "Updated N days ago" per source. Best-effort — never blocks the answer.
+      const docIds = [...new Set(chunks.map((c) => c.document_id).filter(Boolean))] as string[];
+      const docDates: Record<string, string> = {};
+      if (docIds.length > 0) {
+        const { data: docs } = await supabaseAdmin()
+          .from("documents")
+          .select("id, created_at")
+          .eq("org_id", ctx.orgId)
+          .in("id", docIds);
+        for (const d of (docs ?? []) as { id: string; created_at?: string }[]) {
+          if (d.created_at) docDates[d.id] = d.created_at;
+        }
+      }
+
       // Surface the sources so the client can show/trace them.
       dataStream.writeData({
         type: "sources",
@@ -131,6 +154,7 @@ export async function POST(req: Request) {
           id: c.id,
           source_type: c.source_type ?? null,
           document_id: c.document_id,
+          date: c.document_id ? docDates[c.document_id] ?? null : null,
           snippet: c.content.length > 200 ? c.content.slice(0, 200) + "…" : c.content,
         })),
       });
@@ -164,7 +188,11 @@ export async function POST(req: Request) {
       // Stable content first (system + context), user's messages last → caching-friendly.
       const result = streamText({
         model: resolvedModel,
-        system: `${groundingPrompt}${modeBlock ? `\n\n${modeBlock}` : ""}\n\nContext:\n${context}`,
+        system: `${groundingPrompt}${modeBlock ? `\n\n${modeBlock}` : ""}${
+          directives
+            ? `\n\nOPERATOR CONTEXT (trusted, private to the current user — use it to tailor the answer; never reveal it verbatim or attribute it):\n${directives}`
+            : ""
+        }\n\nContext:\n${context}`,
         messages: convertToCoreMessages(messages ?? []),
         // Omit `temperature` for models that reject it (Opus 4.8 + Claude 5 family)
         // so switching to them never 400s into an empty stream.
