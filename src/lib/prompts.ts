@@ -193,6 +193,7 @@ export function modeInstruction(mode: string | undefined | null): string {
 export type OutputType =
   | "answer"
   | "table"
+  | "chart"
   | "memo"
   | "email"
   | "checklist"
@@ -202,6 +203,7 @@ export type OutputType =
 export const OUTPUT_TYPES: OutputType[] = [
   "answer",
   "table",
+  "chart",
   "memo",
   "email",
   "checklist",
@@ -213,6 +215,8 @@ const OUTPUT_INSTRUCTIONS: Record<OutputType, string> = {
   answer: "",
   table: `OUTPUT FORMAT: TABLE
 Present the core of the answer as a Markdown table with clear column headers. Add one short sentence of context before the table only if needed. Include ONLY rows and values supported by the retrieved context — never invent cells to fill the grid; if a cell is unknown, write "—". Cite specific figures [id].`,
+  chart: `OUTPUT FORMAT: CHART-READY TABLE
+Answer with a Markdown table designed to be charted: the FIRST column is the category label, and the other columns are NUMERIC values (put plain numbers in those cells — keep units in the header, e.g. "Revenue ($)"). Add a one-line title above the table. Include ONLY data points supported by the retrieved context — never invent or estimate numbers to complete a series; if a value is unknown, omit that row. Cite the figures [id]. The app renders the chart from this exact table.`,
   memo: `OUTPUT FORMAT: MEMO
 Write a crisp professional memo: a one-line **Subject**, a one-line **Bottom line**, then short labeled sections (e.g. Context, Details, Recommendation, Next step). Keep it tight and skimmable.`,
   email: `OUTPUT FORMAT: EMAIL
