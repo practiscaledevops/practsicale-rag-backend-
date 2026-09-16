@@ -26,7 +26,11 @@ import {
   Loader2,
   ChevronRight,
   X,
+  Pencil,
+  Save,
 } from "lucide-react";
+import { WORK_MODES, MODE_LABELS } from "@/lib/prompts";
+import { ACCESS_LEVELS } from "@/lib/knowledge-taxonomy";
 
 // ---- Green palette (self-contained; independent of global tokens) -----------
 const C = {
@@ -565,16 +569,27 @@ function MenuItem({ icon: Icon, label, onClick, danger }: { icon: typeof Eye; la
 type Enriched = { docs: WsDocument[]; chunks: number; lastUpdated: string | null; failing: number; stale: number; restricted: boolean; sourceKind: string; attention: string | null };
 
 function CollectionInspector({ c, enriched, governanceEnabled }: { c: WsCollection; enriched?: Enriched; governanceEnabled: boolean }) {
+  const router = useRouter();
   const s = c.settings ?? {};
   const docs = enriched?.docs ?? [];
+  const [editing, setEditing] = React.useState(false);
+  React.useEffect(() => setEditing(false), [c.id]);
+
   return (
     <>
-      <div className="shrink-0 border-b p-4" style={{ borderColor: C.border }}>
-        <div className="flex items-center gap-2">
-          {enriched?.restricted ? <Lock size={16} style={{ color: C.restricted }} /> : <Folder size={16} style={{ color: C.green }} />}
-          <h2 className="truncate text-sm font-semibold">{c.name}</h2>
+      <div className="flex shrink-0 items-start justify-between gap-2 border-b p-4" style={{ borderColor: C.border }}>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            {enriched?.restricted ? <Lock size={16} style={{ color: C.restricted }} /> : <Folder size={16} style={{ color: C.green }} />}
+            <h2 className="truncate text-sm font-semibold">{c.name}</h2>
+          </div>
+          {c.description && <p className="mt-1 text-xs" style={{ color: C.muted }}>{c.description}</p>}
         </div>
-        {c.description && <p className="mt-1 text-xs" style={{ color: C.muted }}>{c.description}</p>}
+        {governanceEnabled && !editing && (
+          <button type="button" onClick={() => setEditing(true)} className="inline-flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-[11px]" style={{ borderColor: C.border, color: C.muted }}>
+            <Pencil size={11} /> Edit
+          </button>
+        )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <div className="grid grid-cols-2 gap-2">
@@ -584,35 +599,155 @@ function CollectionInspector({ c, enriched, governanceEnabled }: { c: WsCollecti
           <Stat label="Stale (90d+)" value={String(enriched?.stale ?? 0)} tone={(enriched?.stale ?? 0) > 0 ? "warn" : "ok"} />
         </div>
 
-        <Section title="Governance">
-          <Row label="Owner">{s.owner || <Missing />}</Row>
-          <Row label="Access level">{ACCESS_LABEL[s.access_level ?? ""] ?? "Team"}</Row>
-          <Row label="Source">{enriched?.sourceKind ?? "—"}</Row>
-          <Row label="Last updated">{relTime(enriched?.lastUpdated ?? null)}</Row>
-          <Row label="Review cycle">{s.review_interval_days ? `${s.review_interval_days} days` : <Missing />}</Row>
-          <Row label="Retention">{s.retention_days ? `${s.retention_days} days` : "Keep"}</Row>
-        </Section>
+        {editing ? (
+          <GovernanceEditor
+            id={c.id}
+            initial={s}
+            onCancel={() => setEditing(false)}
+            onSaved={() => { setEditing(false); router.refresh(); }}
+          />
+        ) : (
+          <>
+            <Section title="Governance">
+              <Row label="Owner">{s.owner || <Missing />}</Row>
+              <Row label="Access level">{ACCESS_LABEL[s.access_level ?? ""] ?? "Team"}</Row>
+              <Row label="Source">{enriched?.sourceKind ?? "—"}</Row>
+              <Row label="Last updated">{relTime(enriched?.lastUpdated ?? null)}</Row>
+              <Row label="Review cycle">{s.review_interval_days ? `${s.review_interval_days} days` : <Missing />}</Row>
+              <Row label="Retention">{s.retention_days ? `${s.retention_days} days` : "Keep"}</Row>
+            </Section>
 
-        <Section title="Chatbot eligibility">
-          <div className="flex flex-wrap gap-1.5">
-            {s.ceo_copilot_eligible !== false && <Chip>CEO Copilot</Chip>}
-            {s.employee_chat_eligible !== false && <Chip>Team chat</Chip>}
-            {s.client_facing_eligible && <Chip tone="warn">Client-facing</Chip>}
-          </div>
-          {(s.allowed_work_modes?.length ?? 0) > 0 && (
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {s.allowed_work_modes!.map((m) => <Chip key={m}>{m.replace(/_/g, " ")}</Chip>)}
-            </div>
-          )}
-        </Section>
+            <Section title="Chatbot eligibility">
+              <div className="flex flex-wrap gap-1.5">
+                {s.ceo_copilot_eligible !== false && <Chip>CEO Copilot</Chip>}
+                {s.employee_chat_eligible !== false && <Chip>Team chat</Chip>}
+                {s.client_facing_eligible && <Chip tone="warn">Client-facing</Chip>}
+              </div>
+              {(s.allowed_work_modes?.length ?? 0) > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {s.allowed_work_modes!.map((m) => <Chip key={m}>{MODE_LABELS[m as keyof typeof MODE_LABELS] ?? m.replace(/_/g, " ")}</Chip>)}
+                </div>
+              )}
+            </Section>
 
-        {!governanceEnabled && (
-          <p className="mt-4 rounded-lg border p-2 text-[11px]" style={{ borderColor: C.amber, color: C.amber, backgroundColor: "rgba(243,182,97,0.08)" }}>
-            Governance fields need migration 0013_collection_settings.sql.
-          </p>
+            {!governanceEnabled && (
+              <p className="mt-4 rounded-lg border p-2 text-[11px]" style={{ borderColor: C.amber, color: C.amber, backgroundColor: "rgba(243,182,97,0.08)" }}>
+                Governance fields need migration 0013_collection_settings.sql.
+              </p>
+            )}
+          </>
         )}
       </div>
     </>
+  );
+}
+
+function GovernanceEditor({ id, initial, onCancel, onSaved }: { id: string; initial: WsSettings; onCancel: () => void; onSaved: () => void }) {
+  const [owner, setOwner] = React.useState(initial.owner ?? "");
+  const [access, setAccess] = React.useState(initial.access_level ?? "team");
+  const [review, setReview] = React.useState(initial.review_interval_days?.toString() ?? "");
+  const [retention, setRetention] = React.useState(initial.retention_days?.toString() ?? "");
+  const [modes, setModes] = React.useState<Set<string>>(() => new Set(initial.allowed_work_modes ?? []));
+  const [ceo, setCeo] = React.useState(initial.ceo_copilot_eligible !== false);
+  const [team, setTeam] = React.useState(initial.employee_chat_eligible !== false);
+  const [client, setClient] = React.useState(initial.client_facing_eligible === true);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState<string | null>(null);
+
+  const field = "w-full rounded-md border bg-transparent px-2 py-1.5 text-xs outline-none";
+  const fieldStyle = { borderColor: C.border, color: C.text };
+
+  async function save() {
+    setBusy(true);
+    setErr(null);
+    const settings: WsSettings = {
+      owner: owner.trim() || undefined,
+      access_level: access,
+      allowed_work_modes: [...modes],
+      review_interval_days: review ? Math.max(0, parseInt(review, 10)) : null,
+      retention_days: retention ? Math.max(0, parseInt(retention, 10)) : null,
+      ceo_copilot_eligible: ceo,
+      employee_chat_eligible: team,
+      client_facing_eligible: client,
+    };
+    try {
+      const res = await fetch(`/api/admin/collections/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ settings }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        setErr(j.error ?? "Save failed");
+        return;
+      }
+      onSaved();
+    } catch {
+      setErr("Network error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-4 space-y-3">
+      {err && <p className="text-[11px]" style={{ color: C.red }}>{err}</p>}
+      <div>
+        <label className="mb-1 block text-[10px] uppercase tracking-wider" style={{ color: C.muted }}>Owner</label>
+        <input value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="e.g. Afra" className={field} style={fieldStyle} />
+      </div>
+      <div>
+        <label className="mb-1 block text-[10px] uppercase tracking-wider" style={{ color: C.muted }}>Access level</label>
+        <select value={access} onChange={(e) => setAccess(e.target.value)} className={field} style={{ ...fieldStyle, backgroundColor: C.surface }}>
+          {ACCESS_LEVELS.map((a) => <option key={a.value} value={a.value} style={{ color: "#000" }}>{a.label} — {a.scope}</option>)}
+        </select>
+      </div>
+      <div>
+        <label className="mb-1 block text-[10px] uppercase tracking-wider" style={{ color: C.muted }}>Allowed work modes</label>
+        <div className="flex flex-wrap gap-1">
+          {WORK_MODES.map((m) => {
+            const on = modes.has(m);
+            return (
+              <button key={m} type="button" onClick={() => setModes((p) => { const n = new Set(p); if (n.has(m)) n.delete(m); else n.add(m); return n; })}
+                className="rounded-full border px-2 py-0.5 text-[10px]"
+                style={on ? { borderColor: C.green, color: C.green, backgroundColor: "rgba(0,191,174,0.12)" } : { borderColor: C.border, color: C.muted }}>
+                {MODE_LABELS[m]}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="mb-1 block text-[10px] uppercase tracking-wider" style={{ color: C.muted }}>Review (days)</label>
+          <input type="number" min={0} value={review} onChange={(e) => setReview(e.target.value)} className={field} style={fieldStyle} />
+        </div>
+        <div>
+          <label className="mb-1 block text-[10px] uppercase tracking-wider" style={{ color: C.muted }}>Retention (days)</label>
+          <input type="number" min={0} value={retention} onChange={(e) => setRetention(e.target.value)} placeholder="keep" className={field} style={fieldStyle} />
+        </div>
+      </div>
+      <div className="space-y-1.5 rounded-lg border p-2" style={{ borderColor: C.border }}>
+        <EditCheck label="CEO Copilot" checked={ceo} onChange={setCeo} />
+        <EditCheck label="Employee chat" checked={team} onChange={setTeam} />
+        <EditCheck label="Client-facing generation" checked={client} onChange={setClient} />
+      </div>
+      <div className="flex justify-end gap-2">
+        <button type="button" onClick={onCancel} disabled={busy} className="rounded-md border px-3 py-1.5 text-xs" style={{ borderColor: C.border, color: C.muted }}>Cancel</button>
+        <button type="button" onClick={save} disabled={busy} className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium" style={{ backgroundColor: C.green, color: C.bg, opacity: busy ? 0.5 : 1 }}>
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />} Save
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function EditCheck({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label className="flex cursor-pointer items-center gap-2 text-xs" style={{ color: C.text }}>
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="h-3.5 w-3.5" style={{ accentColor: C.green }} />
+      {label}
+    </label>
   );
 }
 
