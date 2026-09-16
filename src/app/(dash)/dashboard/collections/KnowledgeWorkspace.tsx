@@ -754,22 +754,30 @@ function EditCheck({ label, checked, onChange }: { label: string; checked: boole
 // ---------------------------------------------------------------------------
 // Right: document inspector (+ chunk drill-down)
 // ---------------------------------------------------------------------------
-interface InspectChunk { id: string; content: string; context: string | null; parentId: string | null; tokenCount: number | null; isParent: boolean }
+interface InspectChunk { id: string; content: string; context: string | null; parentId: string | null; tokenCount: number | null; isParent: boolean; retrievals: number; citations: number; lastRetrieved: string | null; avgScore: number | null }
+interface InspectStats { totalRetrievals: number; citations: number; lastRetrieved: string | null }
+interface InspectRun { status: string; trigger: string; chunks: number; error: string | null; startedAt: string; finishedAt: string | null }
 
 function DocumentInspector({ d, onClose, onReprocess }: { d: WsDocument; onClose: () => void; onReprocess: () => void }) {
   const [chunks, setChunks] = React.useState<InspectChunk[] | null>(null);
+  const [stats, setStats] = React.useState<InspectStats | null>(null);
+  const [runs, setRuns] = React.useState<InspectRun[]>([]);
   const [openChunk, setOpenChunk] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     let cancelled = false;
     setChunks(null);
+    setStats(null);
+    setRuns([]);
     setOpenChunk(null);
     (async () => {
       try {
         const res = await fetch(`/api/admin/documents/${d.id}/inspect`, { cache: "no-store" });
         if (res.ok && !cancelled) {
-          const data = (await res.json()) as { chunks: InspectChunk[] };
+          const data = (await res.json()) as { chunks: InspectChunk[]; stats?: InspectStats; runs?: InspectRun[] };
           setChunks(data.chunks ?? []);
+          setStats(data.stats ?? null);
+          setRuns(data.runs ?? []);
         } else if (!cancelled) setChunks([]);
       } catch {
         if (!cancelled) setChunks([]);
@@ -800,7 +808,12 @@ function DocumentInspector({ d, onClose, onReprocess }: { d: WsDocument; onClose
         <div className="grid grid-cols-2 gap-2">
           <Stat label="Chunks" value={String(d.chunkCount)} />
           <Stat label="Index" value={ready ? "Indexed" : "Pending"} tone={ready ? "ok" : "warn"} />
+          <Stat label="Retrievals" value={stats ? stats.totalRetrievals.toLocaleString() : "—"} />
+          <Stat label="Citations" value={stats ? stats.citations.toLocaleString() : "—"} tone={stats && stats.citations > 0 ? "ok" : undefined} />
         </div>
+        {stats?.lastRetrieved && (
+          <p className="mt-2 text-[11px]" style={{ color: C.muted }}>Last retrieved {relTime(stats.lastRetrieved)}</p>
+        )}
 
         <Section title="Metadata">
           <Row label="Category">{d.category || <Missing />}</Row>
@@ -819,6 +832,24 @@ function DocumentInspector({ d, onClose, onReprocess }: { d: WsDocument; onClose
             <RefreshCw size={13} /> Reprocess
           </button>
         </div>
+
+        {runs.length > 0 && (
+          <Section title="Processing runs">
+            <ul className="space-y-1">
+              {runs.map((r, i) => (
+                <li key={i} className="flex items-center justify-between gap-2 rounded-lg border px-2 py-1.5 text-[11px]" style={{ borderColor: C.border, backgroundColor: C.surface }}>
+                  <span className="flex items-center gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: r.status === "success" ? C.green : r.status === "error" ? C.red : C.amber }} />
+                    <span className="capitalize" style={{ color: C.text }}>{r.trigger}</span>
+                    <span style={{ color: C.muted }}>· {r.chunks} chunks</span>
+                    {r.error && <span style={{ color: C.red }}>· {r.error.slice(0, 24)}</span>}
+                  </span>
+                  <span style={{ color: C.muted }}>{relTime(r.startedAt)}</span>
+                </li>
+              ))}
+            </ul>
+          </Section>
+        )}
 
         <Section title={`Chunks${chunks ? ` (${chunks.length})` : ""}`}>
           {chunks === null ? (
@@ -848,9 +879,13 @@ function DocumentInspector({ d, onClose, onReprocess }: { d: WsDocument; onClose
                         <p className="mb-2 text-[11px] italic" style={{ color: C.muted }}>{ch.context}</p>
                       )}
                       <p className="whitespace-pre-wrap text-[11px] leading-relaxed" style={{ color: C.text }}>{ch.content}</p>
-                      <div className="mt-2 flex items-center justify-between text-[10px]" style={{ color: C.muted }}>
+                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px]" style={{ color: C.muted }}>
                         <span>Position {i + 1} of {chunks.length}</span>
                         {ch.tokenCount ? <span>{ch.tokenCount} tokens</span> : null}
+                        <span>· retrieved {ch.retrievals}×</span>
+                        {ch.avgScore !== null && <span>score {ch.avgScore.toFixed(2)}</span>}
+                        {ch.citations > 0 && <span style={{ color: C.green }}>cited {ch.citations}×</span>}
+                        {ch.lastRetrieved && <span>last {relTime(ch.lastRetrieved)}</span>}
                       </div>
                     </div>
                   )}

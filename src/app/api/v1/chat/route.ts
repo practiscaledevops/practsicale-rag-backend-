@@ -30,6 +30,7 @@ import { resolveContext, AuthError } from "@/lib/auth/context";
 import { requireCapability, narrowScope } from "@/lib/auth/scope";
 import { routeTier } from "@/lib/route-tier";
 import { logQuery } from "@/lib/query-log";
+import { logChunkRetrievals } from "@/lib/chunk-retrieval-log";
 import { checkRateLimit, rateLimitHeaders } from "@/lib/ratelimit";
 import { costUsd } from "@/lib/pricing";
 import { supabaseAdmin } from "@/lib/supabase";
@@ -267,7 +268,7 @@ export async function POST(req: Request) {
         async onFinish({ usage, text }) {
           const inputTokens = usage?.promptTokens ?? 0;
           const outputTokens = usage?.completionTokens ?? 0;
-          const { fabricated } = validateCitations(text ?? "", retrievedIds);
+          const { valid, fabricated } = validateCitations(text ?? "", retrievedIds);
           let grounded: boolean | null = null;
           if (settings.features.faithfulnessCheck) {
             const fp = await getActivePrompt(ctx.orgId, "faithfulness");
@@ -302,6 +303,18 @@ export async function POST(req: Request) {
             confidence,
             refused: false,
           });
+          // Per-chunk retrieval log (inspector: retrieval count, last retrieved,
+          // score, citation usage). Each in-context chunk, flagged if cited.
+          const citedSet = new Set(valid);
+          void logChunkRetrievals(
+            ctx.orgId,
+            chunks.map((c) => ({
+              chunkId: c.id,
+              documentId: c.document_id,
+              score: c.score ?? null,
+              cited: citedSet.has(c.id),
+            }))
+          );
         },
       });
 

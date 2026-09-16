@@ -165,6 +165,19 @@ export async function POST(req: Request) {
       })
       .eq("id", run?.id);
 
+    // Link the run to its document for the inspector's run history (best-effort;
+    // skipped until migration 0016 adds the column).
+    if (run?.id && res.documentId) {
+      await db
+        .from("ingestion_runs")
+        .update({ document_id: res.documentId })
+        .eq("id", run.id)
+        .then(
+          ({ error }) => error && !/document_id/i.test(error.message) && console.error("[upload] run link failed:", error.message),
+          () => {}
+        );
+    }
+
     return Response.json({
       documentId: res.documentId,
       chunks: res.chunks,
