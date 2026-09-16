@@ -3,17 +3,17 @@ import { supabaseAdmin } from "@/lib/supabase";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Alert } from "@/components/ui/Alert";
 import {
-  CollectionsClient,
-  type CollectionRow,
-  type DocumentOption,
-} from "./CollectionsClient";
+  KnowledgeWorkspace,
+  type WsCollection,
+  type WsDocument,
+} from "./KnowledgeWorkspace";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic"; // always reflect current collections
+export const dynamic = "force-dynamic";
 
-// Embedded aggregate: PostgREST returns document_collections as [{ count: n }]
-// per collection (FK document_collections.collection_id -> collections.id).
-interface RawCollection {
+const DOC_LIMIT = 3000;
+
+interface RawCol {
   id: string;
   name: string;
   slug: string | null;
@@ -22,37 +22,45 @@ interface RawCollection {
   settings?: Record<string, unknown> | null;
   document_collections: { count: number }[] | null;
 }
+interface RawDoc {
+  id: string;
+  title: string | null;
+  source_type: string;
+  uri: string | null;
+  created_at: string;
+  updated_at: string | null;
+  metadata: Record<string, unknown> | null;
+  chunks: { count: number }[] | null;
+  document_collections: { collection_id: string }[] | null;
+}
 
-const BASE_COLS = "id, name, slug, description, created_at, document_collections(count)";
+function meta(m: Record<string, unknown> | null, ...keys: string[]): string | null {
+  if (!m) return null;
+  for (const k of keys) {
+    const v = m[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+}
 
-/**
- * Load collections, preferring the governance `settings` column but degrading to
- * the base columns if migration 0013 hasn't been applied (undefined_column). The
- * `enabled` flag tells the client whether to offer the governance editor.
- */
+/** Load collections, tolerating a missing `settings` column (pre-migration 0013). */
 async function loadCollections(db: ReturnType<typeof supabaseAdmin>, orgId: string) {
+  const base = "id, name, slug, description, created_at, document_collections(count)";
   const withSettings = await db
     .from("collections")
-    .select(`${BASE_COLS}, settings`)
+    .select(`${base}, settings`)
     .eq("org_id", orgId)
-    .order("created_at", { ascending: false });
-
-  if (!withSettings.error) {
-    return { data: withSettings.data as RawCollection[] | null, error: null, enabled: true };
-  }
-  // 42703 = undefined_column → settings not migrated yet. Fall back gracefully.
-  const base = await db
+    .order("name", { ascending: true });
+  if (!withSettings.error) return { data: withSettings.data as RawCol[] | null, enabled: true };
+  const fb = await db
     .from("collections")
-    .select(BASE_COLS)
+    .select(base)
     .eq("org_id", orgId)
-    .order("created_at", { ascending: false });
-  return { data: base.data as RawCollection[] | null, error: base.error, enabled: false };
+    .order("name", { ascending: true });
+  return { data: fb.data as RawCol[] | null, enabled: false };
 }
 
 export default async function CollectionsPage() {
-  // requireAdmin resolves org_id server-side from the session — never client input.
-  // A signed-in admin without the collections:read grant sees a 403 notice
-  // rather than an unhandled error (the layout already guarantees a session).
   let admin;
   try {
     admin = await requireAdmin("collections:read");
@@ -60,10 +68,7 @@ export default async function CollectionsPage() {
     const err = e as AdminAuthError;
     return (
       <div>
-        <PageHeader
-          title="Collections"
-          description="Group documents into collections that scoped API keys can be limited to."
-        />
+        <PageHeader title="Collections" description="Your knowledge, organized by collection." />
         <Alert tone="danger" title="You don't have access to collections">
           {err.status === 403
             ? "Your account is missing the 'collections:read' permission. Ask an administrator to grant it."
@@ -74,66 +79,47 @@ export default async function CollectionsPage() {
   }
 
   const db = supabaseAdmin();
-
-  // Load, in parallel: collections (+counts +governance settings), all org
-  // documents (for the picker), and the full membership map.
-  const [collectionsRes, documentsRes, membershipRes] = await Promise.all([
+  const [colRes, docRes] = await Promise.all([
     loadCollections(db, admin.orgId),
     db
       .from("documents")
-      .select("id, title, source_type")
+      .select(
+        "id, title, source_type, uri, created_at, updated_at, metadata, chunks(count), document_collections(collection_id)"
+      )
       .eq("org_id", admin.orgId)
-      .order("created_at", { ascending: false }),
-    db
-      .from("document_collections")
-      .select("collection_id, document_id")
-      .eq("org_id", admin.orgId),
+      .order("updated_at", { ascending: false })
+      .limit(DOC_LIMIT),
   ]);
 
-  const error = collectionsRes.error ?? documentsRes.error ?? membershipRes.error;
-  const governanceEnabled = collectionsRes.enabled;
-
-  const collections: CollectionRow[] = (collectionsRes.data ?? []).map((c) => ({
+  const collections: WsCollection[] = ((colRes.data as RawCol[]) ?? []).map((c) => ({
     id: c.id,
     name: c.name,
-    slug: c.slug,
     description: c.description,
-    created_at: c.created_at,
-    document_count: c.document_collections?.[0]?.count ?? 0,
-    settings: (c.settings ?? {}) as CollectionRow["settings"],
+    createdAt: c.created_at,
+    docCount: c.document_collections?.[0]?.count ?? 0,
+    settings: (c.settings ?? {}) as WsCollection["settings"],
   }));
 
-  const documents: DocumentOption[] = ((documentsRes.data as DocumentOption[]) ?? []).map(
-    (d) => ({ id: d.id, title: d.title, source_type: d.source_type })
-  );
-
-  // Build { collectionId: [documentId, ...] } for the assign-documents picker.
-  const membership: Record<string, string[]> = {};
-  for (const row of (membershipRes.data as
-    | { collection_id: string; document_id: string }[]
-    | null) ?? []) {
-    (membership[row.collection_id] ??= []).push(row.document_id);
-  }
+  const documents: WsDocument[] = ((docRes.data as unknown as RawDoc[]) ?? []).map((d) => ({
+    id: d.id,
+    title: d.title,
+    sourceType: d.source_type,
+    uri: d.uri,
+    createdAt: d.created_at,
+    updatedAt: d.updated_at ?? d.created_at,
+    chunkCount: d.chunks?.[0]?.count ?? 0,
+    category: meta(d.metadata, "category"),
+    owner: meta(d.metadata, "owner", "source_owner", "author"),
+    access: meta(d.metadata, "confidentiality", "access_level", "access"),
+    reviewDate: meta(d.metadata, "review_date", "expiry_date"),
+    collectionIds: (d.document_collections ?? []).map((x) => x.collection_id).filter(Boolean),
+  }));
 
   return (
-    <div>
-      <PageHeader
-        title="Collections"
-        description="Group documents into collections that scoped API keys can be limited to."
-      />
-
-      {error ? (
-        <Alert tone="danger" title="Could not load collections">
-          {error.message}
-        </Alert>
-      ) : (
-        <CollectionsClient
-          collections={collections}
-          documents={documents}
-          membership={membership}
-          governanceEnabled={governanceEnabled}
-        />
-      )}
-    </div>
+    <KnowledgeWorkspace
+      collections={collections}
+      documents={documents}
+      governanceEnabled={colRes.enabled}
+    />
   );
 }
