@@ -45,9 +45,9 @@ const config: Config = {
         "2xl": "1.125rem",
       },
       boxShadow: {
-        // Soft, enterprise elevation for cards + popovers.
-        soft: "0 1px 2px rgb(16 24 27 / 0.04), 0 4px 16px rgb(16 24 27 / 0.06)",
-        "soft-lg": "0 2px 8px rgb(16 24 27 / 0.06), 0 12px 32px rgb(16 24 27 / 0.10)",
+        // Elevation via CSS vars so shadows stay visible on the dark-green canvas.
+        soft: "var(--shadow-soft)",
+        "soft-lg": "var(--shadow-soft-lg)",
       },
       fontFamily: {
         sans: ["var(--font-sans)", "ui-sans-serif", "system-ui", "sans-serif"],
