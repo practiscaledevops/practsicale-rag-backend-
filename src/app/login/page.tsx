@@ -82,7 +82,7 @@ function LoginForm() {
       <div className="relative w-full max-w-sm">
         <div className="mb-6 flex flex-col items-center gap-3 text-center">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/logo.png" alt="Practiscale" className="h-8 w-auto" />
+          <img src="/logo-white.png" alt="Practiscale" className="h-8 w-auto" />
           <span className="rounded-full bg-accent/10 px-2.5 py-0.5 text-xs font-semibold text-accent">
             Brain · Back office
           </span>
