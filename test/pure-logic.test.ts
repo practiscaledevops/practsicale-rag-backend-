@@ -13,6 +13,7 @@ import {
   isOutputType,
   OUTPUT_TYPES,
   isSmallTalk,
+  buildAttachmentBlock,
 } from "@/lib/prompts";
 import { routeTier } from "@/lib/route-tier";
 
@@ -158,6 +159,46 @@ describe("isSmallTalk", () => {
     ]) {
       expect(isSmallTalk(s), s).toBe(false);
     }
+  });
+});
+
+describe("buildAttachmentBlock", () => {
+  it("returns empty for missing / empty / non-array input", () => {
+    expect(buildAttachmentBlock(undefined)).toBe("");
+    expect(buildAttachmentBlock([])).toBe("");
+    expect(buildAttachmentBlock("nope")).toBe("");
+    expect(buildAttachmentBlock([{ name: "a.txt", text: "   " }])).toBe("");
+  });
+
+  it("frames file content as DATA not instructions (prompt-injection boundary)", () => {
+    const block = buildAttachmentBlock([{ name: "notes.md", text: "Q3 revenue was $1.2M" }]);
+    expect(block).toContain("ATTACHED FILES");
+    expect(block).toContain("--- File: notes.md ---");
+    expect(block).toContain("Q3 revenue was $1.2M");
+    expect(block.toLowerCase()).toContain("not instructions");
+    // Attachments are referenced by name, never [id]-cited, so citation
+    // validation stays clean.
+    expect(block.toLowerCase()).toContain("do not use [id] citations for attachments");
+  });
+
+  it("caps the number of files and truncates long text", () => {
+    const many = Array.from({ length: 9 }, (_, i) => ({ name: `f${i}.txt`, text: `body ${i}` }));
+    const block = buildAttachmentBlock(many, { maxFiles: 3 });
+    expect((block.match(/--- File:/g) ?? []).length).toBe(3);
+
+    const long = buildAttachmentBlock([{ name: "big.txt", text: "x".repeat(500) }], {
+      maxCharsPerFile: 100,
+    });
+    expect(long).toContain("…[truncated]");
+  });
+
+  it("neutralizes newlines in the file name and skips empty files", () => {
+    const block = buildAttachmentBlock([
+      { name: "bad\nname.txt", text: "content" },
+      { name: "empty.txt", text: "" },
+    ]);
+    expect(block).toContain("--- File: bad name.txt ---");
+    expect((block.match(/--- File:/g) ?? []).length).toBe(1);
   });
 });
 
