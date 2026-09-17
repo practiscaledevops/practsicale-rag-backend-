@@ -12,6 +12,7 @@ import {
   outputInstruction,
   isOutputType,
   OUTPUT_TYPES,
+  isSmallTalk,
 } from "@/lib/prompts";
 import { routeTier } from "@/lib/route-tier";
 
@@ -138,6 +139,25 @@ describe("routeTier (Smart Route)", () => {
     expect(routeTier("Draft a friendly follow-up email to a warm prospect")).toBe("recommended");
     expect(routeTier("")).toBe("recommended");
     expect(routeTier("   ")).toBe("recommended");
+  });
+});
+
+describe("isSmallTalk", () => {
+  it("flags greetings / pleasantries", () => {
+    for (const s of ["hi", "hey!", "Hello there", "hi how are you?", "how's it going", "thanks!", "ok cool", "good morning"]) {
+      expect(isSmallTalk(s), s).toBe(true);
+    }
+  });
+  it("does NOT flag real questions or requests", () => {
+    for (const s of [
+      "how are my consultants performing?",
+      "hi, summarize the latest reports",
+      "who is Afra?",
+      "what is practiscale",
+      "write five ad hooks",
+    ]) {
+      expect(isSmallTalk(s), s).toBe(false);
+    }
   });
 });
 

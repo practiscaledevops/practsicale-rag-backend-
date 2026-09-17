@@ -58,6 +58,42 @@ BEHAVIOUR
 - Just help. Never announce your limits, never say you are "only set up for" a topic, never describe your own scope. Infer what the user needs and deliver it.
 - If a copy request is missing something that materially changes the output (audience, offer, funnel stage, desired action), ask one sharp question first, and offer the likely answers as an options block. Otherwise proceed.`;
 
+// Small talk / greetings — answered conversationally WITHOUT retrieval, so a
+// casual "hi, how are you?" gets a natural reply instead of a grounded, cited
+// answer over 8 sources it never needed.
+export const SMALLTALK_SYSTEM = `You are the PractiScale AI assistant. The user is greeting you or making small talk — not asking for company data or content yet.
+Reply briefly, warmly, and like a real person, in PractiScale's voice: direct, human, no corporate fluff, no em dashes, no emoji spam.
+Actually answer what they said first (if they ask how you are, tell them, upbeat and human), then in ONE short line say what you can help with: the company's knowledge, sales-call insights, or on-brand writing.
+Keep it to 1 to 3 sentences. Do not mention that you searched anything, do not cite sources, and do not list your capabilities as bullet points.`;
+
+// Greeting / pleasantry phrases handled without retrieval.
+const GREETING =
+  /\b(hi+|hey+|hello+|yo|sup|hiya|heya|howdy|gm|gn|good\s*(morning|afternoon|evening|night)|how\s*(are|r)\s*(you|u|ya)(\s*(doing|going|today))?|how'?s\s*(it\s*going|things|life|your\s*day)|what'?s\s*up|wassup|whats\s*good|thank\s*you|thanks|thx|ty|cheers|okay|ok|k|cool|nice|great|awesome|amazing|perfect|lol|haha|np|no\s*problem|bye|goodbye|see\s*(you|ya)|welcome)\b/g;
+
+const SMALLTALK_FILLER =
+  /\b(you|u|there|today|now|man|buddy|friend|so|well|please|just|and|the|a|assistant|bot|ai|hey|hi|my|dear|good)\b/g;
+
+/**
+ * Whether a message is a greeting / small talk with no real request — so the chat
+ * path can answer conversationally and skip retrieval + the "grounded in N
+ * sources" chip. True only when stripping the greeting + filler words leaves
+ * nothing substantive; anything with an actual ask (even "hi, summarize X")
+ * returns false.
+ */
+export function isSmallTalk(message: string): boolean {
+  const s = (message || "")
+    .trim()
+    .toLowerCase()
+    .replace(/['’]/g, "")        // how's -> hows (so the greeting patterns match)
+    .replace(/[!?.,]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!s) return false;
+  if (s.split(" ").filter(Boolean).length > 8) return false;
+  const stripped = s.replace(GREETING, " ").replace(SMALLTALK_FILLER, " ").replace(/\s+/g, " ").trim();
+  return stripped.length === 0;
+}
+
 // Query rewriting — improves retrieval recall. Runs on a cheap/fast model.
 export const QUERY_REWRITE_SYSTEM = `You turn the user's latest message into focused SEARCH QUERIES for a hybrid keyword+semantic search over a company knowledge base.
 Rules:

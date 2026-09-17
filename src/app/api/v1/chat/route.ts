@@ -21,7 +21,7 @@
 import { createDataStreamResponse, streamText, convertToCoreMessages, formatDataStreamPart } from "ai";
 import { getModel } from "@/lib/llm";
 import { generationParams } from "@/lib/models-catalog";
-import { buildContext, modeInstruction, outputInstruction } from "@/lib/prompts";
+import { buildContext, modeInstruction, outputInstruction, isSmallTalk, SMALLTALK_SYSTEM } from "@/lib/prompts";
 import { getActivePrompt } from "@/lib/prompts-db";
 import { loadSettings } from "@/lib/settings";
 import { runRetrieval } from "@/lib/pipeline";
@@ -160,6 +160,41 @@ export async function POST(req: Request) {
           tier: effectiveTier ?? "recommended",
           model: modelId,
         });
+      }
+
+      // Small talk / greeting: reply conversationally with NO retrieval and NO
+      // sources — a casual "hi, how are you?" shouldn't run the RAG pipeline or
+      // claim it's grounded in N sources. (Only the first message; once a real
+      // question has been asked, treat everything as a knowledge turn.)
+      if (isSmallTalk(query) && history.filter((m: any) => m.role === "user").length <= 1) {
+        const result = streamText({
+          model: resolvedModel,
+          system: SMALLTALK_SYSTEM,
+          messages: convertToCoreMessages(messages ?? []),
+          ...generationParams(modelId, { temperature: settings.generation.temperature, maxTokens: 400 }),
+          onFinish({ usage }) {
+            const inputTokens = usage?.promptTokens ?? 0;
+            const outputTokens = usage?.completionTokens ?? 0;
+            void supabaseAdmin().from("usage_events").insert({
+              org_id: ctx.orgId,
+              api_key_id: ctx.key.id,
+              kind: "chat",
+              model: modelId,
+              tier: isTierName(tier) ? tier : settings.generation.defaultTier,
+              input_tokens: inputTokens,
+              output_tokens: outputTokens,
+              cost_usd: costUsd(modelId, inputTokens, outputTokens),
+              latency_ms: Date.now() - startedAt,
+              grounded: null,
+              fabricated_citations: 0,
+            }).then(
+              ({ error }) => error && console.error("[usage] insert failed:", error.message),
+              (e) => console.error("[usage] insert error:", e)
+            );
+          },
+        });
+        result.mergeIntoDataStream(dataStream);
+        return;
       }
 
       // Retrieval with live per-stage status events.
