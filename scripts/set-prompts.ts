@@ -57,10 +57,17 @@ async function main() {
   }
 
   // Lift the max answer length so detailed answers / content are not truncated.
+  // Also nudge temperature up from 0 → 0.3 so richer, more natural prose comes
+  // out of every model (esp. GPT + older Claude; the newest Claude models ignore
+  // temperature). Grounding + citation rules keep it faithful.
+  const NEW_TEMPERATURE = 0.3;
   const { settings } = await loadSettings(orgId, db);
-  const next = { ...settings, generation: { ...settings.generation, maxTokens: NEW_MAX_TOKENS } };
+  const next = {
+    ...settings,
+    generation: { ...settings.generation, maxTokens: NEW_MAX_TOKENS, temperature: NEW_TEMPERATURE },
+  };
   await saveSettings(orgId, next, null, db);
-  console.log(`✓ generation.maxTokens set to ${NEW_MAX_TOKENS} (was ${settings.generation.maxTokens}).`);
+  console.log(`✓ generation.maxTokens=${NEW_MAX_TOKENS} (was ${settings.generation.maxTokens}), temperature=${NEW_TEMPERATURE} (was ${settings.generation.temperature}).`);
 
   console.log("\nDone. Restart the Brain is NOT required (prompts + settings load from the DB per request).");
 }
