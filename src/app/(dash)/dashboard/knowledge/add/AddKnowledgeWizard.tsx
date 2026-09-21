@@ -1,7 +1,10 @@
 "use client";
 
 // Add Knowledge wizard: CLASS → SOURCE → AI REVIEW → SAVED.
-//   1. What are you adding? Playbook · Business Reality (bucket) · Platform Intelligence
+//   1. What are you adding? Playbook · Business Reality (bucket) · Platform
+//      Intelligence (+ Organizational Learning / Performance Memory pointers),
+//      then CLASSIFICATION: Auto (the Brain decides) or choose Domain → Type →
+//      Subtype yourself — every value in the taxonomy, plus "+ New" for each.
 //   2. The source (paste or file) + light provenance hints
 //   3. The compiler's proposal: taxonomy, governance, dedup verdict, entities,
 //      relationships and the compiled markdown — every field editable
@@ -9,7 +12,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { BookOpen, Building2, Globe2, Upload, ArrowLeft, ArrowRight, Check, AlertTriangle, Sparkles, Lightbulb } from "lucide-react";
+import { BookOpen, Building2, Globe2, Upload, ArrowLeft, ArrowRight, Check, AlertTriangle, Sparkles, Lightbulb, LineChart, Plus, Wand2, ListChecks } from "lucide-react";
 import {
   DOMAINS,
   REALITY_BUCKETS,
@@ -23,14 +26,16 @@ import {
   FOUNDER_ENDORSEMENTS,
   PRIORITIES,
   OBJECT_STATUSES,
+  INTELLIGENCE_CLASSES,
   typesFor,
   domainsForClass,
   suggestedSubtypes,
   humanize,
+  slugify,
   type IntelligenceClass,
   type RealityBucket,
 } from "@/lib/intelligence-taxonomy";
-import { C, Chip, KBtn, KInput, KSelect, KTextarea, Field, Panel, ErrorNote, Spinner, api } from "@/components/ui/brain-ui";
+import { C, Chip, KBtn, KInput, KSelect, KTextarea, Field, Panel, ErrorNote, Spinner, api, type SelectOption } from "@/components/ui/brain-ui";
 
 type Step = 1 | 2 | 3 | 4;
 
@@ -89,6 +94,18 @@ interface CompileResponse {
   migrationMissing?: boolean;
 }
 
+/** A taxonomy value the org added (domain / object_type / subtype …). */
+interface TaxValue {
+  id: string;
+  kind: string;
+  intelligence_class: string | null;
+  domain: string | null;
+  object_type: string | null;
+  value: string;
+  label: string | null;
+  status: "approved" | "proposed" | "rejected";
+}
+
 const CLASS_CARDS: { id: IntelligenceClass; icon: React.ReactNode; title: string; question: string; hint: string }[] = [
   { id: "playbook", icon: <BookOpen size={20} />, title: "Playbook", question: "How should we think / what should work?", hint: "A framework, principle, tactic, system, hook, structure… from an expert, a book, a course or our own discovery." },
   { id: "business_reality", icon: <Building2 size={20} />, title: "Business Reality", question: "What is true / what happened?", hint: "Company truth, founder thinking, customer evidence, calls, reports, SOPs, proof, brand voice, approved content." },
@@ -101,6 +118,7 @@ function csv(v: string[]): string {
 function fromCsv(s: string): string[] {
   return s.split(",").map((x) => x.trim()).filter(Boolean);
 }
+const opt = (id: string, label?: string): SelectOption => ({ value: id, label: label ?? humanize(id) });
 
 export function AddKnowledgeWizard() {
   const [step, setStep] = React.useState<Step>(1);
@@ -110,6 +128,10 @@ export function AddKnowledgeWizard() {
   const [file, setFile] = React.useState<File | null>(null);
   const [title, setTitle] = React.useState("");
   const [hints, setHints] = React.useState({ sourceExpert: "", sourcePlatform: "", sourceType: "", sourceUrl: "", sourceDate: "", isFounderVoice: false });
+  // Classification: Auto (the Brain decides) or the human's own Domain → Type → Subtype.
+  const [classify, setClassify] = React.useState<"auto" | "manual">("auto");
+  const [pick, setPick] = React.useState({ domain: "", objectType: "", subtype: "" });
+  const [taxonomy, setTaxonomy] = React.useState<TaxValue[]>([]);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [preview, setPreview] = React.useState<CompileResponse | null>(null);
@@ -119,6 +141,37 @@ export function AddKnowledgeWizard() {
   const [blocked, setBlocked] = React.useState<string | null>(null);
   const [result, setResult] = React.useState<CompileResponse | null>(null);
 
+  const loadTaxonomy = React.useCallback(async () => {
+    try {
+      const t = await api<{ values: TaxValue[] }>("/api/admin/knowledge/taxonomy");
+      setTaxonomy((t.values ?? []).filter((v) => v.status !== "rejected"));
+    } catch {
+      /* pre-migration: predefined values only */
+    }
+  }, []);
+  React.useEffect(() => { void loadTaxonomy(); }, [loadTaxonomy]);
+
+  const customDomains = React.useMemo(() => taxonomy.filter((v) => v.kind === "domain").map((v) => v.value), [taxonomy]);
+  const customTypes = React.useCallback(
+    (c: IntelligenceClass | null) => taxonomy.filter((v) => v.kind === "object_type" && (!v.intelligence_class || v.intelligence_class === c)).map((v) => v.value),
+    [taxonomy]
+  );
+  const dbSubtypes = React.useCallback(
+    (domain: string, type: string) => taxonomy.filter((v) => v.kind === "subtype" && (!v.domain || v.domain === domain) && (!v.object_type || v.object_type === type)).map((v) => v.value),
+    [taxonomy]
+  );
+
+  /** The classification hints the compiler honours (manual choices only). */
+  const effectiveHints = React.useCallback(
+    () => ({
+      ...hints,
+      ...(classify === "manual"
+        ? { domain: pick.domain || undefined, objectType: pick.objectType || undefined, subtype: pick.subtype || undefined }
+        : {}),
+    }),
+    [hints, classify, pick]
+  );
+
   const canContinue2 = !!cls && (cls !== "business_reality" || !!bucket) && (text.trim().length > 20 || !!file);
 
   async function runPreview() {
@@ -126,6 +179,7 @@ export function AddKnowledgeWizard() {
     setBusy(true);
     setError(null);
     setBlocked(null);
+    const h = effectiveHints();
     try {
       let res: CompileResponse;
       if (file) {
@@ -135,17 +189,16 @@ export function AddKnowledgeWizard() {
         fd.append("class", cls);
         if (bucket) fd.append("bucket", bucket);
         if (title) fd.append("title", title);
-        fd.append("hints", JSON.stringify(hints));
+        fd.append("hints", JSON.stringify(h));
         if (confirmTruth) fd.append("confirmTruth", "true");
         const r = await fetch("/api/admin/knowledge/compile", { method: "POST", body: fd });
         res = (await r.json()) as CompileResponse;
         if (!r.ok) throw new Error(res.error ?? "Compile failed");
-        // Keep the extracted text for commit (raw source).
         if (res.draft?.teaching_core && !text) setText(res.draft.teaching_core);
       } else {
         res = await api<CompileResponse>("/api/admin/knowledge/compile", {
           method: "POST",
-          body: JSON.stringify({ mode: "preview", class: cls, bucket, text, title, hints, confirmTruth }),
+          body: JSON.stringify({ mode: "preview", class: cls, bucket, text, title, hints: h, confirmTruth }),
         });
       }
       if (res.blocked) {
@@ -204,7 +257,7 @@ export function AddKnowledgeWizard() {
           bucket,
           text: text || preview.draft.teaching_core,
           title,
-          hints,
+          hints: effectiveHints(),
           preview,
           overrides,
           forceNew,
@@ -218,6 +271,7 @@ export function AddKnowledgeWizard() {
       }
       setResult(res);
       setStep(4);
+      void loadTaxonomy();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Save failed");
     } finally {
@@ -228,6 +282,7 @@ export function AddKnowledgeWizard() {
   function reset() {
     setStep(1); setCls(null); setBucket(null); setText(""); setFile(null); setTitle("");
     setHints({ sourceExpert: "", sourcePlatform: "", sourceType: "", sourceUrl: "", sourceDate: "", isFounderVoice: false });
+    setClassify("auto"); setPick({ domain: "", objectType: "", subtype: "" });
     setPreview(null); setDraft(null); setResult(null); setError(null); setBlocked(null); setForceNew(false); setConfirmTruth(false);
   }
 
@@ -246,7 +301,7 @@ export function AddKnowledgeWizard() {
                 <button
                   key={c.id}
                   type="button"
-                  onClick={() => { setCls(c.id); if (c.id !== "business_reality") setBucket(null); }}
+                  onClick={() => { setCls(c.id); setPick({ domain: "", objectType: "", subtype: "" }); if (c.id !== "business_reality") setBucket(null); }}
                   className="rounded-xl p-4 text-left transition-colors"
                   style={{ background: active ? "rgba(0,191,174,0.10)" : C.surface, border: `1px solid ${active ? C.green : C.border}` }}
                 >
@@ -257,6 +312,20 @@ export function AddKnowledgeWizard() {
               );
             })}
           </div>
+          {/* The other two classes are fed differently — point at their homes. */}
+          <div className="grid gap-3 md:grid-cols-2">
+            <Link href="/dashboard/learning" className="rounded-xl p-3 transition-colors hover:bg-white/[0.03]" style={{ background: C.surface, border: `1px dashed ${C.border}` }}>
+              <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: C.violet }}><Lightbulb size={16} /> Organizational Learning</div>
+              <p className="text-xs" style={{ color: C.text }}>What have WE learned? — decisions, implementations, experiments, results, learnings.</p>
+              <p className="text-xs" style={{ color: C.muted }}>Recorded in the Learning Lab (or proposed automatically in chat), not uploaded as documents.</p>
+            </Link>
+            <Link href="/dashboard/performance" className="rounded-xl p-3 transition-colors hover:bg-white/[0.03]" style={{ background: C.surface, border: `1px dashed ${C.border}` }}>
+              <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: C.amber }}><LineChart size={16} /> Performance Memory</div>
+              <p className="text-xs" style={{ color: C.text }}>What results occurred? — close rate, show rate, content and campaign numbers.</p>
+              <p className="text-xs" style={{ color: C.muted }}>Structured metrics, recorded on the Performance memory page.</p>
+            </Link>
+          </div>
+
           {cls === "business_reality" && (
             <Panel title="Which kind of reality?" subtitle="Company Truth carries the highest authority and is guarded: an external clip cannot establish it directly.">
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -275,10 +344,25 @@ export function AddKnowledgeWizard() {
               </div>
             </Panel>
           )}
+
+          {cls && (
+            <ClassificationPanel
+              cls={cls}
+              mode={classify}
+              setMode={setClassify}
+              pick={pick}
+              setPick={setPick}
+              customDomains={customDomains}
+              customTypes={customTypes(cls)}
+              dbSubtypes={dbSubtypes}
+              onAdded={loadTaxonomy}
+            />
+          )}
+
           <div className="flex items-center justify-between gap-3">
-            <Link href="/dashboard/learning" className="inline-flex items-center gap-1.5 text-xs" style={{ color: C.muted }}>
-              <Lightbulb size={13} /> Recording a decision, experiment or result? Use the Learning Lab.
-            </Link>
+            <span className="inline-flex items-center gap-1.5 text-xs" style={{ color: C.muted }}>
+              <Lightbulb size={13} /> Recording a decision, experiment or result? Use the <Link href="/dashboard/learning" style={{ color: C.green }}>Learning Lab</Link>.
+            </span>
             <KBtn variant="primary" disabled={!cls || (cls === "business_reality" && !bucket)} onClick={() => setStep(2)}>
               Continue <ArrowRight size={14} />
             </KBtn>
@@ -300,20 +384,33 @@ export function AddKnowledgeWizard() {
                 <span className="ml-auto text-xs" style={{ color: C.muted }}>{text.length.toLocaleString()} chars</span>
               </div>
               <Field label="Title (optional)"><KInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Leave empty to let the Brain name it" /></Field>
+              <div className="flex flex-wrap items-center gap-1.5 text-xs" style={{ color: C.muted }}>
+                Classification:
+                {classify === "auto" ? (
+                  <Chip tone="green"><Sparkles size={11} /> Auto — the Brain decides domain, type and subtype</Chip>
+                ) : (
+                  <>
+                    <Chip tone="info">{pick.domain ? `Domain: ${humanize(pick.domain)}` : "Domain: Auto"}</Chip>
+                    <Chip tone="info">{pick.objectType ? `Type: ${humanize(pick.objectType)}` : "Type: Auto"}</Chip>
+                    <Chip tone="info">{pick.subtype ? `Subtype: ${humanize(pick.subtype)}` : "Subtype: Auto"}</Chip>
+                  </>
+                )}
+                <button type="button" className="underline" onClick={() => setStep(1)}>change</button>
+              </div>
             </div>
           </Panel>
           <Panel title="Provenance" subtitle="Where this came from. Optional, but it keeps claims traceable.">
             <div className="space-y-3">
               <Field label="Source expert / author"><KInput value={hints.sourceExpert} onChange={(e) => setHints({ ...hints, sourceExpert: e.target.value })} placeholder="Creator, book, consultant, employee…" /></Field>
               <Field label="Found on (platform)">
-                <KSelect value={hints.sourcePlatform} onChange={(e) => setHints({ ...hints, sourcePlatform: e.target.value })} placeholder="—" options={[...PLATFORMS.filter((p) => p !== "universal"), "book", "course", "article", "internal"].map((p) => ({ value: p, label: humanize(p) }))} />
+                <KSelect value={hints.sourcePlatform} onChange={(e) => setHints({ ...hints, sourcePlatform: e.target.value })} placeholder="—" options={[...PLATFORMS.filter((p) => p !== "universal"), "book", "course", "article", "internal"].map((p) => opt(p))} />
               </Field>
               <Field label="Source type">
-                <KSelect value={hints.sourceType} onChange={(e) => setHints({ ...hints, sourceType: e.target.value })} placeholder="—" options={SOURCE_TYPES.map((s) => ({ value: s, label: humanize(s) }))} />
+                <KSelect value={hints.sourceType} onChange={(e) => setHints({ ...hints, sourceType: e.target.value })} placeholder="—" options={SOURCE_TYPES.map((s) => opt(s))} />
               </Field>
               <Field label="URL"><KInput value={hints.sourceUrl} onChange={(e) => setHints({ ...hints, sourceUrl: e.target.value })} placeholder="https://…" /></Field>
               <Field label="Date"><KInput type="date" value={hints.sourceDate} onChange={(e) => setHints({ ...hints, sourceDate: e.target.value })} /></Field>
-              {(bucket === "founder_brain" || cls === "business_reality") && (
+              {cls === "business_reality" && (
                 <label className="flex items-center gap-2 text-xs" style={{ color: C.text }}>
                   <input type="checkbox" checked={hints.isFounderVoice} onChange={(e) => setHints({ ...hints, isFounderVoice: e.target.checked })} />
                   These are the founder&apos;s own words (Founder Brain)
@@ -334,10 +431,10 @@ export function AddKnowledgeWizard() {
           <div className="flex items-center justify-between gap-3 lg:col-span-3">
             <KBtn variant="ghost" onClick={() => setStep(1)}><ArrowLeft size={14} /> Back</KBtn>
             <KBtn variant="primary" disabled={!canContinue2 || busy} loading={busy} onClick={runPreview}>
-              <Sparkles size={14} /> {busy ? "Understanding the source…" : "Let the Brain classify it"}
+              <Sparkles size={14} /> {busy ? "Understanding the source…" : classify === "auto" ? "Let the Brain classify it" : "Compile with my classification"}
             </KBtn>
           </div>
-          {busy && <div className="lg:col-span-3"><Spinner label="Extracting the teaching, classifying, checking for duplicates and compiling the object… (20–60s)" /></div>}
+          {busy && <div className="lg:col-span-3"><Spinner label="Extracting the substance, classifying, checking for duplicates and compiling the object… (20–60s)" /></div>}
         </div>
       )}
 
@@ -354,6 +451,9 @@ export function AddKnowledgeWizard() {
           blocked={blocked}
           confirmTruth={confirmTruth}
           setConfirmTruth={setConfirmTruth}
+          customDomains={customDomains}
+          customTypes={customTypes(cls)}
+          dbSubtypes={dbSubtypes}
           onBack={() => setStep(2)}
           onSave={commit}
         />
@@ -417,8 +517,154 @@ function Stepper({ step }: { step: Step }) {
   );
 }
 
+/** Inline "+ New" for a taxonomy value: POSTs to the taxonomy API, then selects it. */
+function AddValue({
+  kind,
+  label,
+  extra,
+  onAdded,
+}: {
+  kind: "domain" | "object_type" | "subtype";
+  label: string;
+  extra?: Record<string, string | null | undefined>;
+  onAdded: (value: string, note: string | null) => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [value, setValue] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState<string | null>(null);
+  async function add() {
+    if (!value.trim()) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await api<{ value: string; status: string; created: boolean; reconciledFrom?: string; predefined?: boolean }>("/api/admin/knowledge/taxonomy", {
+        method: "POST",
+        body: JSON.stringify({ kind, value, label: value, ...extra }),
+      });
+      const note = !r.created ? `Using the existing value "${humanize(r.value)}" (matches what you typed).` : null;
+      onAdded(r.value, note);
+      setValue("");
+      setOpen(false);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not add");
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="inline-flex items-center gap-1 text-[11px]" style={{ color: C.green }}>
+        <Plus size={11} /> New {label}
+      </button>
+    );
+  }
+  return (
+    <div className="mt-1 flex items-center gap-1.5">
+      <KInput value={value} onChange={(e) => setValue(e.target.value)} placeholder={`New ${label}…`} className="h-8 text-xs" onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void add(); } }} />
+      <KBtn size="xs" variant="primary" loading={busy} disabled={!value.trim() || busy} onClick={add}>Add</KBtn>
+      <KBtn size="xs" variant="ghost" onClick={() => { setOpen(false); setErr(null); }}>Cancel</KBtn>
+      {err && <span className="text-[11px]" style={{ color: C.red }}>{err}</span>}
+    </div>
+  );
+}
+
+function domainGroups(cls: IntelligenceClass, customDomains: string[]): { label: string; options: SelectOption[] }[] {
+  const typical = domainsForClass(cls).map((d) => d.id);
+  return [
+    { label: `Typical for ${INTELLIGENCE_CLASSES.find((c) => c.id === cls)?.label ?? cls}`, options: DOMAINS.filter((d) => typical.includes(d.id)).map((d) => opt(d.id, d.label)) },
+    { label: "All domains", options: DOMAINS.filter((d) => !typical.includes(d.id)).map((d) => opt(d.id, d.label)) },
+    { label: "Added by you", options: customDomains.map((d) => opt(d)) },
+  ];
+}
+
+function typeGroups(cls: IntelligenceClass, customTypes: string[]): { label: string; options: SelectOption[] }[] {
+  const all = typesFor(cls, "content");
+  return [
+    { label: `Types for ${INTELLIGENCE_CLASSES.find((c) => c.id === cls)?.label ?? cls}`, options: all.filter((t) => !t.contentOnly).map((t) => opt(t.id, t.label)) },
+    { label: "Content-specialised", options: all.filter((t) => t.contentOnly).map((t) => opt(t.id, t.label)) },
+    { label: "Added by you", options: customTypes.map((t) => opt(t)) },
+  ];
+}
+
+function ClassificationPanel({
+  cls,
+  mode,
+  setMode,
+  pick,
+  setPick,
+  customDomains,
+  customTypes,
+  dbSubtypes,
+  onAdded,
+}: {
+  cls: IntelligenceClass;
+  mode: "auto" | "manual";
+  setMode: (m: "auto" | "manual") => void;
+  pick: { domain: string; objectType: string; subtype: string };
+  setPick: (p: { domain: string; objectType: string; subtype: string }) => void;
+  customDomains: string[];
+  customTypes: string[];
+  dbSubtypes: (domain: string, type: string) => string[];
+  onAdded: () => Promise<void> | void;
+}) {
+  const [note, setNote] = React.useState<string | null>(null);
+  const subtypeOptions = React.useMemo(
+    () => Array.from(new Set([...suggestedSubtypes(pick.domain, pick.objectType), ...dbSubtypes(pick.domain, pick.objectType)])),
+    [pick.domain, pick.objectType, dbSubtypes]
+  );
+  const seg = (id: "auto" | "manual", icon: React.ReactNode, title: string, hint: string) => {
+    const active = mode === id;
+    return (
+      <button type="button" onClick={() => setMode(id)} className="flex-1 rounded-lg px-3 py-2 text-left" style={{ background: active ? "rgba(0,191,174,0.10)" : C.bg, border: `1px solid ${active ? C.green : C.border}` }}>
+        <div className="flex items-center gap-2 text-sm font-medium" style={{ color: active ? C.green : C.text }}>{icon}{title}</div>
+        <p className="text-xs" style={{ color: C.muted }}>{hint}</p>
+      </button>
+    );
+  };
+  return (
+    <Panel title="Classification" subtitle="CLASS → DOMAIN → TYPE → SUBTYPE. Domain is what the knowledge is ABOUT (not where you found it).">
+      <div className="space-y-3">
+        <div className="flex flex-col gap-2 sm:flex-row">
+          {seg("auto", <Sparkles size={15} />, "Auto — the Brain decides", "It reads the source and picks domain, type and subtype (reusing your taxonomy). You review before saving.")}
+          {seg("manual", <ListChecks size={15} />, "Choose myself", "Pick any domain, type and subtype — or add new ones. Leave a field blank to let the Brain decide that one.")}
+        </div>
+        {mode === "manual" && (
+          <div className="grid gap-3 md:grid-cols-3">
+            <div>
+              <Field label="Domain">
+                <KSelect value={pick.domain} onChange={(e) => setPick({ ...pick, domain: e.target.value, subtype: "" })} placeholder="Auto (let the Brain decide)" groups={domainGroups(cls, customDomains)} />
+              </Field>
+              <AddValue kind="domain" label="domain" onAdded={async (v, n) => { await onAdded(); setPick({ ...pick, domain: v }); setNote(n); }} />
+            </div>
+            <div>
+              <Field label="Type">
+                <KSelect value={pick.objectType} onChange={(e) => setPick({ ...pick, objectType: e.target.value, subtype: "" })} placeholder="Auto (let the Brain decide)" groups={typeGroups(cls, customTypes)} />
+              </Field>
+              <AddValue kind="object_type" label="type" extra={{ intelligenceClass: cls }} onAdded={async (v, n) => { await onAdded(); setPick({ ...pick, objectType: v }); setNote(n); }} />
+            </div>
+            <div>
+              <Field label="Subtype" hint={subtypeOptions.length ? `Suggested: ${subtypeOptions.slice(0, 6).map(humanize).join(", ")}` : "Pick domain + type to see suggestions, or type a new one"}>
+                <KInput value={pick.subtype} onChange={(e) => setPick({ ...pick, subtype: slugify(e.target.value) || e.target.value })} list="wizard-subtypes" placeholder="Auto, or type e.g. accountability" />
+                <datalist id="wizard-subtypes">{subtypeOptions.map((s) => <option key={s} value={s} />)}</datalist>
+              </Field>
+              <AddValue kind="subtype" label="subtype" extra={{ domain: pick.domain || null, objectType: pick.objectType || null, intelligenceClass: cls }} onAdded={async (v, n) => { await onAdded(); setPick({ ...pick, subtype: v }); setNote(n); }} />
+            </div>
+          </div>
+        )}
+        {note && <p className="text-[11px]" style={{ color: C.amber }}>{note}</p>}
+        {mode === "manual" && (
+          <p className="flex items-center gap-1 text-[11px]" style={{ color: C.muted }}>
+            <Wand2 size={11} /> Your choices are locked in; the Brain still extracts the summary, entities, tags and provenance, checks for duplicates and compiles the object.
+          </p>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
 function ReviewStep({
-  cls, preview, draft, set, forceNew, setForceNew, busy, error, blocked, confirmTruth, setConfirmTruth, onBack, onSave,
+  cls, preview, draft, set, forceNew, setForceNew, busy, error, blocked, confirmTruth, setConfirmTruth, customDomains, customTypes, dbSubtypes, onBack, onSave,
 }: {
   cls: IntelligenceClass;
   preview: CompileResponse;
@@ -431,13 +677,15 @@ function ReviewStep({
   blocked: string | null;
   confirmTruth: boolean;
   setConfirmTruth: (v: boolean) => void;
+  customDomains: string[];
+  customTypes: string[];
+  dbSubtypes: (domain: string, type: string) => string[];
   onBack: () => void;
   onSave: () => void;
 }) {
   const d = preview.dedup;
   const isContent = draft.domain === "content";
-  const types = typesFor(cls, draft.domain);
-  const subtypeSeeds = suggestedSubtypes(draft.domain, draft.object_type);
+  const subtypeSeeds = Array.from(new Set([...suggestedSubtypes(draft.domain, draft.object_type), ...dbSubtypes(draft.domain, draft.object_type)]));
   const verdictTone = d.decision === "new" ? "green" : d.decision === "enrich" ? "info" : d.decision === "duplicate" ? "amber" : "red";
   const saveLabel = forceNew || d.decision === "new" || d.decision === "conflict" ? "Save as new object" : d.decision === "enrich" ? `Enrich ${d.targetRef}` : `Add source to ${d.targetRef}`;
 
@@ -480,8 +728,8 @@ function ReviewStep({
         <Panel title="Classification" subtitle="CLASS → DOMAIN → TYPE → SUBTYPE. Reuse first; a new subtype goes to the approval queue.">
           <div className="space-y-3">
             <Field label="Name"><KInput value={draft.name} onChange={(e) => set("name", e.target.value)} /></Field>
-            <Field label="Domain"><KSelect value={draft.domain} onChange={(e) => set("domain", e.target.value)} options={domainsForClass(cls).map((x) => ({ value: x.id, label: x.label }))} /></Field>
-            <Field label="Type"><KSelect value={draft.object_type} onChange={(e) => set("object_type", e.target.value)} options={types.map((t) => ({ value: t.id, label: t.label }))} /></Field>
+            <Field label="Domain"><KSelect value={draft.domain} onChange={(e) => set("domain", e.target.value)} groups={domainGroups(cls, customDomains)} /></Field>
+            <Field label="Type"><KSelect value={draft.object_type} onChange={(e) => set("object_type", e.target.value)} groups={typeGroups(cls, customTypes)} /></Field>
             <Field label="Subtype" hint={preview.taxonomy.find((t) => t.kind === "subtype")?.status === "proposed" ? "New value — will be proposed for approval." : subtypeSeeds.length ? `Suggested: ${subtypeSeeds.slice(0, 5).map(humanize).join(", ")}` : undefined}>
               <KInput value={draft.subtype ?? ""} onChange={(e) => set("subtype", e.target.value || null)} list="subtype-seeds" placeholder="e.g. accountability" />
               <datalist id="subtype-seeds">{subtypeSeeds.map((s) => <option key={s} value={s} />)}</datalist>
@@ -492,12 +740,12 @@ function ReviewStep({
             <Field label="Tags"><KInput value={csv(draft.tags)} onChange={(e) => set("tags", fromCsv(e.target.value))} /></Field>
             {isContent && (
               <div className="grid grid-cols-2 gap-2 rounded-lg p-2" style={{ border: `1px solid ${C.border}` }}>
-                <Field label="Format"><KSelect value={draft.content_format ?? ""} onChange={(e) => set("content_format", e.target.value || null)} placeholder="—" options={FORMATS.map((f) => ({ value: f, label: humanize(f) }))} /></Field>
-                <Field label="Content job"><KSelect value={draft.content_job ?? ""} onChange={(e) => set("content_job", e.target.value || null)} placeholder="—" options={CONTENT_JOBS.map((f) => ({ value: f, label: humanize(f) }))} /></Field>
+                <Field label="Format"><KSelect value={draft.content_format ?? ""} onChange={(e) => set("content_format", e.target.value || null)} placeholder="—" options={FORMATS.map((f) => opt(f))} /></Field>
+                <Field label="Content job"><KSelect value={draft.content_job ?? ""} onChange={(e) => set("content_job", e.target.value || null)} placeholder="—" options={CONTENT_JOBS.map((f) => opt(f))} /></Field>
                 <Field label="Funnel stage"><KSelect value={draft.funnel_stage ?? ""} onChange={(e) => set("funnel_stage", e.target.value || null)} placeholder="—" options={FUNNEL_STAGES.map((f) => ({ value: f, label: f.toUpperCase() }))} /></Field>
-                <Field label="Brand"><KSelect value={draft.brand ?? ""} onChange={(e) => set("brand", e.target.value || null)} placeholder="—" options={BRANDS.map((f) => ({ value: f, label: humanize(f) }))} /></Field>
+                <Field label="Brand"><KSelect value={draft.brand ?? ""} onChange={(e) => set("brand", e.target.value || null)} placeholder="—" options={BRANDS.map((f) => opt(f))} /></Field>
                 <Field label="Audiences" className="col-span-2"><KInput value={csv(draft.audiences)} onChange={(e) => set("audiences", fromCsv(e.target.value))} placeholder="healthcare_practice_owner" /></Field>
-                <Field label="Length"><KSelect value={draft.content_length ?? ""} onChange={(e) => set("content_length", e.target.value || null)} placeholder="—" options={LENGTHS.map((f) => ({ value: f, label: humanize(f) }))} /></Field>
+                <Field label="Length"><KSelect value={draft.content_length ?? ""} onChange={(e) => set("content_length", e.target.value || null)} placeholder="—" options={LENGTHS.map((f) => opt(f))} /></Field>
               </div>
             )}
           </div>

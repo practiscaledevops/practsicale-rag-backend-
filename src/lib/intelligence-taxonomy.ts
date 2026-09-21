@@ -253,6 +253,7 @@ export const OBJECT_TYPES: TypeDef[] = [
   { id: "template", label: "Template", classes: ["playbook"] },
   { id: "metric", label: "Metric", classes: ["playbook", "performance_memory"] },
   { id: "observation", label: "Observation", classes: ["playbook"] },
+  { id: "experiment", label: "Experiment", classes: ["playbook", "organizational_learning"] },
   // Content-specialised playbook types
   { id: "hook", label: "Hook", classes: ["playbook"], contentOnly: true },
   { id: "story_mechanic", label: "Story Mechanic", classes: ["playbook"], contentOnly: true },
@@ -292,10 +293,9 @@ export const OBJECT_TYPES: TypeDef[] = [
   { id: "approved_content", label: "Approved Content", classes: ["business_reality"] },
   { id: "announcement", label: "Announcement", classes: ["business_reality"] },
   { id: "document", label: "Document", classes: ["business_reality", "raw_archive"] },
-  // Organizational Learning lifecycle types
+  // Organizational Learning lifecycle types ("experiment" is declared above, shared with playbooks)
   { id: "decision", label: "Decision", classes: ["organizational_learning"] },
   { id: "implementation", label: "Implementation", classes: ["organizational_learning"] },
-  { id: "experiment", label: "Experiment", classes: ["organizational_learning"] },
   { id: "result", label: "Result", classes: ["organizational_learning"] },
   { id: "learning", label: "Learning", classes: ["organizational_learning"] },
   { id: "adaptation", label: "Adaptation", classes: ["organizational_learning"] },
@@ -742,8 +742,16 @@ export function refPrefix(o: {
   }
   if (o.intelligence_class === "performance_memory") return "PERF";
   if (o.intelligence_class === "raw_archive") return "RAW";
-  const dom = DOMAINS.find((d) => d.id === o.domain)?.prefix ?? "GEN";
+  const dom = DOMAINS.find((d) => d.id === o.domain)?.prefix ?? customDomainPrefix(o.domain);
   return o.intelligence_class === "business_reality" ? `BR-${dom}` : dom;
+}
+
+/** Prefix for a user-added (custom) domain: initials of its words, or the first 3 letters. */
+export function customDomainPrefix(domain: string | null | undefined): string {
+  const words = slugify(domain ?? "").split("_").filter(Boolean);
+  if (words.length === 0) return "GEN";
+  const p = words.length >= 2 ? words.map((w) => w[0]).join("").slice(0, 3) : words[0].slice(0, 3);
+  return p.toUpperCase() || "GEN";
 }
 
 /** Format a ref from a prefix and a sequence number: MG + 7 → "MG-007". */

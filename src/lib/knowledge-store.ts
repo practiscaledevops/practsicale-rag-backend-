@@ -327,6 +327,34 @@ export async function ensureTaxonomyValue(
   return { value: proposed, status, created: true };
 }
 
+/** User-added domains and object types (the taxonomy is controlled but extensible). */
+export interface CustomTaxonomy {
+  domains: Set<string>;
+  /** intelligence_class (or "*" = any class) → type values */
+  types: Map<string, Set<string>>;
+}
+
+export async function loadCustomTaxonomy(db: SupabaseClient, orgId: string): Promise<CustomTaxonomy> {
+  const rows = await listTaxonomyValues(db, orgId, { includeProposed: true });
+  const domains = new Set<string>();
+  const types = new Map<string, Set<string>>();
+  for (const r of rows) {
+    if (r.kind === "domain") domains.add(r.value);
+    if (r.kind === "object_type") {
+      const k = r.intelligence_class ?? "*";
+      if (!types.has(k)) types.set(k, new Set());
+      types.get(k)!.add(r.value);
+    }
+  }
+  return { domains, types };
+}
+
+/** Custom type values usable for a class. */
+export function customTypesFor(ct: CustomTaxonomy | null | undefined, cls: string): string[] {
+  if (!ct) return [];
+  return Array.from(new Set([...(ct.types.get(cls) ?? []), ...(ct.types.get("*") ?? [])]));
+}
+
 /** All subtype values usable for (domain, type): predefined + DB approved (+ proposed if asked). */
 export async function knownSubtypes(
   db: SupabaseClient,

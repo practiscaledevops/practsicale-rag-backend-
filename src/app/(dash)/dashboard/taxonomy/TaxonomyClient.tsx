@@ -32,7 +32,7 @@ export function TaxonomyClient() {
   const [error, setError] = React.useState<string | null>(null);
   const [view, setView] = React.useState<View>("queue");
   const [busy, setBusy] = React.useState(false);
-  const [form, setForm] = React.useState({ kind: "subtype", domain: "", objectType: "", value: "", label: "" });
+  const [form, setForm] = React.useState({ kind: "subtype", domain: "", objectType: "", value: "", label: "", intelligenceClass: "" });
 
   const load = React.useCallback(async () => {
     try {
@@ -107,18 +107,21 @@ export function TaxonomyClient() {
             )}
             {rejected.length > 0 && <p className="mt-3 text-[11px]" style={{ color: C.muted }}>{rejected.length} rejected value(s) hidden.</p>}
           </Panel>
-          <Panel title="Add a value">
+          <Panel title="Add a value" subtitle="Domains and types added here are selectable in Add knowledge and offered to the AI classifier.">
             <div className="space-y-3">
-              <Field label="Kind"><KSelect value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })} options={["subtype", "audience", "applies_to", "goal", "platform", "format", "business_function", "tag"].map((k) => ({ value: k, label: humanize(k) }))} /></Field>
+              <Field label="Kind"><KSelect value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })} options={["domain", "object_type", "subtype", "audience", "applies_to", "goal", "platform", "format", "business_function", "tag"].map((k) => ({ value: k, label: humanize(k) }))} /></Field>
+              {form.kind === "object_type" && (
+                <Field label="For class" hint="Leave blank for any class"><KSelect value={form.intelligenceClass} onChange={(e) => setForm({ ...form, intelligenceClass: e.target.value })} placeholder="Any class" options={INTELLIGENCE_CLASSES.filter((c) => c.id !== "raw_archive").map((c) => ({ value: c.id, label: c.label }))} /></Field>
+              )}
               {form.kind === "subtype" && (
                 <>
                   <Field label="Domain"><KSelect value={form.domain} onChange={(e) => setForm({ ...form, domain: e.target.value })} placeholder="—" options={DOMAINS.map((d) => ({ value: d.id, label: d.label }))} /></Field>
                   <Field label="Type"><KSelect value={form.objectType} onChange={(e) => setForm({ ...form, objectType: e.target.value })} placeholder="—" options={OBJECT_TYPES.map((t) => ({ value: t.id, label: t.label }))} /></Field>
                 </>
               )}
-              <Field label="Value"><KInput value={form.value} onChange={(e) => setForm({ ...form, value: e.target.value })} placeholder="decision_rights" /></Field>
+              <Field label="Value"><KInput value={form.value} onChange={(e) => setForm({ ...form, value: e.target.value })} placeholder={form.kind === "domain" ? "e.g. partnerships" : form.kind === "object_type" ? "e.g. scorecard" : "decision_rights"} /></Field>
               <Field label="Label (optional)"><KInput value={form.label} onChange={(e) => setForm({ ...form, label: e.target.value })} /></Field>
-              <KBtn variant="primary" disabled={!form.value || busy} onClick={() => act({ kind: form.kind, value: form.value, label: form.label, domain: form.domain || null, objectType: form.objectType || null }, "POST")}><Plus size={13} /> Add</KBtn>
+              <KBtn variant="primary" disabled={!form.value || busy} onClick={() => act({ kind: form.kind, value: form.value, label: form.label, domain: form.domain || null, objectType: form.objectType || null, intelligenceClass: form.intelligenceClass || null }, "POST")}><Plus size={13} /> Add</KBtn>
             </div>
           </Panel>
         </div>

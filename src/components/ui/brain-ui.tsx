@@ -115,14 +115,36 @@ export function KTextarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElemen
   return <textarea {...props} className={cn("w-full rounded-lg px-3 py-2 text-sm outline-none placeholder:opacity-50 focus:ring-2", props.className)} style={{ ...fieldStyle, ...(props.style ?? {}) }} />;
 }
 
-export function KSelect({ options, placeholder, ...props }: React.SelectHTMLAttributes<HTMLSelectElement> & { options: { value: string; label: string; disabled?: boolean }[]; placeholder?: string }) {
+export interface SelectOption {
+  value: string;
+  label: string;
+  disabled?: boolean;
+}
+
+export function KSelect({
+  options,
+  groups,
+  placeholder,
+  ...props
+}: React.SelectHTMLAttributes<HTMLSelectElement> & {
+  options?: SelectOption[];
+  /** Grouped options (rendered as <optgroup>); used with or instead of `options`. */
+  groups?: { label: string; options: SelectOption[] }[];
+  placeholder?: string;
+}) {
+  const render = (o: SelectOption) => (
+    <option key={o.value} value={o.value} disabled={o.disabled}>
+      {o.label}
+    </option>
+  );
   return (
     <select {...props} className={cn("h-9 w-full rounded-lg px-2.5 text-sm outline-none focus:ring-2", props.className)} style={{ ...fieldStyle, ...(props.style ?? {}) }}>
       {placeholder !== undefined && <option value="">{placeholder}</option>}
-      {options.map((o) => (
-        <option key={o.value} value={o.value} disabled={o.disabled}>
-          {o.label}
-        </option>
+      {(options ?? []).map(render)}
+      {(groups ?? []).filter((g) => g.options.length).map((g) => (
+        <optgroup key={g.label} label={g.label}>
+          {g.options.map(render)}
+        </optgroup>
       ))}
     </select>
   );

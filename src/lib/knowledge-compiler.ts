@@ -63,6 +63,9 @@ import {
   ensureTaxonomyValue,
   knownSubtypes,
   listTaxonomyValues,
+  loadCustomTaxonomy,
+  customTypesFor,
+  type CustomTaxonomy,
   logDecision,
   upsertEntityMentions,
   upsertRelationship,
@@ -496,6 +499,7 @@ async function classifyStage(
   input: CompileInput,
   settings: RagSettings,
   prompt: string,
+  custom: CustomTaxonomy,
   log: DecisionEntry[]
 ): Promise<{ c: Classified; model: string | null }> {
   const cls = input.intelligenceClass;
@@ -503,22 +507,22 @@ async function classifyStage(
   const hints = input.hints ?? {};
   const text = input.text.length > MAX_SOURCE_CHARS ? input.text.slice(0, MAX_SOURCE_CHARS) : input.text;
 
-  // Taxonomy the classifier may reuse: predefined subtypes (all) + DB-approved.
+  // Taxonomy the classifier may reuse: predefined + the org's own additions.
   const approved = await listTaxonomyValues(db, input.orgId, { kind: "subtype" });
   const subtypeTable = Object.entries(SUGGESTED_SUBTYPES)
     .map(([k, v]) => `${k}: ${v.join(", ")}`)
     .concat(approved.map((r) => `${r.domain ?? "*"}/${r.object_type ?? "*"}: ${r.value}`))
     .join("\n");
-  const domainList = DOMAINS.map((d) => d.id).join(", ");
-  const typeList = typesFor(cls, "content").map((t) => t.id).join(", ");
+  const domainList = [...DOMAINS.map((d) => d.id), ...custom.domains].join(", ");
+  const typeList = [...typesFor(cls, "content").map((t) => t.id), ...customTypesFor(custom, cls)].join(", ");
   const bucketDef = bucket ? REALITY_BUCKETS.find((b) => b.id === bucket) : null;
 
   const userPrompt = [
     `INTELLIGENCE CLASS (chosen by the human): ${cls}${bucketDef ? ` — bucket: ${bucketDef.label} (${bucketDef.description})` : ""}`,
     hints.isFounderVoice ? "This source is the FOUNDER's own words (Founder Brain): keep his beliefs and experience as stated, first person where present." : "",
-    hints.domain ? `Domain hint from the human: ${hints.domain}` : "",
-    hints.objectType ? `Type hint from the human: ${hints.objectType}` : "",
-    hints.subtype ? `Subtype hint from the human: ${hints.subtype}` : "",
+    hints.domain ? `Domain CHOSEN by the human (use it): ${hints.domain}` : "",
+    hints.objectType ? `Type CHOSEN by the human (use it): ${hints.objectType}` : "",
+    hints.subtype ? `Subtype CHOSEN by the human (use it): ${hints.subtype}` : "",
     hints.sourceExpert || hints.sourcePlatform || hints.sourceType || hints.sourceUrl || hints.sourceDate
       ? `Source hints: expert=${hints.sourceExpert ?? ""} platform=${hints.sourcePlatform ?? ""} type=${hints.sourceType ?? ""} url=${hints.sourceUrl ?? ""} date=${hints.sourceDate ?? ""}`
       : "",
@@ -583,6 +587,7 @@ async function draftFromClassification(
   c: Classified,
   settings: RagSettings,
   write: boolean,
+  custom: CustomTaxonomy,
   log: DecisionEntry[]
 ): Promise<{ draft: ObjectDraft; taxonomy: TaxonomyOutcome[]; warnings: string[] }> {
   const cls = input.intelligenceClass;
@@ -591,20 +596,27 @@ async function draftFromClassification(
   const taxonomy: TaxonomyOutcome[] = [];
   const bucket = input.bucket ?? null;
   const bucketDef = bucket ? REALITY_BUCKETS.find((b) => b.id === bucket) : null;
+  const allDomains = [...DOMAINS.map((d) => d.id), ...custom.domains];
+  const validDomain = (d: string) => isDomain(d) || custom.domains.has(d);
 
-  // Domain: must be predefined (reconcile spelling), else the bucket/hint default.
-  let domain = hints.domain && isDomain(hints.domain) ? hints.domain : null;
+  // Domain: the human's choice wins (predefined or custom); else reconcile the
+  // classifier's spelling; else the bucket/hint default.
+  const hintedDomain = slugify(hints.domain ?? "");
+  let domain = hintedDomain && validDomain(hintedDomain) ? hintedDomain : null;
   if (!domain) {
-    const hit = reconcileValue(c.domain, DOMAINS.map((d) => d.id), 0.6);
+    const hit = reconcileValue(c.domain, allDomains, 0.6);
     domain = hit?.value ?? bucketDef?.domain ?? "other";
     if (!hit && c.domain) warnings.push(`Domain "${c.domain}" is not in the taxonomy; used "${domain}".`);
+    if (cls === "platform_intelligence") domain = "platform";
+    if (bucket && BUCKET_DOMAIN[bucket]) domain = BUCKET_DOMAIN[bucket]!;
   }
-  if (cls === "platform_intelligence") domain = "platform";
-  if (bucket && BUCKET_DOMAIN[bucket]) domain = BUCKET_DOMAIN[bucket]!;
 
-  // Type: must be one the class allows (content-only types need domain=content).
-  const allowedTypes = typesFor(cls, domain).map((t) => t.id);
-  let objectType = hints.objectType && allowedTypes.includes(hints.objectType) ? hints.objectType : null;
+  // Type: the human may pick ANY type the class knows (incl. content-specialised
+  // and custom ones); the classifier is held to the domain-aware list.
+  const humanTypes = [...typesFor(cls, "content").map((t) => t.id), ...customTypesFor(custom, cls)];
+  const allowedTypes = [...typesFor(cls, domain).map((t) => t.id), ...customTypesFor(custom, cls)];
+  const hintedType = slugify(hints.objectType ?? "");
+  let objectType = hintedType && humanTypes.includes(hintedType) ? hintedType : null;
   if (!objectType) {
     const hit = reconcileValue(c.object_type, allowedTypes, 0.6);
     objectType = hit?.value ?? defaultTypeFor(cls, domain);
@@ -713,7 +725,7 @@ async function draftFromClassification(
 }
 
 /** Apply reviewed human edits over a draft. */
-function applyOverrides(draft: ObjectDraft, o: DraftOverrides | null | undefined): ObjectDraft {
+function applyOverrides(draft: ObjectDraft, o: DraftOverrides | null | undefined, custom?: CustomTaxonomy): ObjectDraft {
   if (!o) return draft;
   const d: ObjectDraft = { ...draft };
   const setStr = <K extends keyof ObjectDraft>(k: K, v: unknown) => {
@@ -722,7 +734,7 @@ function applyOverrides(draft: ObjectDraft, o: DraftOverrides | null | undefined
     else if (v === null) rec[k as string] = null;
   };
   if (o.name) d.name = o.name.trim();
-  if (o.domain && isDomain(o.domain)) d.domain = o.domain;
+  if (o.domain && (isDomain(o.domain) || custom?.domains.has(slugify(o.domain)))) d.domain = slugify(o.domain);
   if (o.object_type) d.object_type = slugify(o.object_type);
   if (o.subtype !== undefined) d.subtype = o.subtype ? slugify(o.subtype) : null;
   if (o.status) d.status = o.status;
@@ -889,12 +901,13 @@ function finalizeMarkdown(draft: ObjectDraft, ref: string): string {
 // User-supplied canonical markdown (skips classify + compile)
 // ---------------------------------------------------------------------------
 
-function draftFromMarkdown(input: CompileInput, md: string): { draft: ObjectDraft; relationships: { ref: string; type: string }[] } | null {
+function draftFromMarkdown(input: CompileInput, md: string, custom: CustomTaxonomy): { draft: ObjectDraft; relationships: { ref: string; type: string }[] } | null {
   const { data } = parseFrontmatter(md);
   const parts = splitSections(md);
   const cls = (typeof data.class === "string" && data.class) as IntelligenceClass | false;
   if (!cls || !parts.sections.length) return null;
-  const domain = isDomain(String(data.domain ?? "")) ? String(data.domain) : "other";
+  const mdDomain = slugify(String(data.domain ?? ""));
+  const domain = isDomain(mdDomain) || custom.domains.has(mdDomain) ? mdDomain : "other";
   const objectType = slugify(String(data.type ?? "")) || defaultTypeFor(cls, domain);
   const src = (data.source ?? {}) as Record<string, unknown>;
   const list = (v: unknown) => slugList(Array.isArray(v) ? v : typeof v === "string" ? [v] : []);
@@ -968,6 +981,7 @@ export async function compileKnowledge(db: SupabaseClient, input: CompileInput):
   const warnings: string[] = [];
   const { settings } = await loadSettings(input.orgId, db);
   const prompts = await getActivePrompts(input.orgId, ["knowledge_classify", "knowledge_compile", "dedup_judge"]);
+  const custom = await loadCustomTaxonomy(db, input.orgId);
   const write = input.mode === "commit";
 
   const empty: CompileResult = {
@@ -1019,7 +1033,7 @@ export async function compileKnowledge(db: SupabaseClient, input: CompileInput):
 
   if (input.preview) {
     // Commit from a reviewed preview: trust its AI output, apply human edits.
-    draft = applyOverrides(input.preview.draft, input.overrides);
+    draft = applyOverrides(input.preview.draft, input.overrides, custom);
     entities = input.preview.entities;
     keyConcepts = input.preview.keyConcepts;
     taxonomy = input.preview.taxonomy;
@@ -1046,7 +1060,7 @@ export async function compileKnowledge(db: SupabaseClient, input: CompileInput):
     if (!draft.sections.length) draft.sections = fallbackSections(draft.intelligence_class, draft.summary, draft.teaching_core);
   } else {
     // User-supplied canonical markdown?
-    const fromMd = /^---\r?\n[\s\S]*?\r?\n---/.test(input.text.trimStart()) ? draftFromMarkdown(input, input.text.trim()) : null;
+    const fromMd = /^---\r?\n[\s\S]*?\r?\n---/.test(input.text.trimStart()) ? draftFromMarkdown(input, input.text.trim(), custom) : null;
     if (fromMd) {
       draft = fromMd.draft;
       markdownRelationships = fromMd.relationships;
@@ -1059,9 +1073,9 @@ export async function compileKnowledge(db: SupabaseClient, input: CompileInput):
       }
       log.push({ stage: "classify", decision: "markdown_frontmatter", input: { ref: draft.ref }, output: { domain: draft.domain, type: draft.object_type, subtype: draft.subtype } });
     } else {
-      const { c, model } = await classifyStage(db, input, settings, prompts.knowledge_classify, log);
+      const { c, model } = await classifyStage(db, input, settings, prompts.knowledge_classify, custom, log);
       if (model) models.classify = model;
-      const d = await draftFromClassification(db, input, c, settings, write, log);
+      const d = await draftFromClassification(db, input, c, settings, write, custom, log);
       draft = d.draft;
       taxonomy = d.taxonomy;
       warnings.push(...d.warnings);
@@ -1072,7 +1086,7 @@ export async function compileKnowledge(db: SupabaseClient, input: CompileInput):
         if (h.ref_or_name && isRelationshipType(type)) markdownRelationships.push({ ref: h.ref_or_name.trim().toUpperCase(), type });
       }
     }
-    draft = applyOverrides(draft, input.overrides);
+    draft = applyOverrides(draft, input.overrides, custom);
 
     // Dedup on the object-level embedding of the candidate.
     embedding = await embed(objectEmbeddingText(draft.name, draft.summary, draft.sections.length ? draft.sections : [{ heading: "Core", body: draft.teaching_core.slice(0, 2500) }]));

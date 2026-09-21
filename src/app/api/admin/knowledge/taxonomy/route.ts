@@ -31,6 +31,7 @@ import {
   OBJECT_STATUSES,
   LEARNING_STATUSES,
   slugify,
+  suggestedSubtypes,
 } from "@/lib/intelligence-taxonomy";
 import { guard, dbError, str } from "../_shared";
 
@@ -94,14 +95,23 @@ export async function POST(req: Request) {
   const kind = str(body.kind, 40);
   const value = str(body.value, 80);
   if (!kind || !value) return Response.json({ error: "kind and value are required" }, { status: 400 });
+  const domain = str(body.domain, 40) || null;
+  const objectType = str(body.objectType, 60) || null;
+  // Reconcile against the PREDEFINED values too, so "Finance" reuses `finance`
+  // instead of creating a near-duplicate custom domain.
+  const known =
+    kind === "domain" ? DOMAINS.map((d) => d.id)
+    : kind === "object_type" ? OBJECT_TYPES.map((t) => t.id)
+    : kind === "subtype" ? suggestedSubtypes(domain, objectType)
+    : [];
   try {
     const r = await ensureTaxonomyValue(
       supabaseAdmin(),
       admin.orgId,
-      { kind, value, label: str(body.label, 120) || null, domain: str(body.domain, 40) || null, objectType: str(body.objectType, 60) || null, intelligenceClass: str(body.intelligenceClass, 40) || null, proposedBy: "user", autoApprove: true },
-      []
+      { kind, value, label: str(body.label, 120) || null, domain, objectType, intelligenceClass: str(body.intelligenceClass, 40) || null, proposedBy: "user", autoApprove: true },
+      known
     );
-    return Response.json({ ok: true, ...r });
+    return Response.json({ ok: true, ...r, predefined: !r.created && known.includes(r.value) });
   } catch (e) {
     return dbError(e);
   }
