@@ -21,7 +21,10 @@ import { guard, dbError, str } from "../_shared";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
-export const maxDuration = 120;
+// classify → dedup judge → compile → embed → entities/relationships is 3–4 model
+// calls; a 19k-character book chapter runs well past two minutes on a slow day,
+// and the long-source batch compiles two at a time.
+export const maxDuration = 300;
 
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const TEXT_EXT = [".md", ".markdown", ".txt", ".text", ".csv", ".json"];

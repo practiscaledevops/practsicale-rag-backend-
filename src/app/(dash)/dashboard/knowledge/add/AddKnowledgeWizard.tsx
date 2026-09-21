@@ -296,7 +296,7 @@ export function AddKnowledgeWizard() {
       setExtractError(
         f.size > MAX_STORAGE_UPLOAD_BYTES || kind === "pdf"
           ? `"${f.name}" is ${fmtBytes(f.size)} — files up to 50 MB are supported.`
-          : `"${f.name}" is ${fmtBytes(f.size)} — ${KIND_LABEL[kind].toLowerCase()} files are limited to ${fmtBytes(MAX_BYTES_BY_KIND[kind])}.`
+          : `"${f.name}" is ${fmtBytes(f.size)} — ${kind} files are limited to ${Math.round(MAX_BYTES_BY_KIND[kind] / (1024 * 1024))} MB.`
       );
       return;
     }
@@ -634,7 +634,12 @@ export function AddKnowledgeWizard() {
                   <KTextarea
                     rows={isLong ? 8 : 14}
                     value={text}
-                    onChange={(e) => { setText(e.target.value); if (e.target.value.length <= LONG_SOURCE_CHARS) setSingleAnyway(false); }}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setText(v);
+                      // "One object anyway" holds for the text it cut (≤ 60k + the note); a different source gets the choice again.
+                      if (v.length <= LONG_SOURCE_CHARS || v.length > MAX_TEXT_CHARS + 500) setSingleAnyway(false);
+                    }}
                     placeholder={sourceMode === "paste" ? "Paste the raw source here… (a canonical .md with frontmatter is also accepted)" : "The extracted text appears here — trim it before compiling if you like."}
                     disabled={!!extracting}
                   />

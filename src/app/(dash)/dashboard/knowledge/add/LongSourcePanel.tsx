@@ -342,6 +342,8 @@ export function LongSourcePanel({
     setOutlined(null);
     setNotice(null);
     setError(null);
+    // What this batch filed stays resumable from the intro.
+    setSaved(loadSaved(key));
   }
 
   // ---- the batch ----------------------------------------------------------
