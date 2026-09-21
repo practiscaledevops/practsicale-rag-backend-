@@ -347,6 +347,79 @@ function slugList(v: unknown, max = 12): string[] {
   if (!Array.isArray(v)) return [];
   return Array.from(new Set(v.map((x) => slugify(String(x))).filter(Boolean))).slice(0, max);
 }
+/** Short labels only (applies_to / goals / functions / audiences): the classifier
+ *  sometimes returns sentences; those are noise as facets. */
+function labelList(v: unknown, max = 8): string[] {
+  return slugList(v, 40)
+    .filter((s) => s.length <= 32 && s.split("_").length <= 3)
+    .slice(0, max);
+}
+
+/** Buckets that ARE a domain: the human's choice wins over the classifier. */
+const BUCKET_DOMAIN: Partial<Record<RealityBucket, string>> = {
+  founder_brain: "founder",
+  brand_voice: "brand",
+  approved_content: "content",
+  proof_evidence: "customer",
+};
+
+/** Whether a reality source should be preserved verbatim (its own structure)
+ *  instead of rewritten by the compile model: it already has headings, or it is
+ *  long enough that a rewrite would lose facts (and risk a truncated response). */
+function shouldPreserveStructure(text: string): boolean {
+  const headings = (text.match(/^#{1,3}\s+\S/gm) ?? []).length;
+  return headings >= 2 || text.length > 6000;
+}
+
+/** Build sections from the source's own headings (verbatim), framed with a
+ *  summary, the stated facts/claims, the entities and an evidence note. */
+function preserveSections(
+  draft: ObjectDraft,
+  sourceText: string,
+  entities: EntityInput[]
+): MarkdownSection[] {
+  const out: MarkdownSection[] = [];
+  if (draft.summary) out.push({ heading: "Summary", body: draft.summary });
+  if (draft.source_claims.length) {
+    out.push({ heading: "Key Facts", body: draft.source_claims.slice(0, 40).map((c) => `- ${c.claim}`).join("\n") });
+  }
+  // Split the ORIGINAL text on its headings (levels 1–3); text before the first heading = Context.
+  const lines = sourceText.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "").split(/\r?\n/);
+  let cur: MarkdownSection | null = null;
+  let preamble = "";
+  const seen = new Set(out.map((s) => s.heading.toLowerCase()));
+  const push = (s: MarkdownSection) => {
+    const body = s.body.trim();
+    if (!body) return;
+    let heading = s.heading.trim() || "Details";
+    let n = 2;
+    while (seen.has(heading.toLowerCase())) heading = `${s.heading.trim() || "Details"} (${n++})`;
+    seen.add(heading.toLowerCase());
+    out.push({ heading, body });
+  };
+  for (const line of lines) {
+    const h = /^(#{1,3})\s+(.+)$/.exec(line);
+    if (h) {
+      if (cur) push(cur);
+      else if (preamble.trim()) push({ heading: "Context", body: preamble });
+      cur = { heading: h[2].replace(/^\d+[.)]\s*/, "").trim(), body: "" };
+    } else if (cur) cur.body += line + "\n";
+    else preamble += line + "\n";
+  }
+  if (cur) push(cur);
+  else if (preamble.trim()) push({ heading: "Details", body: preamble });
+  if (entities.length) {
+    out.push({
+      heading: "Entities Involved",
+      body: entities.slice(0, 30).map((e) => `- ${e.kind}: ${e.name}${e.role ? ` (${e.role})` : ""}`).join("\n"),
+    });
+  }
+  out.push({
+    heading: "Evidence Notes",
+    body: `Preserved verbatim from the internal source${draft.source_date ? ` dated ${draft.source_date}` : ""}${draft.bucket ? ` (${draft.bucket.replace(/_/g, " ")})` : ""}. Facts, numbers and names are as stated there; treat them as current unless an effective_until date says otherwise.`,
+  });
+  return out;
+}
 function pickAllowed(v: unknown, allowed: readonly string[]): string | null {
   const s = slugify(clean(v));
   if (!s) return null;
@@ -527,6 +600,7 @@ async function draftFromClassification(
     if (!hit && c.domain) warnings.push(`Domain "${c.domain}" is not in the taxonomy; used "${domain}".`);
   }
   if (cls === "platform_intelligence") domain = "platform";
+  if (bucket && BUCKET_DOMAIN[bucket]) domain = BUCKET_DOMAIN[bucket]!;
 
   // Type: must be one the class allows (content-only types need domain=content).
   const allowedTypes = typesFor(cls, domain).map((t) => t.id);
@@ -577,7 +651,7 @@ async function draftFromClassification(
       ? "source_teaching"
       : cls === "organizational_learning"
         ? "internal_data"
-        : hints.isFounderVoice || domain === "founder"
+        : hints.isFounderVoice || domain === "founder" || bucket === "founder_brain"
           ? "founder_experience"
           : bucket === "company_truth" || bucket === "brand_voice"
             ? "verified_truth"
@@ -610,16 +684,16 @@ async function draftFromClassification(
     internal_validation: "unvalidated",
     evidence_level: evidenceLevel,
     authority,
-    applies_to: slugList(c.applies_to),
-    goals: slugList(c.goals),
-    business_functions: slugList(c.business_functions),
+    applies_to: labelList(c.applies_to, 8),
+    goals: labelList(c.goals, 6),
+    business_functions: labelList(c.business_functions, 6),
     applies_to_platforms: slugList(c.applies_to_platforms).map((p) => pickAllowed(p, PLATFORMS) ?? p),
-    tags: Array.from(new Set([...slugList(hints.tags ?? [], 20), ...slugList(c.tags, 20)])),
+    tags: Array.from(new Set([...slugList(hints.tags ?? [], 20), ...slugList(c.tags, 20)])).filter((t) => t.length <= 40).slice(0, 20),
     content_format: isContent ? pickAllowed(content?.format, FORMATS) : null,
     content_job: isContent ? pickAllowed(content?.content_job, CONTENT_JOBS) : null,
     funnel_stage: isContent ? pickAllowed(content?.funnel_stage, FUNNEL_STAGES) : null,
     brand: isContent ? pickAllowed(content?.brand, BRANDS) : null,
-    audiences: isContent ? slugList(content?.audiences ?? []) : [],
+    audiences: isContent ? labelList(content?.audiences ?? [], 8) : [],
     content_length: isContent ? pickAllowed(content?.length, LENGTHS) : null,
     source_expert: cleanNull(hints.sourceExpert) ?? cleanNull(c.source?.expert),
     source_type: cleanNull(hints.sourceType) ?? cleanNull(c.source?.type),
@@ -792,7 +866,7 @@ async function compileStage(
   const res = await structured({
     tier: settings.intelligence.compileTier,
     system: prompt,
-    prompt: `TEMPLATE: ${classTemplateName(cls)}\n\nMETADATA:\n${JSON.stringify(meta, null, 2)}\n\nSUMMARY:\n${draft.summary}\n\nSUBSTANCE (the extracted teaching / content — compile from THIS, never invent beyond it):\n${draft.teaching_core}`,
+    prompt: `TEMPLATE: ${classTemplateName(cls)}\n\nMETADATA:\n${JSON.stringify(meta, null, 2)}\n\nSUMMARY:\n${draft.summary}\n\nSUBSTANCE (the extracted teaching / content — compile from THIS, never invent beyond it):\n${draft.teaching_core.slice(0, 14_000)}`,
     schema: CompileSchema,
     maxTokens: 8000,
   });
@@ -1008,10 +1082,22 @@ export async function compileKnowledge(db: SupabaseClient, input: CompileInput):
     if (dd.model) models.dedup = dd.model;
 
     // Compile the canonical sections (unless the source already was canonical).
+    // Business Reality / learning sources with their own structure (or long ones)
+    // are PRESERVED verbatim — reality is evidence, not something to rewrite —
+    // which also costs nothing. Playbooks and platform intelligence are normalised
+    // by the compile model; if that fails, fall back to the preserved structure.
     if (!draft.sections.length && dedup.decision !== "duplicate" && dedup.decision !== "enrich") {
-      const cs = await compileStage(input, draft, settings, prompts.knowledge_compile, log);
-      draft.sections = cs.sections;
-      if (cs.model) models.compile = cs.model;
+      const preserve =
+        (draft.intelligence_class === "business_reality" || draft.intelligence_class === "organizational_learning") &&
+        shouldPreserveStructure(input.text);
+      if (preserve) {
+        draft.sections = preserveSections(draft, input.text, entities);
+        log.push({ stage: "compile", decision: "preserved_structure", input: { chars: input.text.length }, output: { sections: draft.sections.map((s) => s.heading) } });
+      } else {
+        const cs = await compileStage(input, draft, settings, prompts.knowledge_compile, log);
+        draft.sections = cs.model ? cs.sections : preserveSections(draft, input.text, entities);
+        if (cs.model) models.compile = cs.model;
+      }
     }
 
     // AI relationship suggestions from the neighbourhood (not the dedup target).

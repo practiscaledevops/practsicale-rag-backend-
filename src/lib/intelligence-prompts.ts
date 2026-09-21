@@ -81,6 +81,7 @@ Rules:
 - entities: people, departments, clients/prospects, offers, products, campaigns, platforms, frameworks, projects, KPIs mentioned, with a role when it is clear (salesperson, prospect, manager, department, outcome, objection).
 - For business_reality decide is_historical (it describes a past state that is no longer current, e.g. 2024 pricing) and any effective dates the text states.
 - Names are short and specific ("Source of Energy Accountability", not "A framework about accountability").
+- applies_to, goals, business_functions, audiences and tags are SHORT snake_case labels of 1 to 3 words each (managers, accountability, sales_team, healthcare_owner) — never sentences, never explanations. Max 8 applies_to, 6 goals, 12 tags.
 - Never invent. If something is unknown, leave it empty.
 Output JSON only.`;
 
