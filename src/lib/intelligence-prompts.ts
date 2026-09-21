@@ -80,7 +80,7 @@ Rules:
 - source_claims: every specific claim of results or facts the SOURCE makes ("this increases retention by 40%") — these are claims, never facts. Mark kind (result_claim | principle | opinion | fact_statement) and whether it is verifiable.
 - entities: people, departments, clients/prospects, offers, products, campaigns, platforms, frameworks, projects, KPIs mentioned, with a role when it is clear (salesperson, prospect, manager, department, outcome, objection).
 - For business_reality decide is_historical (it describes a past state that is no longer current, e.g. 2024 pricing) and any effective dates the text states.
-- Names are short and specific ("Source of Energy Accountability", not "A framework about accountability").
+- Names are short, specific, human titles ("Source of Energy Accountability", not "A framework about accountability"). NEVER use a filename, code or identifier as the name (not "02_APPROVED_QUOTE_LIBRARY"); if the source has a real title/H1 use it, otherwise write a descriptive title in Title Case.
 - applies_to, goals, business_functions, audiences and tags are SHORT snake_case labels of 1 to 3 words each (managers, accountability, sales_team, healthcare_owner) — never sentences, never explanations. Max 8 applies_to, 6 goals, 12 tags.
 - Never invent. If something is unknown, leave it empty.
 Output JSON only.`;

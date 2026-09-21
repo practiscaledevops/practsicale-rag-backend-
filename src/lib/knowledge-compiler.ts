@@ -537,7 +537,7 @@ async function classifyStage(
     hints.sourceExpert || hints.sourcePlatform || hints.sourceType || hints.sourceUrl || hints.sourceDate
       ? `Source hints: expert=${hints.sourceExpert ?? ""} platform=${hints.sourcePlatform ?? ""} type=${hints.sourceType ?? ""} url=${hints.sourceUrl ?? ""} date=${hints.sourceDate ?? ""}`
       : "",
-    input.title ? `Title / filename: ${input.title}` : "",
+    input.title ? `Filename (provenance only — do NOT use it as the name): ${input.title}` : "",
     "",
     `Allowed domains: ${domainList}`,
     `Allowed object types for this class: ${typeList}`,
@@ -697,9 +697,14 @@ async function draftFromClassification(
   };
   const authority = defaultAuthority(draftBase);
 
+  // A name that is really a filename/identifier (02_APPROVED_QUOTE_LIBRARY) is
+  // replaced by the source H1 or a humanised version of it.
+  const rawName = clean(c.name);
+  const looksLikeId = /^[\dA-Z_.-]+$/.test(rawName) && rawName.includes("_");
+  const h1Name = /^#\s+(.+)$/m.exec(input.text)?.[1]?.trim() ?? "";
   const draft: ObjectDraft = {
     ref: "",
-    name: clean(c.name) || clean(input.title) || "Untitled",
+    name: (looksLikeId ? h1Name || humanizeTitle(rawName) : rawName) || h1Name || humanizeTitle(clean(input.title)) || "Untitled",
     intelligence_class: cls,
     domain,
     object_type: objectType,
