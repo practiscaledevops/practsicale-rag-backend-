@@ -41,6 +41,30 @@ export interface FeatureSettings {
   groundOrRefuse: boolean;
   /** Rerank candidates with Cohere when a key is configured. */
   rerank: boolean;
+  /** Retrieval orchestrator: intent → lanes (reality/learning/playbooks…) → boosts → expansion. Off ⇒ classic pipeline. */
+  orchestrator: boolean;
+  /** Auto work mode: detect the expert job from the request when the caller sends "auto". */
+  autoWorkMode: boolean;
+  /** 1-hop relationship expansion of retrieved knowledge objects. */
+  relationshipExpansion: boolean;
+  /** Detect Organizational Learning in chat and offer to save it. */
+  learningDetection: boolean;
+}
+
+export interface IntelligenceSettings {
+  /** Object similarity at/above which the dedup judge runs (NEW/ENRICH/DUPLICATE/CONFLICT). 0.5..0.99 */
+  dedupThreshold: number;
+  /** Object similarity at/above which an AI relationship is SUGGESTED for review. 0.3..0.95 */
+  suggestThreshold: number;
+  /** Auto-approve new taxonomy values the compiler proposes (off ⇒ approval queue). */
+  taxonomyAutoApprove: boolean;
+  /** Tiers for the compiler stages. */
+  classifyTier: "fast" | "recommended" | "max";
+  compileTier: "fast" | "recommended" | "max";
+  /** Tier for the per-request intent classifier (fast keeps time-to-first-token low). */
+  intentTier: "fast" | "recommended" | "max";
+  /** Candidate pool per lane before boosting. 10..120 */
+  laneCandidates: number;
 }
 
 export interface GenerationSettings {
@@ -66,6 +90,7 @@ export interface RagSettings {
   features: FeatureSettings;
   generation: GenerationSettings;
   contextual: ContextualSettings;
+  intelligence: IntelligenceSettings;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +120,10 @@ export const DEFAULT_SETTINGS: RagSettings = {
     // company facts (enforced by the prompt). Turn ON for a strict data-only mode.
     groundOrRefuse: false,
     rerank: true,
+    orchestrator: true,
+    autoWorkMode: true,
+    relationshipExpansion: true,
+    learningDetection: true,
   },
   generation: {
     defaultTier: "recommended",
@@ -105,6 +134,15 @@ export const DEFAULT_SETTINGS: RagSettings = {
     maxChunksPerDoc: 200,
     concurrency: 5,
     tier: "fast",
+  },
+  intelligence: {
+    dedupThreshold: 0.8,
+    suggestThreshold: 0.62,
+    taxonomyAutoApprove: false,
+    classifyTier: "recommended",
+    compileTier: "recommended",
+    intentTier: "fast",
+    laneCandidates: 40,
   },
 };
 
@@ -133,6 +171,7 @@ export function mergeSettings(raw: unknown): RagSettings {
   const feat = (r.features ?? {}) as Record<string, unknown>;
   const gen = (r.generation ?? {}) as Record<string, unknown>;
   const ctx = (r.contextual ?? {}) as Record<string, unknown>;
+  const intel = (r.intelligence ?? {}) as Record<string, unknown>;
   const D = DEFAULT_SETTINGS;
 
   return {
@@ -151,6 +190,10 @@ export function mergeSettings(raw: unknown): RagSettings {
       faithfulnessCheck: bool(feat.faithfulnessCheck, D.features.faithfulnessCheck),
       groundOrRefuse: bool(feat.groundOrRefuse, D.features.groundOrRefuse),
       rerank: bool(feat.rerank, D.features.rerank),
+      orchestrator: bool(feat.orchestrator, D.features.orchestrator),
+      autoWorkMode: bool(feat.autoWorkMode, D.features.autoWorkMode),
+      relationshipExpansion: bool(feat.relationshipExpansion, D.features.relationshipExpansion),
+      learningDetection: bool(feat.learningDetection, D.features.learningDetection),
     },
     generation: {
       defaultTier: tier(gen.defaultTier, D.generation.defaultTier),
@@ -161,6 +204,15 @@ export function mergeSettings(raw: unknown): RagSettings {
       maxChunksPerDoc: num(ctx.maxChunksPerDoc, 1, 5000, D.contextual.maxChunksPerDoc),
       concurrency: num(ctx.concurrency, 1, 20, D.contextual.concurrency),
       tier: tier(ctx.tier, D.contextual.tier),
+    },
+    intelligence: {
+      dedupThreshold: num(intel.dedupThreshold, 0.5, 0.99, D.intelligence.dedupThreshold),
+      suggestThreshold: num(intel.suggestThreshold, 0.3, 0.95, D.intelligence.suggestThreshold),
+      taxonomyAutoApprove: bool(intel.taxonomyAutoApprove, D.intelligence.taxonomyAutoApprove),
+      classifyTier: tier(intel.classifyTier, D.intelligence.classifyTier),
+      compileTier: tier(intel.compileTier, D.intelligence.compileTier),
+      intentTier: tier(intel.intentTier, D.intelligence.intentTier),
+      laneCandidates: num(intel.laneCandidates, 10, 120, D.intelligence.laneCandidates),
     },
   };
 }

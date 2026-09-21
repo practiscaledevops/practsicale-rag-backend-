@@ -161,6 +161,92 @@ export function chunkDocument(
   }));
 }
 
+// ---- knowledge-object (semantic) chunking ------------------------------------
+//
+// A compiled intelligence object is NOT cut every N tokens. It is chunked by
+// complete ideas: every heading section (#, ##, ###) becomes one retrievable
+// chunk that inherits the object's metadata (ref, class, domain, type, subtype,
+// authority…) and stays linked to the whole object. Token limits are only a
+// SAFETY boundary — an unusually long section becomes a parent with children.
+
+/** Safety boundary (approx tokens) above which a section is sub-split. */
+const OBJECT_SECTION_SAFETY_TOKENS = 900;
+
+/** Strip a leading YAML frontmatter block; returns the body. */
+export function stripFrontmatter(markdown: string): string {
+  const m = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(markdown);
+  return (m ? markdown.slice(m[0].length) : markdown).trimStart();
+}
+
+/**
+ * Chunk a compiled knowledge object's markdown into semantic sections. Every
+ * chunk carries `metadata` (the object identity the caller passes) plus the
+ * section heading, so retrieval can land on "MG-001 → Diagnostic" directly.
+ */
+export function chunkKnowledgeObject(
+  markdown: string,
+  metadata: Record<string, unknown> = {}
+): Chunk[] {
+  const body = stripFrontmatter(markdown).trim();
+  if (!body) return [];
+  const lines = body.split(/\r?\n/);
+
+  interface Sec { heading: string; level: number; lines: string[] }
+  const sections: Sec[] = [];
+  let cur: Sec = { heading: "", level: 0, lines: [] };
+  for (const line of lines) {
+    const h = /^(#{1,3})\s+(\S.*)$/.exec(line);
+    if (h) {
+      if (cur.heading || cur.lines.some((l) => l.trim())) sections.push(cur);
+      cur = { heading: h[2].trim(), level: h[1].length, lines: [] };
+    } else {
+      cur.lines.push(line);
+    }
+  }
+  if (cur.heading || cur.lines.some((l) => l.trim())) sections.push(cur);
+
+  // No headings at all → structure-unaware fallback.
+  if (sections.every((s) => !s.heading)) return chunkMarkdown(body, metadata);
+
+  const out: Chunk[] = [];
+  let index = 0;
+  let parentN = 0;
+  // Merge a tiny title-only H1 preamble into the following section for context.
+  let titleLine = "";
+  for (const s of sections) {
+    const text = s.lines.join("\n").trim();
+    if (s.level === 1 && !text && !titleLine) {
+      titleLine = `# ${s.heading}`;
+      continue;
+    }
+    if (!s.heading && text.length < 80) continue; // stray preamble noise
+
+    const headingLine = s.heading ? `${"#".repeat(Math.max(1, s.level))} ${s.heading}` : "";
+    const content = [titleLine && index === 0 ? titleLine : "", headingLine, text].filter(Boolean).join("\n").trim();
+    if (!content) continue;
+    const base = {
+      ...metadata,
+      source_type: "document",
+      is_object_section: true,
+      section: s.heading || "Preamble",
+      section_index: index++,
+      heading: headingLine || undefined,
+    };
+
+    if (approxTokens(content) <= OBJECT_SECTION_SAFETY_TOKENS) {
+      out.push({ content, metadata: { ...base, tokens: approxTokens(content) } });
+      continue;
+    }
+    // Safety split: the whole section is the parent; children are searched.
+    const parentKey = `p${parentN++}`;
+    out.push({ key: parentKey, content, metadata: { ...base, is_parent: true, tokens: approxTokens(content) } });
+    for (const child of splitRecursive(content, 500, 60)) {
+      out.push({ content: child, parentKey, metadata: { ...base, tokens: approxTokens(child) } });
+    }
+  }
+  return out.length > 0 ? out : chunkMarkdown(body, metadata);
+}
+
 // ---- markdown / document chunking --------------------------------------------
 
 interface Section {

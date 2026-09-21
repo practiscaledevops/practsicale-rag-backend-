@@ -17,7 +17,8 @@
     "ingest:knowledge": "tsx scripts/ingest-knowledge.ts",
     "reindex": "tsx scripts/reindex.ts",
     "set:prompts": "tsx scripts/set-prompts.ts",
-    "set:provider-key": "tsx scripts/set-provider-key.ts"
+    "set:provider-key": "tsx scripts/set-provider-key.ts",
+    "compile:knowledge": "tsx scripts/compile-knowledge.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^1.0.0",

@@ -23,6 +23,14 @@ import {
   LogOut,
   Menu,
   X,
+  Brain,
+  PlusCircle,
+  Lightbulb,
+  Tags,
+  Share2,
+  Contact,
+  LineChart,
+  ScrollText,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -64,10 +72,23 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    title: "AI Brain",
+    items: [
+      { href: "/dashboard/knowledge/add", label: "Add knowledge", icon: PlusCircle },
+      { href: "/dashboard/knowledge", label: "Knowledge objects", icon: Brain },
+      { href: "/dashboard/learning", label: "Learning Lab", icon: Lightbulb },
+      { href: "/dashboard/taxonomy", label: "Taxonomy", icon: Tags },
+      { href: "/dashboard/relationships", label: "Relationships", icon: Share2 },
+      { href: "/dashboard/entities", label: "Entities", icon: Contact },
+      { href: "/dashboard/performance", label: "Performance memory", icon: LineChart },
+    ],
+  },
+  {
     title: "Operations",
     items: [
-      { href: "/dashboard/uploads", label: "Upload & ingest", icon: Upload },
+      { href: "/dashboard/uploads", label: "Bulk upload", icon: Upload },
       { href: "/dashboard/processing", label: "Processing runs", icon: Cpu },
+      { href: "/dashboard/decisions", label: "Ingestion decisions", icon: ScrollText },
       { href: "/dashboard/quality-data", label: "Data quality", icon: ShieldAlert },
       { href: "/dashboard/connectors", label: "Connectors", icon: Plug },
     ],
@@ -93,10 +114,19 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ];
 
-/** Is `href` the active route? Overview matches exactly; others match prefix. */
+const ALL_HREFS = NAV_GROUPS.flatMap((g) => g.items.map((i) => i.href));
+
+/**
+ * Is `href` the active route? Overview matches exactly; others match by prefix,
+ * and when several nav items match (e.g. /knowledge and /knowledge/add) only the
+ * most specific one lights up.
+ */
 function isActive(pathname: string, href: string): boolean {
   if (href === "/dashboard") return pathname === "/dashboard";
-  return pathname === href || pathname.startsWith(href + "/");
+  const matches = (h: string) => pathname === h || pathname.startsWith(h + "/");
+  if (!matches(href)) return false;
+  const best = ALL_HREFS.filter((h) => h !== "/dashboard" && matches(h)).sort((a, b) => b.length - a.length)[0];
+  return best === href;
 }
 
 export function AppShell({

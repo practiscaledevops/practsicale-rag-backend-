@@ -7,7 +7,7 @@
 // be exported from route.ts.)
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { chunkDocument, type Chunk } from "@/lib/chunking";
+import { chunkDocument, chunkKnowledgeObject, type Chunk } from "@/lib/chunking";
 import { embedMany } from "@/lib/embeddings";
 import { redactPII } from "@/lib/redact";
 import { loadSettings } from "@/lib/settings";
@@ -18,7 +18,14 @@ import { createHash } from "crypto";
 // module-level "debug" branch that tries to read a bundled test PDF from disk.
 import pdfParse from "pdf-parse/lib/pdf-parse.js";
 
-export interface IngestParams {
+/** Operating-Intelligence lane identity stamped on a document and its chunks. */
+export interface LaneIdentity {
+  intelligenceClass?: string | null;
+  domain?: string | null;
+  objectId?: string | null;
+}
+
+export interface IngestParams extends LaneIdentity {
   orgId: string;
   sourceType: string;
   title?: string | null;
@@ -27,6 +34,21 @@ export interface IngestParams {
   metadata?: Record<string, unknown>;
   dataSourceId?: string | null;
   collectionIds?: string[];
+  /**
+   * "knowledge_object": chunk by heading section (semantic; every chunk inherits
+   * the object metadata). Default "auto" picks the strategy by source type.
+   */
+  chunkStrategy?: "auto" | "knowledge_object";
+  /**
+   * Deterministic context line prepended to every chunk's embed/FTS input (the
+   * object's identity, e.g. "MG-001 Source of Energy · playbook/management/
+   * framework/accountability"). When set, the LLM contextualize step is skipped.
+   */
+  contextPrefix?: string | null;
+  /** Force contextual retrieval on/off for this document (default: org setting). */
+  contextualize?: boolean;
+  /** Skip content-hash dedup (a compiled object legitimately overlaps its raw source). */
+  allowDuplicate?: boolean;
 }
 
 export interface IngestResult {
@@ -37,11 +59,128 @@ export interface IngestResult {
   skipped: boolean;
 }
 
+/** Lane columns for an insert/update, only when a lane identity is provided
+ *  (so legacy callers keep the pre-0017 row shape). */
+function laneColumns(lane: LaneIdentity): Record<string, unknown> {
+  if (lane.intelligenceClass == null && lane.domain == null && lane.objectId == null) return {};
+  return {
+    intelligence_class: lane.intelligenceClass ?? null,
+    domain: lane.domain ?? null,
+    object_id: lane.objectId ?? null,
+  };
+}
+
+interface PersistContext extends LaneIdentity {
+  orgId: string;
+  documentId: string;
+  cleanText: string;
+  sourceType: string;
+  metadata: Record<string, unknown>;
+  dataSourceId: string | null;
+  cols: string[];
+  chunkStrategy: "auto" | "knowledge_object";
+  contextPrefix: string | null;
+  contextualize?: boolean;
+}
+
+/**
+ * Chunk -> (contextualize) -> embed -> persist for an existing document row,
+ * stamping scope + lane columns so retrieval can filter fast. Structure-aware
+ * chunking can emit PARENT chunks (full sections) alongside CHILD chunks;
+ * parents are inserted first so children can carry a real parent_id.
+ */
+async function persistChunks(db: SupabaseClient, ctx: PersistContext): Promise<number> {
+  const { orgId, documentId, cleanText, sourceType, metadata, dataSourceId, cols } = ctx;
+
+  const chunks =
+    ctx.chunkStrategy === "knowledge_object"
+      ? chunkKnowledgeObject(cleanText, metadata)
+      : chunkDocument(cleanText, sourceType, metadata);
+  if (chunks.length === 0) return 0;
+
+  // Context per chunk: a deterministic identity line for compiled objects, or
+  // the LLM-generated situating blurb (Anthropic contextual retrieval) for
+  // ordinary documents. Gated by the org's settings; graceful on demo/outage/cap.
+  let contexts: string[] = chunks.map(() => "");
+  if (ctx.contextPrefix) {
+    contexts = chunks.map((c) => {
+      const section = typeof c.metadata?.section === "string" ? c.metadata.section : "";
+      return section ? `${ctx.contextPrefix} · Section: ${section}` : ctx.contextPrefix!;
+    });
+  } else {
+    const { settings } = await loadSettings(orgId, db);
+    const on = ctx.contextualize ?? settings.features.contextualRetrieval;
+    if (on) {
+      const systemPrompt = await getActivePrompt(orgId, "context_generation");
+      contexts = await contextualizeChunks(
+        cleanText,
+        chunks.map((c) => c.content),
+        {
+          systemPrompt,
+          tier: settings.contextual.tier,
+          concurrency: settings.contextual.concurrency,
+          maxChunksPerDoc: settings.contextual.maxChunksPerDoc,
+        }
+      );
+    }
+  }
+
+  // Embed context + content together (contextual embeddings); store `content`
+  // raw so citations/snippets stay clean, and `context` separately (the fts
+  // generated column covers both — see migration 0010).
+  const embedInputs = chunks.map((c, i) => (contexts[i] ? `${contexts[i]}\n\n${c.content}` : c.content));
+  const vectors = await embedMany(embedInputs);
+
+  const lane = laneColumns(ctx);
+  const baseRow = (c: Chunk, embedding: number[], context: string) => ({
+    org_id: orgId,
+    document_id: documentId,
+    content: c.content,
+    context: context || null,
+    metadata: c.metadata,
+    embedding,
+    source_type: sourceType,
+    data_source_id: dataSourceId ?? null,
+    collection_ids: cols,
+    ...lane,
+  });
+
+  const withVec = chunks.map((c, i) => ({ chunk: c, embedding: vectors[i], context: contexts[i] ?? "" }));
+  const parents = withVec.filter((x) => x.chunk.metadata?.is_parent);
+  const children = withVec.filter((x) => !x.chunk.metadata?.is_parent);
+
+  // 1) Persist parents first and map each new id back to its local key. PostgREST
+  //    returns inserted rows in input order, so we zip results with `parents`.
+  const parentIdByKey = new Map<string, string>();
+  if (parents.length > 0) {
+    const { data: pRows, error: pErr } = await db
+      .from("chunks")
+      .insert(parents.map((p) => baseRow(p.chunk, p.embedding, p.context)))
+      .select("id");
+    if (pErr) throw new Error(pErr.message);
+    (pRows ?? []).forEach((row: { id: string }, i: number) => {
+      const key = parents[i]?.chunk.key;
+      if (key) parentIdByKey.set(key, row.id);
+    });
+  }
+
+  // 2) Persist children with parent_id resolved from the local parentKey.
+  const childRows = children.map((x) => {
+    const row = baseRow(x.chunk, x.embedding, x.context) as Record<string, unknown>;
+    const pk = x.chunk.parentKey;
+    row.parent_id = pk ? parentIdByKey.get(pk) ?? null : null;
+    return row;
+  });
+  if (childRows.length > 0) {
+    const { error: cErr } = await db.from("chunks").insert(childRows);
+    if (cErr) throw new Error(cErr.message);
+  }
+  return parents.length + children.length;
+}
+
 /**
  * Ingest a single document: redact PII, skip if unchanged, insert the document
- * (+ collection memberships), then chunk -> embed -> persist. Structure-aware
- * chunking can emit PARENT chunks (full sections) alongside CHILD chunks; parents
- * are inserted first so children can carry a real parent_id.
+ * (+ collection memberships), then chunk -> embed -> persist.
  *
  * Transactional-ish: if anything after the document insert fails (e.g. the
  * embedding provider erroring), the just-inserted document is deleted before the
@@ -57,14 +196,16 @@ export async function ingestOne(db: SupabaseClient, params: IngestParams): Promi
   const contentHash = createHash("sha256").update(cleanText).digest("hex");
 
   // Skip if unchanged (content-hash change detection) -> idempotent ingest.
-  const { data: existing } = await db
-    .from("documents")
-    .select("id")
-    .eq("org_id", orgId)
-    .eq("content_hash", contentHash)
-    .maybeSingle();
-  if (existing) {
-    return { documentId: existing.id, chunks: 0, skipped: true };
+  if (!params.allowDuplicate) {
+    const { data: existing } = await db
+      .from("documents")
+      .select("id")
+      .eq("org_id", orgId)
+      .eq("content_hash", contentHash)
+      .maybeSingle();
+    if (existing) {
+      return { documentId: existing.id, chunks: 0, skipped: true };
+    }
   }
 
   const { data: doc, error } = await db
@@ -77,6 +218,7 @@ export async function ingestOne(db: SupabaseClient, params: IngestParams): Promi
       content_hash: contentHash,
       data_source_id: dataSourceId ?? null,
       metadata: metadata ?? {},
+      ...laneColumns(params),
     })
     .select("id")
     .single();
@@ -93,90 +235,99 @@ export async function ingestOne(db: SupabaseClient, params: IngestParams): Promi
       );
     }
 
-    // Chunk -> (contextualize) -> embed -> persist, stamping scope columns so
-    // retrieval can filter fast.
-    const chunks = chunkDocument(cleanText, sourceType, metadata ?? {});
-
-    // Contextual retrieval (Anthropic): generate a short blurb situating each
-    // chunk in the document, prepended before embedding + full-text indexing.
-    // Gated by the org's settings; graceful (empty contexts) on demo/outage/cap.
-    const { settings } = await loadSettings(orgId, db);
-    let contexts: string[] = chunks.map(() => "");
-    if (settings.features.contextualRetrieval) {
-      const systemPrompt = await getActivePrompt(orgId, "context_generation");
-      contexts = await contextualizeChunks(
-        cleanText,
-        chunks.map((c) => c.content),
-        {
-          systemPrompt,
-          tier: settings.contextual.tier,
-          concurrency: settings.contextual.concurrency,
-          maxChunksPerDoc: settings.contextual.maxChunksPerDoc,
-        }
-      );
-    }
-
-    // Embed context + content together (contextual embeddings); store `content`
-    // raw so citations/snippets stay clean, and `context` separately (the fts
-    // generated column covers both — see migration 0010).
-    const embedInputs = chunks.map((c, i) =>
-      contexts[i] ? `${contexts[i]}\n\n${c.content}` : c.content
-    );
-    const vectors = await embedMany(embedInputs);
-
-    const baseRow = (c: Chunk, embedding: number[], context: string) => ({
-      org_id: orgId,
-      document_id: documentId,
-      content: c.content,
-      context: context || null,
-      metadata: c.metadata,
-      embedding,
-      source_type: sourceType,
-      data_source_id: dataSourceId ?? null,
-      collection_ids: cols,
+    const chunks = await persistChunks(db, {
+      orgId,
+      documentId,
+      cleanText,
+      sourceType,
+      metadata: metadata ?? {},
+      dataSourceId: dataSourceId ?? null,
+      cols,
+      chunkStrategy: params.chunkStrategy ?? "auto",
+      contextPrefix: params.contextPrefix ?? null,
+      contextualize: params.contextualize,
+      intelligenceClass: params.intelligenceClass,
+      domain: params.domain,
+      objectId: params.objectId,
     });
 
-    const withVec = chunks.map((c, i) => ({
-      chunk: c,
-      embedding: vectors[i],
-      context: contexts[i] ?? "",
-    }));
-    const parents = withVec.filter((x) => x.chunk.metadata?.is_parent);
-    const children = withVec.filter((x) => !x.chunk.metadata?.is_parent);
-
-    // 1) Persist parents first and map each new id back to its local key. PostgREST
-    //    returns inserted rows in input order, so we zip results with `parents`.
-    const parentIdByKey = new Map<string, string>();
-    if (parents.length > 0) {
-      const { data: pRows, error: pErr } = await db
-        .from("chunks")
-        .insert(parents.map((p) => baseRow(p.chunk, p.embedding, p.context)))
-        .select("id");
-      if (pErr) throw new Error(pErr.message);
-      (pRows ?? []).forEach((row: { id: string }, i: number) => {
-        const key = parents[i]?.chunk.key;
-        if (key) parentIdByKey.set(key, row.id);
-      });
-    }
-
-    // 2) Persist children with parent_id resolved from the local parentKey.
-    const childRows = children.map((x) => {
-      const row = baseRow(x.chunk, x.embedding, x.context) as Record<string, unknown>;
-      const pk = x.chunk.parentKey;
-      row.parent_id = pk ? parentIdByKey.get(pk) ?? null : null;
-      return row;
-    });
-    if (childRows.length > 0) {
-      const { error: cErr } = await db.from("chunks").insert(childRows);
-      if (cErr) throw new Error(cErr.message);
-    }
-
-    return { documentId, chunks: parents.length + children.length, skipped: false };
+    return { documentId, chunks, skipped: false };
   } catch (e) {
     // Roll back the orphan document (chunks + collection rows cascade).
     await db.from("documents").delete().eq("id", documentId).eq("org_id", orgId);
     throw e;
   }
+}
+
+export interface ReingestParams extends LaneIdentity {
+  orgId: string;
+  documentId: string;
+  text: string;
+  title?: string | null;
+  /** Merged over the document's existing metadata. */
+  metadata?: Record<string, unknown>;
+  chunkStrategy?: "auto" | "knowledge_object";
+  contextPrefix?: string | null;
+  contextualize?: boolean;
+}
+
+/**
+ * Replace a document's content in place (same document id): used when a
+ * knowledge object is ENRICHED or its markdown edited. Re-hashes, updates the
+ * row, deletes the old chunks and persists new ones — so relationships, run
+ * history and retrieval logs that point at the document keep working.
+ */
+export async function reingestDocument(db: SupabaseClient, params: ReingestParams): Promise<IngestResult> {
+  const { orgId, documentId } = params;
+  const { data: doc, error } = await db
+    .from("documents")
+    .select("id, source_type, metadata, data_source_id")
+    .eq("id", documentId)
+    .eq("org_id", orgId)
+    .maybeSingle();
+  if (error || !doc) throw new Error(error?.message ?? "document not found");
+
+  const cleanText = redactPII(params.text);
+  const contentHash = createHash("sha256").update(cleanText).digest("hex");
+  const metadata = { ...((doc.metadata as Record<string, unknown>) ?? {}), ...(params.metadata ?? {}) };
+
+  const { data: colRows } = await db
+    .from("document_collections")
+    .select("collection_id")
+    .eq("document_id", documentId);
+  const cols = ((colRows ?? []) as { collection_id: string }[]).map((r) => r.collection_id);
+
+  const { error: uErr } = await db
+    .from("documents")
+    .update({
+      content_hash: contentHash,
+      metadata,
+      ...(params.title !== undefined ? { title: params.title } : {}),
+      ...laneColumns(params),
+    })
+    .eq("id", documentId)
+    .eq("org_id", orgId);
+  if (uErr) throw new Error(uErr.message);
+
+  const { error: dErr } = await db.from("chunks").delete().eq("document_id", documentId).eq("org_id", orgId);
+  if (dErr) throw new Error(dErr.message);
+
+  const chunks = await persistChunks(db, {
+    orgId,
+    documentId,
+    cleanText,
+    sourceType: (doc.source_type as string) ?? "document",
+    metadata,
+    dataSourceId: (doc.data_source_id as string | null) ?? null,
+    cols,
+    chunkStrategy: params.chunkStrategy ?? "auto",
+    contextPrefix: params.contextPrefix ?? null,
+    contextualize: params.contextualize,
+    intelligenceClass: params.intelligenceClass,
+    domain: params.domain,
+    objectId: params.objectId,
+  });
+  return { documentId, chunks, skipped: false };
 }
 
 /**

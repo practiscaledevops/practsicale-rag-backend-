@@ -94,6 +94,85 @@ function toOrQuery(query: string): string {
   return terms.length ? terms.join(" OR ") : query;
 }
 
+// ---- Lane-aware retrieval (Operating Intelligence) ---------------------------
+
+/** A chunk returned by the lane search: carries its knowledge-object identity. */
+export interface LaneChunk extends RetrievedChunk {
+  object_id: string | null;
+  intelligence_class: string;
+  domain: string | null;
+  /** Fused RRF score from the SQL function (relative within one search). */
+  rrf_score: number;
+}
+
+/** Thrown when migration 0017 hasn't been applied yet (callers fall back). */
+export const LANE_RPC_MISSING = "LANE_RPC_MISSING";
+
+/**
+ * Hybrid search restricted to intelligence lanes (classes), optional domains,
+ * or specific objects — the DB-side half of "look in the right drawers first".
+ * The key's scope is still enforced inside the SQL. Same AND→OR recall retry as
+ * hybridSearchScoped. Throws LANE_RPC_MISSING if the RPC doesn't exist.
+ */
+export async function hybridSearchLane(opts: {
+  orgId: string;
+  query: string;
+  scope: ScopeFilters;
+  classes?: string[];
+  domains?: string[];
+  objectIds?: string[];
+  sourceTypes?: string[];
+  matchCount?: number;
+  fullTextWeight?: number;
+  semanticWeight?: number;
+  rrfK?: number;
+  /** Reuse an embedding computed once per query across lanes. */
+  queryEmbedding?: number[];
+}): Promise<LaneChunk[]> {
+  const db = supabaseAdmin();
+  const query_embedding = opts.queryEmbedding ?? (await embed(opts.query));
+  const hasVector = query_embedding.some((v) => v !== 0);
+
+  const params: Record<string, unknown> = {
+    p_org_id: opts.orgId,
+    query_text: opts.query,
+    query_embedding,
+    p_source_types: opts.sourceTypes ?? opts.scope.sourceTypes,
+    p_data_source_ids: opts.scope.dataSourceIds,
+    p_collection_ids: opts.scope.collectionIds,
+    p_classes: opts.classes ?? [],
+    p_domains: opts.domains ?? [],
+    p_object_ids: opts.objectIds ?? [],
+    match_count: opts.matchCount ?? 40,
+  };
+  if (typeof opts.fullTextWeight === "number") params.full_text_weight = opts.fullTextWeight;
+  if (!hasVector) params.semantic_weight = 0;
+  else if (typeof opts.semanticWeight === "number") params.semantic_weight = opts.semanticWeight;
+  if (typeof opts.rrfK === "number") params.rrf_k = opts.rrfK;
+
+  const run = async (p: Record<string, unknown>): Promise<LaneChunk[]> => {
+    const { data, error } = await db.rpc("hybrid_search_lane", p);
+    if (error) {
+      const msg = String(error.message ?? "");
+      if (error.code === "42883" || /hybrid_search_lane/i.test(msg) || /schema cache/i.test(msg)) {
+        throw new Error(LANE_RPC_MISSING);
+      }
+      throw error;
+    }
+    return (data ?? []) as LaneChunk[];
+  };
+
+  let results = await run(params);
+  if (results.length < 3) {
+    const orText = toOrQuery(opts.query);
+    if (orText && orText !== opts.query) {
+      const orResults = await run({ ...params, query_text: orText });
+      if (orResults.length > results.length) results = orResults;
+    }
+  }
+  return results;
+}
+
 // Hybrid retrieval: vector + full text, fused by Reciprocal Rank Fusion in SQL.
 // (Original single-source variant; prefer hybridSearchScoped for the API path.)
 export async function hybridSearch(opts: {
