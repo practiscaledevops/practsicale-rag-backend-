@@ -477,7 +477,12 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   let top: OrchestratedChunk[];
   if (features.rerank && pool.length > retrieval.rerankTopN) {
     emit({ stage: "reranking", label: "Ranking the best evidence" });
-    const ranked = await rerank(query, pool, retrieval.rerankTopN);
+    // Rerank only a lane-balanced, score-sorted WINDOW rather than the whole
+    // pool: the LLM reranker's prompt (and latency, which is paid before the
+    // first token) grows with the candidate count, and our finalScore already
+    // pre-orders the pool, so the true top-N almost always lives in the window.
+    const rerankInput = pool.slice(0, Math.max(retrieval.rerankTopN * 3, 24));
+    const ranked = await rerank(query, rerankInput, retrieval.rerankTopN);
     const byId = new Map(pool.map((c) => [c.id, c]));
     top = ranked.map((r) => ({ ...(byId.get(r.id) ?? (r as OrchestratedChunk)), score: r.score }));
   } else {

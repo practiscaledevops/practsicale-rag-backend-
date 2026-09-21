@@ -48,7 +48,11 @@ import { demoChatStreamResponse } from "@/lib/demo/stream";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
-export const maxDuration = 60;
+// Long BUILD/deep answers (a full training program, a decision memo) plus the
+// orchestrator's pre-generation work can exceed 60s; a function timeout cuts the
+// stream mid-answer (no finish part). 300s is the Vercel Pro ceiling. The spoke's
+// /api/chat must match or it would sever a still-streaming answer at its own wall.
+export const maxDuration = 300;
 
 const REFUSAL = "I don't have information about that in the knowledge available to me, so I can't answer.";
 
@@ -265,7 +269,10 @@ export async function POST(req: Request) {
       if (hasAttachments) dataStream.writeData({ type: "status", stage: "reading", label: "Reading attached files" });
       dataStream.writeData({ type: "status", stage: "generating", label: `Writing the answer${modeDefinition ? ` as ${modeDefinition.label}` : ""}` });
 
-      const maxTokens = deepAnalysis ? Math.max(settings.generation.maxTokens, 6000) : settings.generation.maxTokens;
+      // BUILD-intent answers (a full training, an SOP, a complete system) and
+      // deep analysis need room; a normal cap truncates them mid-way.
+      const wantsLong = deepAnalysis || out.intent.intentKind === "build";
+      const maxTokens = wantsLong ? Math.max(settings.generation.maxTokens, 8000) : settings.generation.maxTokens;
       const context = out.contextBlock;
       const performanceSection = out.performanceBlock
         ? `\n\nPERFORMANCE MEMORY (structured results — treat as verified business data, cite by naming the metric and period):\n${out.performanceBlock}`

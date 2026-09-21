@@ -21,7 +21,9 @@ import { isDemo } from "@/lib/demo/mode";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
-export const maxDuration = 60;
+// Saving a learning compiles a knowledge object (an LLM classify + compile), which
+// can exceed 60s on a long narrative.
+export const maxDuration = 120;
 
 const KINDS = new Set(["decision", "implementation", "experiment", "result", "learning", "adaptation", "postmortem"]);
 
