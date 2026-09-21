@@ -342,6 +342,17 @@ const MAX_SOURCE_CHARS = 60_000;
 function clean(s: unknown): string {
   return typeof s === "string" ? s.trim() : "";
 }
+/** "02_APPROVED_QUOTE_LIBRARY.md" → "Approved Quote Library". */
+function humanizeTitle(s: string): string {
+  const t = s.replace(/\.(md|markdown|txt|pdf|csv|json)$/i, "").replace(/^\d+[\s_.-]*/, "").replace(/[_-]+/g, " ").trim();
+  if (!t) return "";
+  return t
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => (w.length > 2 || w === "ai" ? w.charAt(0).toUpperCase() + w.slice(1) : w))
+    .join(" ")
+    .replace(/^./, (c) => c.toUpperCase());
+}
 function cleanNull(s: unknown): string | null {
   const t = clean(s);
   return t ? t : null;
@@ -544,7 +555,9 @@ async function classifyStage(
     system: prompt,
     prompt: userPrompt,
     schema: ClassifySchema,
-    maxTokens: 6000,
+    // teaching_core is capped at ~12k chars by the prompt; 8k output tokens
+    // leaves room for it plus the metadata even on long sources.
+    maxTokens: 8000,
   });
 
   if (res) {
@@ -552,9 +565,11 @@ async function classifyStage(
     return { c: res.object, model: res.model };
   }
 
-  // Deterministic fallback (demo / no key / outage).
+  // Deterministic fallback (demo / no key / outage). Prefer the source's own
+  // H1, then a humanised filename ("02_APPROVED_QUOTE_LIBRARY" → "Approved Quote Library").
+  const h1 = /^#\s+(.+)$/m.exec(text)?.[1]?.trim();
   const firstLine = text.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 3) ?? "Untitled";
-  const name = clean(input.title) || firstLine.replace(/^#+\s*/, "").slice(0, 120);
+  const name = h1 || humanizeTitle(clean(input.title)) || firstLine.replace(/^#+\s*/, "").slice(0, 120);
   const domain = hints.domain && isDomain(hints.domain) ? hints.domain : bucketDef?.domain ?? "other";
   const fallback: Classified = {
     name,
