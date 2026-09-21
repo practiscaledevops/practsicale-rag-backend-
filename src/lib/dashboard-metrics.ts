@@ -1,8 +1,9 @@
-// Live metrics for the CEO control-tower Overview. All reads are org-scoped and
-// wrapped so one failing query never blanks the whole page (it returns a safe
-// default). Server-only (uses the service-role client). Single-org today; chunk
-// counts are global because chunks carry no org_id (they inherit it via their
-// document) — correct for the current single-tenant deployment.
+// Live operational metrics for the Overview's "Operations & data health" panel
+// (ingestion runs, sources, documents/chunks, monthly model cost). All reads are
+// org-scoped and wrapped so one failing query never blanks the whole page (it
+// returns a safe default). Server-only (uses the service-role client). Single-org
+// today; chunk counts are global because chunks carry no org_id (they inherit it
+// via their document) — correct for the current single-tenant deployment.
 
 import { supabaseAdmin } from "@/lib/supabase";
 
@@ -20,27 +21,19 @@ export interface DataSourceRow {
   needsAttention: boolean;
 }
 
-export interface IngestionRun {
+interface IngestionRun {
   status: string;
-  trigger: string;
-  documentsIngested: number;
-  chunksIngested: number;
-  documentsSkipped: number;
-  error: string | null;
-  startedAt: string;
   finishedAt: string | null;
 }
 
 export interface ControlTowerData {
   documents: number | null;
   bySourceType: Record<SourceType, number>;
-  callScores: number | null;
   totalChunks: number | null;
   embeddedChunks: number | null;
-  collections: number | null;
   dataSources: DataSourceRow[];
   needsReview: number;
-  runs: IngestionRun[];
+  /** Over the 50 most recent ingestion runs. */
   runStats: { success: number; error: number; running: number; lastSuccessAt: string | null };
   usage: {
     costUsd: number;
@@ -106,7 +99,6 @@ export async function getControlTowerData(orgId: string): Promise<ControlTowerDa
     document,
     totalChunks,
     embeddedChunks,
-    collections,
     dsRes,
     runsRes,
     usageRes,
@@ -118,7 +110,6 @@ export async function getControlTowerData(orgId: string): Promise<ControlTowerDa
     docCountByType(orgId, "document"),
     chunkCount(false),
     chunkCount(true),
-    orgCount("collections", orgId),
     db
       .from("data_sources")
       .select("id, name, source_type, kind, is_active, last_run_at, last_status")
@@ -126,7 +117,7 @@ export async function getControlTowerData(orgId: string): Promise<ControlTowerDa
       .order("name"),
     db
       .from("ingestion_runs")
-      .select("status, trigger, documents_ingested, chunks_ingested, documents_skipped, error, started_at, finished_at")
+      .select("status, finished_at")
       .eq("org_id", orgId)
       .order("started_at", { ascending: false })
       .limit(50),
@@ -156,15 +147,9 @@ export async function getControlTowerData(orgId: string): Promise<ControlTowerDa
   });
   const needsReview = dataSources.filter((s) => s.needsAttention).length;
 
-  // Ingestion runs + stats.
+  // Ingestion run stats (recent runs only).
   const runs: IngestionRun[] = ((runsRes.data ?? []) as Record<string, unknown>[]).map((r) => ({
     status: String(r.status ?? "running"),
-    trigger: String(r.trigger ?? "manual"),
-    documentsIngested: Number(r.documents_ingested ?? 0),
-    chunksIngested: Number(r.chunks_ingested ?? 0),
-    documentsSkipped: Number(r.documents_skipped ?? 0),
-    error: (r.error as string) ?? null,
-    startedAt: String(r.started_at ?? ""),
     finishedAt: (r.finished_at as string) ?? null,
   }));
   const runStats = {
@@ -199,13 +184,10 @@ export async function getControlTowerData(orgId: string): Promise<ControlTowerDa
   return {
     documents,
     bySourceType: { transcript, call_score: callScore, coaching, document },
-    callScores: callScore,
     totalChunks,
     embeddedChunks,
-    collections,
     dataSources,
     needsReview,
-    runs,
     runStats,
     usage,
   };

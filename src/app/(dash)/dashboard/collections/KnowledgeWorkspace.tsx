@@ -4,9 +4,12 @@
 //   collections (left) → documents (middle) → detail inspector (right).
 // The page itself never scrolls; each pane scrolls independently. Deep green
 // palette per the Brain brand. Live counts are derived from the documents +
-// collections passed in; the document inspector lazy-loads chunks.
+// collections passed in; the document inspector lazy-loads chunks. Every
+// document is shown with its Operating Intelligence lane (class · domain) and,
+// when it backs a compiled knowledge object, that object's ref.
 
 import * as React from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   Folder,
@@ -31,6 +34,7 @@ import {
 } from "lucide-react";
 import { WORK_MODES, MODE_LABELS } from "@/lib/prompts";
 import { ACCESS_LEVELS } from "@/lib/knowledge-taxonomy";
+import { INTELLIGENCE_CLASSES, domainLabel, humanize } from "@/lib/intelligence-taxonomy";
 
 // ---- Green palette (self-contained; independent of global tokens) -----------
 const C = {
@@ -74,6 +78,14 @@ export interface WsDocument {
   createdAt: string;
   updatedAt: string;
   chunkCount: number;
+  /** Retrieval lane (migration 0017). NULL = legacy row, treated as Business Reality. */
+  intelligenceClass: string | null;
+  domain: string | null;
+  /** The knowledge object this document is the compiled page (or raw source) of. */
+  objectId: string | null;
+  objectRef: string | null;
+  objectName: string | null;
+  /** Legacy upload category, or the Business Reality bucket for compiled objects. */
   category: string | null;
   owner: string | null;
   access: string | null;
@@ -81,8 +93,10 @@ export interface WsDocument {
   collectionIds: string[];
 }
 
+// source_type "document" is everything not synced from an API: uploads, pasted
+// text, links and compiled knowledge objects.
 const SOURCE_LABEL: Record<string, string> = {
-  document: "Manual upload",
+  document: "Manual",
   call_score: "Call score",
   coaching: "Coaching",
   transcript: "Transcript",
@@ -122,11 +136,23 @@ function docReviewDue(d: WsDocument): boolean {
   const r = new Date(d.reviewDate).getTime();
   return !Number.isNaN(r) && r < Date.now();
 }
+/** Lane label. A NULL class is a legacy row and reads as Business Reality (as hybrid_search_lane treats it). */
+function docClassLabel(d: WsDocument): string {
+  if (d.intelligenceClass === "raw_archive") return "Raw archive";
+  const id = d.intelligenceClass ?? "business_reality";
+  return INTELLIGENCE_CLASSES.find((c) => c.id === id)?.label ?? humanize(id);
+}
+/** The compiled page of a knowledge object (raw sources link to their object but are not "compiled"). */
+function docCompiled(d: WsDocument): boolean {
+  return Boolean(d.objectId) && d.intelligenceClass !== "raw_archive";
+}
 
 const FILTERS = [
   ["all", "All"],
+  ["compiled", "Compiled"],
+  ["raw", "Raw archive"],
   ["call_score", "Call score"],
-  ["document", "Manual upload"],
+  ["document", "Manual"],
   ["ready", "Ready"],
   ["processing", "Processing"],
   ["review", "Needs review"],
@@ -134,6 +160,9 @@ const FILTERS = [
   ["recent", "Updated recently"],
 ] as const;
 type FilterKey = (typeof FILTERS)[number][0];
+
+// Shared by the fixed header and every row so the columns stay aligned.
+const DOC_GRID = "minmax(0,2.2fr) minmax(0,1.5fr) 0.8fr 0.6fr 0.8fr 0.7fr 28px";
 
 // A synthetic id for the "All documents" and "Unfiled" pseudo-collections.
 const ALL = "__all__";
@@ -207,6 +236,8 @@ export function KnowledgeWorkspace({
     docs = docs.filter((d) => {
       switch (filter) {
         case "all": return true;
+        case "compiled": return docCompiled(d);
+        case "raw": return d.intelligenceClass === "raw_archive";
         case "call_score": return d.sourceType === "call_score";
         case "document": return d.sourceType === "document";
         case "ready": return d.chunkCount > 0;
@@ -217,7 +248,13 @@ export function KnowledgeWorkspace({
       }
     });
     const q = docSearch.trim().toLowerCase();
-    if (q) docs = docs.filter((d) => `${d.title ?? ""} ${d.category ?? ""} ${d.owner ?? ""}`.toLowerCase().includes(q));
+    if (q) {
+      docs = docs.filter((d) =>
+        `${d.title ?? ""} ${d.objectRef ?? ""} ${d.objectName ?? ""} ${docClassLabel(d)} ${domainLabel(d.domain)} ${d.category ?? ""} ${d.owner ?? ""}`
+          .toLowerCase()
+          .includes(q)
+      );
+    }
     return docs;
   }, [selectedCol, filter, docSearch, documents, byCollection]);
 
@@ -341,6 +378,7 @@ export function KnowledgeWorkspace({
                 key={k}
                 type="button"
                 onClick={() => setFilter(k)}
+                title={k === "document" ? "Uploaded, pasted, linked or compiled — not synced from an API" : undefined}
                 className="rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors"
                 style={
                   filter === k
@@ -361,10 +399,10 @@ export function KnowledgeWorkspace({
         {/* Fixed table header */}
         <div
           className="grid shrink-0 items-center gap-2 border-b px-3 py-2 text-[10px] font-semibold uppercase tracking-wider"
-          style={{ borderColor: C.border, color: C.muted, gridTemplateColumns: "minmax(0,2.4fr) 1fr 0.9fr 0.7fr 0.8fr 0.8fr 28px" }}
+          style={{ borderColor: C.border, color: C.muted, gridTemplateColumns: DOC_GRID }}
         >
           <span>Document</span>
-          <span>Category</span>
+          <span>Class · Domain</span>
           <span>Access</span>
           <span className="text-right">Chunks</span>
           <span>Status</span>
@@ -477,6 +515,23 @@ function AttentionDot({ kind }: { kind: string }) {
 // ---------------------------------------------------------------------------
 // Middle: document row (+ 3-dot menu)
 // ---------------------------------------------------------------------------
+/** The object's stable ref (BR-SAL-003), linking to its page. Muted for a raw source, green for the compiled page. */
+function RefChip({ d }: { d: WsDocument }) {
+  if (!d.objectRef || !d.objectId) return null;
+  const compiled = docCompiled(d);
+  return (
+    <Link
+      href={`/dashboard/knowledge/${d.objectId}`}
+      onClick={(e) => e.stopPropagation()}
+      title={`${compiled ? "Open knowledge object" : "Raw source of"} ${d.objectName ?? d.objectRef}`}
+      className="shrink-0 rounded px-1 font-mono text-[10px] leading-4 hover:underline"
+      style={compiled ? { color: C.green, border: "1px solid rgba(0,191,174,0.35)" } : { color: C.muted, border: `1px solid ${C.border}` }}
+    >
+      {d.objectRef}
+    </Link>
+  );
+}
+
 function DocRow({
   d,
   active,
@@ -508,7 +563,7 @@ function DocRow({
   return (
     <div
       className="grid cursor-pointer items-center gap-2 border-b px-3 py-2 transition-colors"
-      style={{ borderColor: "rgba(32,68,56,0.5)", gridTemplateColumns: "minmax(0,2.4fr) 1fr 0.9fr 0.7fr 0.8fr 0.8fr 28px", backgroundColor: active ? "rgba(0,191,174,0.10)" : undefined }}
+      style={{ borderColor: "rgba(32,68,56,0.5)", gridTemplateColumns: DOC_GRID, backgroundColor: active ? "rgba(0,191,174,0.10)" : undefined }}
       onClick={onSelect}
       onMouseEnter={(e) => { if (!active) e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.03)"; }}
       onMouseLeave={(e) => { if (!active) e.currentTarget.style.backgroundColor = active ? "rgba(0,191,174,0.10)" : "transparent"; }}
@@ -517,7 +572,16 @@ function DocRow({
         <FileText size={14} style={{ color: C.muted }} className="shrink-0" />
         <span className="truncate font-medium" style={{ color: C.text }}>{d.title || "Untitled"}</span>
       </span>
-      <span className="truncate" style={{ color: C.muted }}>{d.category || SOURCE_LABEL[d.sourceType] || "—"}</span>
+      <span className="flex min-w-0 flex-col">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate" style={{ color: C.text }}>
+            {docClassLabel(d)}
+            {d.domain && <span style={{ color: C.muted }}> · {domainLabel(d.domain)}</span>}
+          </span>
+          <RefChip d={d} />
+        </span>
+        {d.category && <span className="truncate text-[10px]" style={{ color: C.muted }}>{humanize(d.category)}</span>}
+      </span>
       <span className="flex items-center gap-1 truncate" style={{ color: C.muted }}>
         {restricted && <Lock size={11} style={{ color: C.restricted }} />}{docAccess(d)}
       </span>
@@ -797,7 +861,9 @@ function DocumentInspector({ d, onClose, onReprocess }: { d: WsDocument; onClose
             <FileText size={15} style={{ color: C.green }} />
             <h2 className="truncate text-sm font-semibold">{d.title || "Untitled"}</h2>
           </div>
-          <p className="mt-0.5 text-[11px]" style={{ color: C.muted }}>{SOURCE_LABEL[d.sourceType] ?? d.sourceType}</p>
+          <p className="mt-0.5 text-[11px]" style={{ color: C.muted }}>
+            {SOURCE_LABEL[d.sourceType] ?? d.sourceType} · {docClassLabel(d)}{d.domain ? ` / ${domainLabel(d.domain)}` : ""}
+          </p>
         </div>
         <button type="button" onClick={onClose} className="grid h-6 w-6 shrink-0 place-items-center rounded" style={{ color: C.muted }} aria-label="Close">
           <X size={15} />
@@ -816,7 +882,19 @@ function DocumentInspector({ d, onClose, onReprocess }: { d: WsDocument; onClose
         )}
 
         <Section title="Metadata">
-          <Row label="Category">{d.category || <Missing />}</Row>
+          <Row label="Class">{docClassLabel(d)}</Row>
+          <Row label="Domain">{d.domain ? domainLabel(d.domain) : <Missing />}</Row>
+          <Row label="Object">
+            {d.objectRef && d.objectId ? (
+              <Link href={`/dashboard/knowledge/${d.objectId}`} className="hover:underline" style={{ color: C.green }}>
+                <span className="font-mono">{d.objectRef}</span>
+                {d.objectName ? ` · ${d.objectName}` : ""}
+              </Link>
+            ) : (
+              <span style={{ color: C.muted }}>Not compiled</span>
+            )}
+          </Row>
+          {d.category && <Row label="Category">{humanize(d.category)}</Row>}
           <Row label="Owner">{d.owner || <Missing />}</Row>
           <Row label="Access">
             <span className="inline-flex items-center gap-1">{restricted && <Lock size={11} style={{ color: C.restricted }} />}{docAccess(d)}</span>

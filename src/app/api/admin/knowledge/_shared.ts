@@ -37,17 +37,31 @@ export interface ObjectStub {
   status: string;
 }
 
-/** ref/name/class for a set of object ids (for edges, mentions, logs). */
+/** `in (…)` filters travel in the URL; keep each request comfortably short. */
+const STUB_BATCH = 200;
+
+/**
+ * ref/name/class for a set of object ids (for edges, mentions, logs, the
+ * documents list). Org-scoped; batched so a long id list never overflows the
+ * request URL; a missing table (pre-migration 0017) yields an empty map.
+ */
 export async function objectStubs(orgId: string, ids: string[]): Promise<Record<string, ObjectStub>> {
   const uniq = Array.from(new Set(ids.filter(Boolean)));
   const out: Record<string, ObjectStub> = {};
   if (!uniq.length) return out;
-  const { data } = await supabaseAdmin()
-    .from("knowledge_objects")
-    .select("id, ref, name, intelligence_class, domain, object_type, status")
-    .eq("org_id", orgId)
-    .in("id", uniq);
-  for (const o of (data ?? []) as ObjectStub[]) out[o.id] = o;
+  const db = supabaseAdmin();
+  const batches: string[][] = [];
+  for (let i = 0; i < uniq.length; i += STUB_BATCH) batches.push(uniq.slice(i, i + STUB_BATCH));
+  const results = await Promise.all(
+    batches.map((batch) =>
+      db
+        .from("knowledge_objects")
+        .select("id, ref, name, intelligence_class, domain, object_type, status")
+        .eq("org_id", orgId)
+        .in("id", batch)
+    )
+  );
+  for (const { data } of results) for (const o of (data ?? []) as ObjectStub[]) out[o.id] = o;
   return out;
 }
 

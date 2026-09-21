@@ -4,7 +4,6 @@ import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
-  LayoutDashboard,
   Database,
   Upload,
   FileText,
@@ -66,7 +65,7 @@ const NAV_GROUPS: NavGroup[] = [
   {
     title: "Control center",
     items: [
-      { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
+      { href: "/dashboard", label: "Overview", icon: BrainCircuit },
       { href: "/dashboard/sources", label: "Knowledge sources", icon: Database },
       { href: "/dashboard/documents", label: "Documents", icon: FileText },
       { href: "/dashboard/collections", label: "Collections", icon: FolderTree },
@@ -75,7 +74,6 @@ const NAV_GROUPS: NavGroup[] = [
   {
     title: "AI Brain",
     items: [
-      { href: "/dashboard/brain", label: "Brain overview", icon: BrainCircuit },
       { href: "/dashboard/knowledge/add", label: "Add knowledge", icon: PlusCircle },
       { href: "/dashboard/knowledge", label: "Knowledge objects", icon: Brain },
       { href: "/dashboard/learning", label: "Learning Lab", icon: Lightbulb },

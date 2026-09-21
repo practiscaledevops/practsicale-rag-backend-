@@ -1,5 +1,7 @@
 import { requireAdmin, AdminAuthError } from "@/lib/auth/admin";
 import { supabaseAdmin } from "@/lib/supabase";
+import { isMissingRelation } from "@/lib/knowledge-store";
+import { objectStubs } from "@/app/api/admin/knowledge/_shared";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Alert } from "@/components/ui/Alert";
 import {
@@ -12,6 +14,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const DOC_LIMIT = 3000;
+const DOC_SELECT = "id, title, source_type, uri, created_at, updated_at, metadata, chunks(count), document_collections(collection_id)";
+// Lane identity from migration 0017; the list falls back to DOC_SELECT without it.
+const DOC_LANE_SELECT = `${DOC_SELECT}, intelligence_class, domain, object_id`;
 
 interface RawCol {
   id: string;
@@ -32,6 +37,9 @@ interface RawDoc {
   metadata: Record<string, unknown> | null;
   chunks: { count: number }[] | null;
   document_collections: { collection_id: string }[] | null;
+  intelligence_class?: string | null;
+  domain?: string | null;
+  object_id?: string | null;
 }
 
 function meta(m: Record<string, unknown> | null, ...keys: string[]): string | null {
@@ -60,6 +68,15 @@ async function loadCollections(db: ReturnType<typeof supabaseAdmin>, orgId: stri
   return { data: fb.data as RawCol[] | null, enabled: false };
 }
 
+/** Load documents with their lane columns, tolerating a pre-0017 schema (42703 undefined_column). */
+async function loadDocuments(db: ReturnType<typeof supabaseAdmin>, orgId: string): Promise<RawDoc[]> {
+  const list = (select: string) =>
+    db.from("documents").select(select).eq("org_id", orgId).order("updated_at", { ascending: false }).limit(DOC_LIMIT);
+  const first = await list(DOC_LANE_SELECT);
+  const res = first.error && isMissingRelation(first.error) ? await list(DOC_SELECT) : first;
+  return (res.data ?? []) as unknown as RawDoc[];
+}
+
 export default async function CollectionsPage() {
   let admin;
   try {
@@ -79,17 +96,9 @@ export default async function CollectionsPage() {
   }
 
   const db = supabaseAdmin();
-  const [colRes, docRes] = await Promise.all([
-    loadCollections(db, admin.orgId),
-    db
-      .from("documents")
-      .select(
-        "id, title, source_type, uri, created_at, updated_at, metadata, chunks(count), document_collections(collection_id)"
-      )
-      .eq("org_id", admin.orgId)
-      .order("updated_at", { ascending: false })
-      .limit(DOC_LIMIT),
-  ]);
+  const [colRes, rawDocs] = await Promise.all([loadCollections(db, admin.orgId), loadDocuments(db, admin.orgId)]);
+  // One org-scoped lookup resolves the ref/name of every compiled object behind the listed documents.
+  const objects = await objectStubs(admin.orgId, rawDocs.map((d) => d.object_id ?? ""));
 
   const collections: WsCollection[] = ((colRes.data as RawCol[]) ?? []).map((c) => ({
     id: c.id,
@@ -100,20 +109,28 @@ export default async function CollectionsPage() {
     settings: (c.settings ?? {}) as WsCollection["settings"],
   }));
 
-  const documents: WsDocument[] = ((docRes.data as unknown as RawDoc[]) ?? []).map((d) => ({
-    id: d.id,
-    title: d.title,
-    sourceType: d.source_type,
-    uri: d.uri,
-    createdAt: d.created_at,
-    updatedAt: d.updated_at ?? d.created_at,
-    chunkCount: d.chunks?.[0]?.count ?? 0,
-    category: meta(d.metadata, "category"),
-    owner: meta(d.metadata, "owner", "source_owner", "author"),
-    access: meta(d.metadata, "confidentiality", "access_level", "access"),
-    reviewDate: meta(d.metadata, "review_date", "expiry_date"),
-    collectionIds: (d.document_collections ?? []).map((x) => x.collection_id).filter(Boolean),
-  }));
+  const documents: WsDocument[] = rawDocs.map((d) => {
+    const object = d.object_id ? objects[d.object_id] : undefined;
+    return {
+      id: d.id,
+      title: d.title,
+      sourceType: d.source_type,
+      uri: d.uri,
+      createdAt: d.created_at,
+      updatedAt: d.updated_at ?? d.created_at,
+      chunkCount: d.chunks?.[0]?.count ?? 0,
+      intelligenceClass: d.intelligence_class ?? null,
+      domain: d.domain ?? null,
+      objectId: d.object_id ?? null,
+      objectRef: object?.ref ?? null,
+      objectName: object?.name ?? null,
+      category: meta(d.metadata, "category"),
+      owner: meta(d.metadata, "owner", "source_owner", "author"),
+      access: meta(d.metadata, "confidentiality", "access_level", "access"),
+      reviewDate: meta(d.metadata, "review_date", "expiry_date"),
+      collectionIds: (d.document_collections ?? []).map((x) => x.collection_id).filter(Boolean),
+    };
+  });
 
   return (
     <KnowledgeWorkspace

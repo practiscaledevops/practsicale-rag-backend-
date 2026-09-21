@@ -3,7 +3,9 @@
 // The AI Brain overview — a CEO-friendly, read-at-a-glance page: hero stats,
 // how the Brain is organised / what it trusts / what it learned / how it is
 // connected, fed and answering, a health checklist, and a plain-English
-// explainer per component. Every number comes from /api/admin/knowledge/overview.
+// explainer per component. The landing page server-renders the first payload
+// (`initial`, from getBrainOverview) so nothing loads on first paint; Refresh
+// re-fetches /api/admin/knowledge/overview client-side.
 
 import * as React from "react";
 import Link from "next/link";
@@ -650,10 +652,10 @@ function Health({ rows }: { rows: HealthRow[] }) {
 // Page
 // ---------------------------------------------------------------------------
 
-export function BrainOverviewClient() {
-  const [data, setData] = React.useState<BrainOverview | null>(null);
+export function BrainOverviewClient({ initial }: { initial?: BrainOverview }) {
+  const [data, setData] = React.useState<BrainOverview | null>(initial ?? null);
   const [error, setError] = React.useState<string | null>(null);
-  const [loading, setLoading] = React.useState(true);
+  const [loading, setLoading] = React.useState(!initial);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -666,7 +668,11 @@ export function BrainOverviewClient() {
       setLoading(false);
     }
   }, []);
-  React.useEffect(() => { void load(); }, [load]);
+  // Server-rendered payload: show it as-is (and follow server refreshes); otherwise fetch once.
+  React.useEffect(() => {
+    if (initial) setData(initial);
+    else void load();
+  }, [initial, load]);
 
   return (
     <div className="space-y-4">

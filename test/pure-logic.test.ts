@@ -52,6 +52,13 @@ describe("redactPII", () => {
 });
 
 describe("citations", () => {
+  it("accepts an unambiguous 8+ char prefix of a retrieved id as that citation", () => {
+    const retrieved = ["018d99c0-1111-2222-3333-444444444444", "7e7f59f1-aaaa-bbbb-cccc-dddddddddddd", "7e7f59f1-eeee-ffff-0000-111111111111"];
+    const { valid, fabricated } = validateCitations("Grounded [018d99c0] and [7e7f59f1] plus [zzz] and [018d99c0-1111-2222-3333-444444444444].", retrieved);
+    expect(valid).toEqual(["018d99c0-1111-2222-3333-444444444444"]); // full id + its prefix collapse to one
+    expect(fabricated).toEqual(["7e7f59f1", "zzz"]); // ambiguous prefix (two matches) is not credited
+  });
+
   it("extracts and de-duplicates bracketed ids", () => {
     expect(extractCitationIds("see [abc] and [abc] and [xyz]")).toEqual(["abc", "xyz"]);
   });

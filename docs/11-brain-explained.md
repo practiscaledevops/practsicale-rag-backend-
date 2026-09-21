@@ -153,7 +153,7 @@ an SOP system).
 
 | Screen | What you do there |
 | --- | --- |
-| **Brain overview** | One page with live numbers for everything: what is in each drawer, what the Brain trusts, what we've learned, how it's connected, how it's fed, how it answers, and a health checklist with the fix for anything amber. Includes the "What's inside the Brain — explained" cards. |
+| **Overview** (the landing page; Team view holds "Operations & data health") | One page with live numbers for everything: what is in each drawer, what the Brain trusts, what we've learned, how it's connected, how it's fed, how it answers, and a health checklist with the fix for anything amber. Includes the "What's inside the Brain — explained" cards. |
 | **Add knowledge** | The wizard: source (paste / file / link / audio / screenshot) → class → AI review (you can correct name, class, domain, type, subtype, governance) → saved. |
 | **Knowledge objects** | Everything the Brain knows, filterable by class, domain, type, status, endorsement, bucket. Open any object to see its page, provenance, relationships, entities, learning chain, decision log; edit governance or the text. |
 | **Learning Lab** | The experiments memory: record decisions/implementations, attach evidence, compute results, promote a learning to a PractiScale Standard. The **Follow-ups** queue lists new evidence the Brain thinks belongs to an open experiment — attach it, compute the result, or ignore. |

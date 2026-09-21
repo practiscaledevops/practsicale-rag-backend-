@@ -1,4 +1,5 @@
-// GET    /api/admin/documents      — list this org's documents + chunk counts.
+// GET    /api/admin/documents      — list this org's documents + chunk counts
+//                                    + Operating Intelligence lane (class/domain/object).
 // DELETE /api/admin/documents?id=…  — delete one document (chunks cascade).
 //
 // org_id is resolved SERVER-SIDE from the admin session and every query is
@@ -8,12 +9,17 @@
 
 import { supabaseAdmin } from "@/lib/supabase";
 import { requireAdmin, AdminAuthError } from "@/lib/auth/admin";
+import { isMissingRelation } from "@/lib/knowledge-store";
+import { objectStubs } from "@/app/api/admin/knowledge/_shared";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
 
 // Embedded aggregate: PostgREST returns chunks as [{ count: n }] for each doc.
 const SELECT = "id, title, source_type, uri, created_at, chunks(count)";
+// Lane identity added by migration 0017 (documents.intelligence_class / domain /
+// object_id). Selected when present; the list falls back to SELECT without them.
+const LANE_SELECT = `${SELECT}, intelligence_class, domain, object_id`;
 
 // Documents scale with ingested records (a pull sync writes one document per
 // record), so bound the list. 1000 comfortably covers a single-org back office;
@@ -27,6 +33,9 @@ interface DocRow {
   uri: string | null;
   created_at: string;
   chunks: { count: number }[] | null;
+  intelligence_class?: string | null;
+  domain?: string | null;
+  object_id?: string | null;
 }
 
 export async function GET() {
@@ -39,23 +48,33 @@ export async function GET() {
   }
 
   const db = supabaseAdmin();
-  const { data, error } = await db
-    .from("documents")
-    .select(SELECT)
-    .eq("org_id", admin.orgId)
-    .order("created_at", { ascending: false })
-    .limit(LIST_LIMIT);
+  const list = (select: string) =>
+    db.from("documents").select(select).eq("org_id", admin.orgId).order("created_at", { ascending: false }).limit(LIST_LIMIT);
 
+  const first = await list(LANE_SELECT);
+  // Pre-migration 0017 (42703 undefined_column): list without the lane columns.
+  const { data, error } = first.error && isMissingRelation(first.error) ? await list(SELECT) : first;
   if (error) return Response.json({ error: error.message }, { status: 500 });
 
-  const documents = ((data ?? []) as DocRow[]).map((d) => ({
-    id: d.id,
-    title: d.title,
-    source_type: d.source_type,
-    uri: d.uri,
-    created_at: d.created_at,
-    chunk_count: d.chunks?.[0]?.count ?? 0,
-  }));
+  const rows = (data ?? []) as unknown as DocRow[];
+  const objects = await objectStubs(admin.orgId, rows.map((d) => d.object_id ?? ""));
+
+  const documents = rows.map((d) => {
+    const object = d.object_id ? objects[d.object_id] : undefined;
+    return {
+      id: d.id,
+      title: d.title,
+      source_type: d.source_type,
+      uri: d.uri,
+      created_at: d.created_at,
+      chunk_count: d.chunks?.[0]?.count ?? 0,
+      intelligence_class: d.intelligence_class ?? null,
+      domain: d.domain ?? null,
+      object_id: d.object_id ?? null,
+      object_ref: object?.ref ?? null,
+      object_name: object?.name ?? null,
+    };
+  });
 
   return Response.json({ documents });
 }

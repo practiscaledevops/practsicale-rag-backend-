@@ -46,8 +46,19 @@ export function validateCitations(
   const cited = extractCitationIds(answer);
   const valid: string[] = [];
   const fabricated: string[] = [];
-  for (const id of cited) (allowed.has(id) ? valid : fabricated).push(id);
-  return { valid, fabricated };
+  for (const id of cited) {
+    if (allowed.has(id)) {
+      valid.push(id);
+      continue;
+    }
+    // Long answers shorten uuids to their first 8+ hex chars ([018d99c0]); a
+    // prefix that identifies exactly one retrieved chunk is that chunk's citation.
+    const lower = id.toLowerCase();
+    const prefixed = /^[0-9a-f]{8,}$/.test(lower) ? retrievedIds.filter((r) => r.toLowerCase().startsWith(lower)) : [];
+    if (prefixed.length === 1) valid.push(prefixed[0]);
+    else fabricated.push(id);
+  }
+  return { valid: [...new Set(valid)], fabricated };
 }
 
 /**
