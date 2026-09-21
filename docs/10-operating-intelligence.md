@@ -109,19 +109,91 @@ source_platform?, source_url?, duration_s?, pages? } }` or throws a readable
 | --- | --- | --- |
 | `url.ts` | article, LinkedIn / Instagram / X post, any page | SSRF-guarded fetch (`assertPublicUrl` on every hop, 15 s, 2 MB, browser UA) → `<article>` / `<main>` / `<body>` → chrome and scripts stripped, entities decoded; og:title; platform from the hostname. A login wall (< 200 usable chars) is refused with a "paste the transcript" hint. A link straight to a PDF is decoded as one. |
 | `youtube.ts` | YouTube video / short | caption tracks from YouTube's player endpoint as the Android client (the web client's timedtext URLs answer empty without a browser token; the watch page is the fallback), human English → auto English → any, json3 with the srv3/XML fallback, joined into paragraphs; title / author via oEmbed; duration from the player. No captions → title + description, flagged "(no captions available — description only)". |
-| `pdf.ts` | PDF | pdf-parse (the same entry the upload path uses) + page count + embedded Title. |
-| `audio.ts` | voice note, call, meeting — mp3 m4a wav mp4 webm ogg (≤ 4 MB per direct upload: the hosting request-body limit; the adapter itself accepts up to 25 MB once a storage-upload path exists) | OpenAI `gpt-4o-mini-transcribe`, `whisper-1` when unavailable; key via `getProviderKey("openai")` (Settings → Provider API keys). |
+| `pdf.ts` | PDF, ≤ 50 MB | pdf-parse (the same entry the upload path uses) + page count + embedded Title. A scan (no text layer) is refused with an "export it with OCR" hint — no OCR here. |
+| `audio.ts` | voice note, call, meeting — mp3 m4a wav mp4 webm ogg, ≤ 25 MB (the transcription service's limit) | OpenAI `gpt-4o-mini-transcribe`, `whisper-1` when unavailable; key via `getProviderKey("openai")` (Settings → Provider API keys). |
 | `image.ts` | screenshot — png jpg webp gif, ≤ 10 MB | OpenAI vision (`gpt-4o-mini`): transcribe every piece of text in reading order, tables as Markdown, charts as data, no commentary. |
-| `index.ts` | `extractAny({ url } \| { file })` | YouTube host → `youtube`, else `url`; files by extension then MIME (txt / md / csv / json decoded as UTF-8); result capped at 60k chars (`truncated: true`). Client-safe helpers (`kindOfFile`, `isYouTubeUrl`, `parseYouTubeId`, `capText`) live in `pure.ts`. |
+| `index.ts` | `extractAny({ url } \| { file }, { full? })` | YouTube host → `youtube`, else `url`; files by extension then MIME (txt / md / csv / json decoded as UTF-8); result capped at 60k chars (`truncated: true`) — or at `MAX_LONG_TEXT_CHARS` (2M) with `full`, which only the admin route may ask for. Client-safe helpers (`kindOfFile`, `isYouTubeUrl`, `parseYouTubeId`, `capText`, the size limits) live in `pure.ts`. |
 
-Routes (both `maxDuration = 120`, `sin1`): `POST /api/admin/knowledge/extract`
-(admin, `documents:write`) feeds the Add-knowledge wizard's "Upload a file" /
-"From a link" modes, which drop the text into the source box and pre-fill the
+Routes (`sin1`): `POST /api/admin/knowledge/extract` (admin, `documents:write`,
+`maxDuration = 300`) feeds the Add-knowledge wizard's "Upload a file" / "From a
+link" modes, which drop the text into the source box and pre-fill the
 provenance hints (url, platform, source type, title). `POST /api/v1/extract`
-(scoped key, capability `chat`, rate-limited) gives a spoke the same extraction
-for what its users attach — nothing is stored. Both accept multipart `file` |
-`url` or JSON `{ url }` and reply `{ name, kind, title, text, chars, truncated,
-meta }` or `{ error }`.
+(scoped key, capability `chat`, rate-limited, `maxDuration = 120`) gives a spoke
+the same extraction for what its users attach — nothing is stored. Both accept
+multipart `file` (≤ 4 MB) | `url` or JSON `{ url }` and reply `{ name, kind,
+title, text, chars, truncated, meta }` or `{ error }`. The admin route alone
+also accepts `{ storagePath, name, mime?, full? }` and the `full` flag (below).
+
+### Large uploads — `src/lib/knowledge-uploads.ts`
+
+The hosting platform rejects request bodies over ~4.5 MB before a handler runs,
+so the wizard POSTs a file up to 4 MB directly and sends anything bigger (to
+**50 MB** — a book PDF, a long recording) through Supabase Storage:
+
+```
+POST /api/admin/knowledge/upload-url { name, size, mime }     documents:write, maxDuration 30
+  → 413 over 50 MB · 415 unsupported kind (kindOfFile)
+  → { bucket: "knowledge-uploads", path: "org/<orgId>/<uuid>-<safe name>", signedUrl, token }
+PUT signedUrl                                                  browser → storage directly (XHR: real
+                                                               progress %, Cancel; same request as
+                                                               supabase-js uploadToSignedUrl)
+POST /api/admin/knowledge/extract { storagePath, name, mime?, full: true }
+  → download → the same adapters → the object is DELETED (success or failure) → the usual reply
+```
+
+The bucket is private (created on first use, `fileSizeLimit` 50 MiB). Paths are
+org-prefixed from the **admin session** and re-verified server-side
+(`assertOrgPath`: exact `org/<orgId>/<uuid>-<name>` shape, no `..`, no nesting →
+403 otherwise) before a download; the service-role client never leaves the
+server. Uploads are ephemeral — leftovers older than 24 h (a tab closed before
+extraction) are swept when the next upload URL is issued. A failed upload's
+Retry asks for a fresh URL.
+
+### Long sources (books, courses, reports) — `src/lib/long-source-pure.ts`, `src/lib/long-source.ts`
+
+One object from ≤ 60k chars is wrong for a book: each chapter is its own
+framework. A source over **40k chars** gets the wizard's *Long source* panel
+instead of the single-object button ("Compile as one object anyway" keeps the
+old path and says it reads only the first 60k):
+
+```
+headingCandidates(text)      BROWSER. Lines of 4–70 chars, ≤ 10 words, no terminal . , ; : ! ?,
+                             after a blank line, ≥ 70% of the words capitalised (connectors such
+                             as of/the/to ignored; markdown #, *emphasis* and quotes stripped)
+POST …/knowledge/outline     { candidates: [{ index, text, hint = next non-empty line }] ≤ 600 × ≤ 200
+                             chars, title? } — ONLY this list travels, never the text. One
+                             structured() call on intelligence.classifyTier returns the lines that
+                             start a TOP-LEVEL unit (not sub-headings, not cover/contents;
+                             Introduction/Conclusion count) + the work's title and author.
+                             Typography cannot tell a chapter title from a sub-heading — the model
+                             can (a chapter is followed by an epigraph, a sub-heading by prose).
+                             Candidate lines are data, never instructions.
+                             → { title, author, chapters: [{ index, title }], via: "model"|"fallback" }
+splitByOutline(text, …)      BROWSER. Section i = chapter i's offset → chapter i+1's. Text before
+                             the first chapter is "Front matter" only with ≥ 1,500 chars of real
+                             prose (unticked by default; else dropped); a section < 1,500 chars
+                             merges into the next; a section > 30,000 chars is sub-split at heading
+                             candidates into "Title (part 1/2)". Contiguous, covering.
+fallbackChapters(text)       no model / < 3 chapters: ~14k-char parts cut at the nearest heading or
+                             paragraph break, "Part N — <first heading inside>".
+```
+
+The checklist (work title, author, kind; per-section title, size, preview) then
+drives the batch **client-side, two at a time**: each ticked section is POSTed
+to the existing compile route — `{ mode: "commit", class, bucket?, text: <slice>,
+title: "<work> — <section>" (provenance: the raw document's title), hints: {
+…the wizard's hints, sourceType: book|course|…, sourceExpert: <author>,
+sourcePlatform: book|course when unset, tags: [<work-title slug>] }, overrides:
+{ name: <section title> } }` (no name override for positional titles such as
+"Introduction" / "Part 3" — the compiler names those). Rows show queued →
+compiling → NEW `MKT-004` / ENRICHED `SAL-002` / DUPLICATE / CONFLICT / BLOCKED
+(reason) / failed + Retry; Pause / Resume; one failure never stops the rest; two
+parts of one chapter never run together (the second should meet the first in
+dedup); `beforeunload` warns mid-batch. Progress (outline + outcomes, no text)
+is filed in `localStorage` under `sourceKey(source name, text)` so a reload can
+"Resume where you left off" after re-selecting the file; re-running a source is
+safe regardless — dedup answers DUPLICATE / ENRICH. No new tables or columns.
+~45–60 s per section; each compile stays inside the route's `maxDuration`.
 
 ## 4. The Retrieval Orchestrator — `src/lib/orchestrator.ts`
 
@@ -198,7 +270,10 @@ retrieve, `Cache-Control: private, max-age=15`; logic in `src/lib/knowledge-read
 Pre-migration (no `knowledge_objects`) these answer `503 { migrationMissing: true }`.
 
 Admin (`/api/admin/knowledge/*`): `compile` (preview/commit, JSON or multipart),
-`extract` (source → text for the wizard: multipart `file` or JSON `{ url }`),
+`extract` (source → text for the wizard: multipart `file`, JSON `{ url }` or
+`{ storagePath }`; `full` lifts the text cap), `upload-url` (signed upload URL
+for a file of 4–50 MB), `outline` (heading candidates → the chapters of a long
+source; all three in §3),
 `objects` (list, counts) + `objects/[id]` (detail / PATCH governance + markdown
 re-index / DELETE), `taxonomy` (list / add / approve / reject / rename),
 `relationships` (list / create / confirm / reject), `entities`, `decisions`,

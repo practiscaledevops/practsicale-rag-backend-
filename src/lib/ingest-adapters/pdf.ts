@@ -8,11 +8,12 @@ import pdfParse from "pdf-parse/lib/pdf-parse.js";
 import { collapseWhitespace } from "./url";
 import { ExtractError, type Extracted } from "./types";
 
-export const MAX_PDF_BYTES = 25 * 1024 * 1024;
+/** 50 MB — a book-sized PDF arrives via secure storage (a direct upload stops at 4 MB). */
+export const MAX_PDF_BYTES = 50 * 1024 * 1024;
 
 export async function extractPdf(buffer: Buffer): Promise<Extracted> {
   if (buffer.length === 0) throw new ExtractError("The PDF file is empty.", 400);
-  if (buffer.length > MAX_PDF_BYTES) throw new ExtractError("PDF is too large (max 25 MB).", 413);
+  if (buffer.length > MAX_PDF_BYTES) throw new ExtractError("PDF is too large — files up to 50 MB are supported.", 413);
 
   let parsed: Awaited<ReturnType<typeof pdfParse>>;
   try {
@@ -25,7 +26,7 @@ export async function extractPdf(buffer: Buffer): Promise<Extracted> {
 
   const text = collapseWhitespace(parsed.text ?? "");
   if (!text) {
-    throw new ExtractError("This PDF has no text layer (probably a scan). Export it with OCR, or upload screenshots of the pages instead.", 422);
+    throw new ExtractError("This PDF is a scan (no text layer). Export it with OCR — e.g. Adobe 'Recognize text' or Google Drive 'Open with Docs' — and upload the result.", 422);
   }
   const info = (parsed.info ?? {}) as { Title?: unknown };
   const title = typeof info.Title === "string" ? info.Title.trim().slice(0, 200) : "";

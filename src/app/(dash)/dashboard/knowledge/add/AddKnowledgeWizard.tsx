@@ -8,14 +8,19 @@
 //   2. The source — paste text, upload a file (PDF / text / audio / screenshot)
 //      or give a link / YouTube video; the Brain extracts the text itself via
 //      /api/admin/knowledge/extract — + light provenance hints (pre-filled
-//      from the extraction where known)
+//      from the extraction where known). A file up to 4 MB is POSTed directly;
+//      a bigger one (to 50 MB) goes through secure storage: upload-url → PUT to
+//      the signed URL (XHR, real progress + Cancel) → extract { storagePath }.
+//      A LONG source (> 40k chars — a book, a course) gets the long-source
+//      panel instead of the single-object path: outline → one object per
+//      chapter (LongSourcePanel.tsx).
 //   3. The compiler's proposal: taxonomy, governance, dedup verdict, entities,
 //      relationships and the compiled markdown — every field editable
 //   4. Saved: ref + links
 
 import * as React from "react";
 import Link from "next/link";
-import { BookOpen, Building2, Globe2, ArrowLeft, ArrowRight, Check, AlertTriangle, Sparkles, Lightbulb, LineChart, Plus, Wand2, ListChecks, ClipboardPaste, FileUp, Link2, Youtube } from "lucide-react";
+import { BookOpen, Building2, Globe2, ArrowLeft, ArrowRight, Check, AlertTriangle, Sparkles, Lightbulb, LineChart, Plus, Wand2, ListChecks, ClipboardPaste, FileUp, Link2, Youtube, RotateCcw, X } from "lucide-react";
 import {
   DOMAINS,
   REALITY_BUCKETS,
@@ -39,7 +44,9 @@ import {
   type RealityBucket,
 } from "@/lib/intelligence-taxonomy";
 import { C, Chip, KBtn, KInput, KSelect, KTextarea, Field, Panel, ErrorNote, Spinner, api, type SelectOption } from "@/components/ui/brain-ui";
-import { kindOfFile, isYouTubeUrl, fmtBytes, PROGRESS_LABEL, type ExtractKind } from "@/lib/ingest-adapters/pure";
+import { kindOfFile, isYouTubeUrl, fmtBytes, capText, PROGRESS_LABEL, MAX_TEXT_CHARS, MAX_LONG_TEXT_CHARS, MAX_DIRECT_UPLOAD_BYTES, MAX_STORAGE_UPLOAD_BYTES, MAX_BYTES_BY_KIND, type ExtractKind } from "@/lib/ingest-adapters/pure";
+import { LONG_SOURCE_CHARS, sourceKey } from "@/lib/long-source-pure";
+import { LongSourcePanel } from "./LongSourcePanel";
 
 type Step = 1 | 2 | 3 | 4;
 type SourceMode = "paste" | "file" | "link";
@@ -54,6 +61,53 @@ interface ExtractInfo {
   meta: { source_type?: string; source_platform?: string; source_url?: string; duration_s?: number; pages?: number };
   /** Upload size, for the chip (files only). */
   size?: number;
+  /** The cap that trimmed the text (2M from the extractor; 60k once "compile as one object" cut it). */
+  cap?: number;
+}
+/** What /api/admin/knowledge/upload-url returns. */
+interface UploadTarget {
+  bucket: string;
+  path: string;
+  signedUrl: string;
+  token: string;
+}
+
+class UploadCancelled extends Error {}
+
+/**
+ * PUT a file to a Supabase signed upload URL — the same request
+ * `storage.from(bucket).uploadToSignedUrl(path, token, file)` makes (PUT,
+ * multipart body with `cacheControl` + the file, `x-upsert`), but over
+ * XMLHttpRequest: `fetch` has no upload progress, and a 50 MB upload takes
+ * minutes. The token in the URL is the authorisation; the anon key (public by
+ * design) rides along exactly as supabase-js sends it.
+ */
+function putToSignedUrl(signedUrl: string, file: File, onProgress: (loaded: number, total: number) => void, hold: (xhr: XMLHttpRequest | null) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    hold(xhr);
+    xhr.open("PUT", signedUrl);
+    xhr.setRequestHeader("x-upsert", "false");
+    const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    if (anon) {
+      xhr.setRequestHeader("apikey", anon);
+      xhr.setRequestHeader("authorization", `Bearer ${anon}`);
+    }
+    xhr.upload.onprogress = (e) => onProgress(e.loaded, e.lengthComputable ? e.total : file.size);
+    xhr.onload = () => {
+      hold(null);
+      if (xhr.status >= 200 && xhr.status < 300) return resolve();
+      let msg = "";
+      try { msg = (JSON.parse(xhr.responseText) as { message?: string; error?: string }).message ?? ""; } catch { /* not JSON */ }
+      reject(new Error(`The upload was refused (${xhr.status}${msg ? ` — ${msg}` : ""}).`));
+    };
+    xhr.onerror = () => { hold(null); reject(new Error("The upload failed — check your connection and retry.")); };
+    xhr.onabort = () => { hold(null); reject(new UploadCancelled("Upload cancelled.")); };
+    const body = new FormData();
+    body.append("cacheControl", "3600");
+    body.append("", file);
+    xhr.send(body);
+  });
 }
 interface ExtractResponse extends ExtractInfo {
   text: string;
@@ -155,6 +209,14 @@ export function AddKnowledgeWizard() {
   const [extracting, setExtracting] = React.useState<ExtractKind | null>(null);
   const [extractError, setExtractError] = React.useState<string | null>(null);
   const [extracted, setExtracted] = React.useState<ExtractInfo | null>(null);
+  // Big files (> 4 MB) travel through secure storage: real progress, Cancel, Retry.
+  const [upload, setUpload] = React.useState<{ loaded: number; total: number } | null>(null);
+  const [retryFile, setRetryFile] = React.useState<File | null>(null);
+  const xhrRef = React.useRef<XMLHttpRequest | null>(null);
+  // Long sources (> 40k chars): outline → one object per chapter, unless the human insists on one object.
+  const [singleAnyway, setSingleAnyway] = React.useState(false);
+  const [longActive, setLongActive] = React.useState(false);
+  const [longRunning, setLongRunning] = React.useState(false);
   const [title, setTitle] = React.useState("");
   const [hints, setHints] = React.useState({ sourceExpert: "", sourcePlatform: "", sourceType: "", sourceUrl: "", sourceDate: "", isFounderVoice: false });
   // Classification: Auto (the Brain decides) or the human's own Domain → Type → Subtype.
@@ -202,9 +264,15 @@ export function AddKnowledgeWizard() {
   );
 
   const canContinue2 = !!cls && (cls !== "business_reality" || !!bucket) && text.trim().length > 20 && !extracting;
+  // A long source gets the long-source panel instead of the single-object button.
+  const isLong = text.length > LONG_SOURCE_CHARS && !singleAnyway;
+  // The source's OWN name (PDF title / filename) — stable across reloads, so it can key the saved progress.
+  const sourceName = extracted?.title || extracted?.name || "";
+  const longKey = React.useMemo(() => (isLong ? sourceKey(sourceName, text) : ""), [isLong, sourceName, text]);
 
   /** Extracted text → the textarea; provenance → the hint fields that are still empty (a human's choice is never overwritten). */
   function applyExtracted(res: ExtractResponse, size?: number) {
+    setSingleAnyway(false);
     setText(res.text);
     setExtracted({ name: res.name, kind: res.kind, title: res.title, chars: res.chars, truncated: res.truncated, meta: res.meta ?? {}, size });
     setHints((h) => ({
@@ -223,19 +291,48 @@ export function AddKnowledgeWizard() {
       setExtractError(`Unsupported file type "${f.name}". Use a PDF, text (.txt .md .csv .json), audio (mp3, m4a, wav, mp4, webm, ogg) or an image (png, jpg, webp, gif).`);
       return;
     }
+    setRetryFile(null);
+    if (f.size > MAX_STORAGE_UPLOAD_BYTES || f.size > MAX_BYTES_BY_KIND[kind]) {
+      setExtractError(
+        f.size > MAX_STORAGE_UPLOAD_BYTES || kind === "pdf"
+          ? `"${f.name}" is ${fmtBytes(f.size)} — files up to 50 MB are supported.`
+          : `"${f.name}" is ${fmtBytes(f.size)} — ${KIND_LABEL[kind].toLowerCase()} files are limited to ${fmtBytes(MAX_BYTES_BY_KIND[kind])}.`
+      );
+      return;
+    }
     setExtracting(kind);
     setExtractError(null);
     setExtracted(null);
     try {
-      const fd = new FormData();
-      fd.append("file", f);
-      const r = await fetch("/api/admin/knowledge/extract", { method: "POST", body: fd });
-      const res = (await r.json().catch(() => ({}))) as ExtractResponse;
-      if (!r.ok) throw new Error(res.error ?? `Extraction failed (${r.status})`);
+      let res: ExtractResponse;
+      if (f.size <= MAX_DIRECT_UPLOAD_BYTES) {
+        // Small file: straight to the extract route (`full` lifts the 60k cap for the long-source mode).
+        const fd = new FormData();
+        fd.append("file", f);
+        fd.append("full", "true");
+        const r = await fetch("/api/admin/knowledge/extract", { method: "POST", body: fd });
+        res = (await r.json().catch(() => ({}))) as ExtractResponse;
+        if (!r.ok) throw new Error(res.error ?? `Extraction failed (${r.status})`);
+      } else {
+        // Big file: the hosting platform rejects bodies over ~4.5 MB, so it goes to
+        // secure storage first and the extract route reads (then deletes) it there.
+        setUpload({ loaded: 0, total: f.size });
+        const target = await api<UploadTarget>("/api/admin/knowledge/upload-url", { method: "POST", body: JSON.stringify({ name: f.name, size: f.size, mime: f.type }) });
+        await putToSignedUrl(target.signedUrl, f, (loaded, total) => setUpload({ loaded, total }), (x) => { xhrRef.current = x; });
+        setUpload(null);
+        res = await api<ExtractResponse>("/api/admin/knowledge/extract", { method: "POST", body: JSON.stringify({ storagePath: target.path, name: f.name, mime: f.type, full: true }) });
+      }
       applyExtracted(res, f.size);
     } catch (e) {
-      setExtractError(e instanceof Error ? e.message : "Extraction failed");
+      if (e instanceof UploadCancelled) setExtractError(null);
+      else {
+        setExtractError(e instanceof Error ? e.message : "Extraction failed");
+        // Retry asks for a FRESH upload URL (the old one may be spent or expired).
+        if (f.size > MAX_DIRECT_UPLOAD_BYTES) setRetryFile(f);
+      }
     } finally {
+      setUpload(null);
+      xhrRef.current = null;
       setExtracting(null);
     }
   }
@@ -247,7 +344,7 @@ export function AddKnowledgeWizard() {
     setExtractError(null);
     setExtracted(null);
     try {
-      const res = await api<ExtractResponse>("/api/admin/knowledge/extract", { method: "POST", body: JSON.stringify({ url }) });
+      const res = await api<ExtractResponse>("/api/admin/knowledge/extract", { method: "POST", body: JSON.stringify({ url, full: true }) });
       applyExtracted(res);
     } catch (e) {
       setExtractError(e instanceof Error ? e.message : "Could not fetch the link");
@@ -256,7 +353,16 @@ export function AddKnowledgeWizard() {
     }
   }
 
-  async function runPreview() {
+  /** "Compile as one object anyway": the single-object path reads at most 60k chars — cut here so the box shows what is used. */
+  function compileAsOne() {
+    const capped = capText(text, MAX_TEXT_CHARS);
+    setSingleAnyway(true);
+    setText(capped.text);
+    if (capped.truncated) setExtracted((x) => (x ? { ...x, truncated: true, cap: MAX_TEXT_CHARS } : x));
+    void runPreview(capped.text);
+  }
+
+  async function runPreview(sourceText: string = text) {
     if (!cls) return;
     setBusy(true);
     setError(null);
@@ -265,7 +371,7 @@ export function AddKnowledgeWizard() {
     try {
       const res = await api<CompileResponse>("/api/admin/knowledge/compile", {
         method: "POST",
-        body: JSON.stringify({ mode: "preview", class: cls, bucket, text, title, hints: h, confirmTruth }),
+        body: JSON.stringify({ mode: "preview", class: cls, bucket, text: sourceText, title, hints: h, confirmTruth }),
       });
       if (res.blocked) {
         setBlocked(res.blocked.reason);
@@ -348,6 +454,7 @@ export function AddKnowledgeWizard() {
   function reset() {
     setStep(1); setCls(null); setBucket(null); setText(""); setTitle("");
     setSourceMode("paste"); setLink(""); setExtracting(null); setExtractError(null); setExtracted(null);
+    setUpload(null); setRetryFile(null); setSingleAnyway(false); setLongActive(false); setLongRunning(false);
     setHints({ sourceExpert: "", sourcePlatform: "", sourceType: "", sourceUrl: "", sourceDate: "", isFounderVoice: false });
     setClassify("auto"); setPick({ domain: "", objectType: "", subtype: "" });
     setPreview(null); setDraft(null); setResult(null); setError(null); setBlocked(null); setForceNew(false); setConfirmTruth(false);
@@ -441,15 +548,15 @@ export function AddKnowledgeWizard() {
         <div className="grid gap-4 lg:grid-cols-3">
           <Panel className="lg:col-span-2" title="The source" subtitle="Paste it, upload it or link it — the Brain extracts the text. Promotional noise is removed automatically; numbers and names are kept exactly.">
             <div className="space-y-3">
-              <SourceSwitch mode={sourceMode} setMode={(m) => { setSourceMode(m); setExtractError(null); }} disabled={!!extracting} />
+              <SourceSwitch mode={sourceMode} setMode={(m) => { setSourceMode(m); setExtractError(null); setRetryFile(null); }} disabled={!!extracting || longRunning} />
 
               {sourceMode === "file" && (
                 <label className="flex cursor-pointer flex-col items-center justify-center gap-1 rounded-lg px-4 py-5 text-center text-xs focus-within:ring-2 focus-within:ring-[#00BFAE]" style={{ border: `1px dashed ${extracting ? C.green : C.border}`, color: C.muted }}>
                   <FileUp size={18} style={{ color: C.green }} />
                   <span style={{ color: C.text }}>Choose a file — PDF · .txt .md .csv .json · audio (mp3, m4a, wav, mp4, webm, ogg) · image (png, jpg, webp, gif)</span>
-                  <span className="text-[11px]">Up to 4 MB per file (the hosting limit for a direct upload). Audio is transcribed; screenshots are read by the vision model.</span>
+                  <span className="text-[11px]">Up to 4 MB uploads directly; larger files (to 50 MB) upload through secure storage automatically. Audio (to 25 MB) is transcribed; screenshots are read by the vision model.</span>
                   {/* sr-only (not display:none) keeps the picker reachable from the keyboard. */}
-                  <input type="file" accept={FILE_ACCEPT} className="sr-only" disabled={!!extracting} onChange={(e) => { const f = e.target.files?.[0]; if (f) void extractFile(f); e.target.value = ""; }} />
+                  <input type="file" accept={FILE_ACCEPT} className="sr-only" disabled={!!extracting || longRunning} onChange={(e) => { const f = e.target.files?.[0]; if (f) void extractFile(f); e.target.value = ""; }} />
                 </label>
               )}
 
@@ -470,9 +577,25 @@ export function AddKnowledgeWizard() {
                 </div>
               )}
 
-              <div aria-live="polite">
-                {extracting && <Spinner label={PROGRESS_LABEL[extracting]} />}
+              <div aria-live="polite" className="space-y-2">
+                {extracting && upload && (
+                  <div className="space-y-1 py-2">
+                    <div className="flex flex-wrap items-center gap-2 text-sm" style={{ color: C.muted }}>
+                      <span>
+                        Uploading {fmtBytes(upload.loaded)} of {fmtBytes(upload.total)} · {upload.total ? Math.min(100, Math.round((upload.loaded / upload.total) * 100)) : 0}%
+                      </span>
+                      <KBtn size="xs" variant="ghost" onClick={() => xhrRef.current?.abort()}><X size={11} /> Cancel</KBtn>
+                    </div>
+                    <div className="h-1.5 overflow-hidden rounded-full" style={{ background: C.raised }} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={upload.total ? Math.round((upload.loaded / upload.total) * 100) : 0}>
+                      <div className="h-full rounded-full transition-all" style={{ width: `${upload.total ? (upload.loaded / upload.total) * 100 : 0}%`, background: C.green }} />
+                    </div>
+                  </div>
+                )}
+                {extracting && !upload && <Spinner label={PROGRESS_LABEL[extracting]} />}
                 <ErrorNote message={extractError} />
+                {retryFile && !extracting && (
+                  <KBtn size="xs" onClick={() => void extractFile(retryFile)}><RotateCcw size={11} /> Retry {retryFile.name.length > 40 ? `${retryFile.name.slice(0, 40)}…` : retryFile.name}</KBtn>
+                )}
               </div>
               {extracted && !extracting && (
                 <div className="flex flex-wrap items-center gap-1.5 text-xs" style={{ color: C.muted }}>
@@ -482,22 +605,45 @@ export function AddKnowledgeWizard() {
                   {extracted.meta.pages ? <Chip tone="muted">{extracted.meta.pages} pages</Chip> : null}
                   {extracted.meta.duration_s ? <Chip tone="muted">{fmtDuration(extracted.meta.duration_s)}</Chip> : null}
                   {extracted.meta.source_platform && <Chip tone="info">{humanize(extracted.meta.source_platform)}</Chip>}
-                  {extracted.truncated && <Chip tone="amber"><AlertTriangle size={11} /> Trimmed to 60,000 characters</Chip>}
-                  <button type="button" className="underline" onClick={() => { setExtracted(null); setText(""); }}>clear</button>
+                  {extracted.truncated && <Chip tone="amber" title="The source is longer than the Brain reads in one go — the rest was left out."><AlertTriangle size={11} /> Trimmed to {(extracted.cap ?? MAX_LONG_TEXT_CHARS).toLocaleString("en-US")} characters</Chip>}
+                  {!longRunning && <button type="button" className="underline" onClick={() => { setExtracted(null); setText(""); setSingleAnyway(false); }}>clear</button>}
                 </div>
               )}
 
-              <KTextarea
-                rows={14}
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder={sourceMode === "paste" ? "Paste the raw source here… (a canonical .md with frontmatter is also accepted)" : "The extracted text appears here — trim it before compiling if you like."}
-                disabled={!!extracting}
-              />
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="ml-auto text-xs" style={{ color: C.muted }}>{text.length.toLocaleString()} chars</span>
-              </div>
-              <Field label="Title (optional)"><KInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Leave empty to let the Brain name it" /></Field>
+              {isLong && (
+                <LongSourcePanel
+                  key={longKey}
+                  resumeKey={longKey}
+                  text={text}
+                  sourceName={sourceName || title}
+                  cls={cls}
+                  bucket={bucket}
+                  hints={effectiveHints()}
+                  confirmTruth={confirmTruth}
+                  busy={busy}
+                  onSingle={compileAsOne}
+                  onActive={setLongActive}
+                  onRunning={setLongRunning}
+                  onReset={reset}
+                />
+              )}
+
+              {/* Once a long source is outlined, its sections replace the raw text box (the offsets must not move). */}
+              {!(isLong && longActive) && (
+                <>
+                  <KTextarea
+                    rows={isLong ? 8 : 14}
+                    value={text}
+                    onChange={(e) => { setText(e.target.value); if (e.target.value.length <= LONG_SOURCE_CHARS) setSingleAnyway(false); }}
+                    placeholder={sourceMode === "paste" ? "Paste the raw source here… (a canonical .md with frontmatter is also accepted)" : "The extracted text appears here — trim it before compiling if you like."}
+                    disabled={!!extracting}
+                  />
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="ml-auto text-xs" style={{ color: C.muted }}>{text.length.toLocaleString()} chars</span>
+                  </div>
+                  <Field label="Title (optional)"><KInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Leave empty to let the Brain name it" /></Field>
+                </>
+              )}
               <div className="flex flex-wrap items-center gap-1.5 text-xs" style={{ color: C.muted }}>
                 Classification:
                 {classify === "auto" ? (
@@ -543,10 +689,13 @@ export function AddKnowledgeWizard() {
             </div>
           </Panel>
           <div className="flex items-center justify-between gap-3 lg:col-span-3">
-            <KBtn variant="ghost" onClick={() => setStep(1)}><ArrowLeft size={14} /> Back</KBtn>
-            <KBtn variant="primary" disabled={!canContinue2 || busy} loading={busy} onClick={runPreview}>
-              <Sparkles size={14} /> {busy ? "Understanding the source…" : classify === "auto" ? "Let the Brain classify it" : "Compile with my classification"}
-            </KBtn>
+            <KBtn variant="ghost" disabled={longRunning} onClick={() => setStep(1)}><ArrowLeft size={14} /> Back</KBtn>
+            {/* A long source is driven from its own panel (outline → compile each section). */}
+            {!isLong && (
+              <KBtn variant="primary" disabled={!canContinue2 || busy} loading={busy} onClick={() => void runPreview()}>
+                <Sparkles size={14} /> {busy ? "Understanding the source…" : classify === "auto" ? "Let the Brain classify it" : "Compile with my classification"}
+              </KBtn>
+            )}
           </div>
           {busy && <div className="lg:col-span-3"><Spinner label="Extracting the substance, classifying, checking for duplicates and compiling the object… (20–60s)" /></div>}
         </div>

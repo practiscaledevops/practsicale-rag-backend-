@@ -5,6 +5,8 @@
 //
 //   extractAny({ url })                        → youtube | url
 //   extractAny({ file: { name, mime, buffer }}) → pdf | audio | image | text
+//   extractAny(input, { full: true })           → same, with the LONG text cap (2M chars)
+//                                                 for the wizard's long-source ("book") mode
 //
 // Server-only (SDKs, pdf-parse, DNS). The client-safe helpers live in ./pure.
 
@@ -13,17 +15,22 @@ import { extractFromYouTube } from "./youtube";
 import { extractPdf } from "./pdf";
 import { transcribeAudio } from "./audio";
 import { extractImageText } from "./image";
-import { capText, extOf, isYouTubeUrl, kindOfFile, IMAGE_MIME, MAX_TEXT_CHARS, type ExtractKind } from "./pure";
+import { capText, extOf, isYouTubeUrl, kindOfFile, IMAGE_MIME, MAX_TEXT_CHARS, MAX_LONG_TEXT_CHARS, type ExtractKind } from "./pure";
 import { ExtractError, type Extracted, type ExtractMeta } from "./types";
 
 export type { ExtractKind } from "./pure";
 export type { Extracted, ExtractMeta } from "./types";
 export { ExtractError } from "./types";
-export { capText, kindOfFile, isYouTubeUrl, parseYouTubeId, MAX_TEXT_CHARS } from "./pure";
+export { capText, kindOfFile, isYouTubeUrl, parseYouTubeId, MAX_TEXT_CHARS, MAX_LONG_TEXT_CHARS } from "./pure";
 
 export interface ExtractInput {
   url?: string;
   file?: { name: string; mime?: string | null; buffer: Buffer };
+}
+
+export interface ExtractOptions {
+  /** Lift the 60k cap to MAX_LONG_TEXT_CHARS — admin wizard only (a long source is split into chapters there). */
+  full?: boolean;
 }
 
 export interface ExtractResult {
@@ -51,8 +58,8 @@ function decodeTextFile(buffer: Buffer, name: string): Extracted {
   return { text, meta: { source_type: extOf(name) === ".json" || extOf(name) === ".csv" ? "document" : "text" } };
 }
 
-function finish(kind: ExtractKind, name: string, r: Extracted): ExtractResult {
-  const capped = capText(r.text, MAX_TEXT_CHARS);
+function finish(kind: ExtractKind, name: string, r: Extracted, opts?: ExtractOptions): ExtractResult {
+  const capped = capText(r.text, opts?.full ? MAX_LONG_TEXT_CHARS : MAX_TEXT_CHARS);
   return {
     name: name.slice(0, 200),
     kind,
@@ -64,15 +71,15 @@ function finish(kind: ExtractKind, name: string, r: Extracted): ExtractResult {
   };
 }
 
-export async function extractAny(input: ExtractInput): Promise<ExtractResult> {
+export async function extractAny(input: ExtractInput, opts?: ExtractOptions): Promise<ExtractResult> {
   if (input.url && input.url.trim()) {
     const url = input.url.trim();
     if (isYouTubeUrl(url)) {
       const r = await extractFromYouTube(url);
-      return finish("youtube", r.title ?? url, r);
+      return finish("youtube", r.title ?? url, r, opts);
     }
     const r = await extractFromUrl(url);
-    return finish("url", r.title ?? url, r);
+    return finish("url", r.title ?? url, r, opts);
   }
 
   if (input.file) {
@@ -98,7 +105,7 @@ export async function extractAny(input: ExtractInput): Promise<ExtractResult> {
       default:
         r = decodeTextFile(buffer, name);
     }
-    return finish(kind, name, r);
+    return finish(kind, name, r, opts);
   }
 
   throw new ExtractError("Provide a url or attach a file.", 400);

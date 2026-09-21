@@ -7,6 +7,25 @@ export type ExtractKind = "url" | "youtube" | "pdf" | "audio" | "image" | "text"
 
 /** Returned text is capped so a 300-page PDF cannot blow up the compiler prompt. */
 export const MAX_TEXT_CHARS = 60_000;
+/**
+ * The LONG cap, for the wizard's long-source ("book") mode only: the admin
+ * extract route lifts the 60k cap to this when asked for `full` text, and the
+ * wizard then splits the source into chapters (src/lib/long-source-pure.ts).
+ * ~2 MB of JSON — under the platform's 4.5 MB response limit.
+ */
+export const MAX_LONG_TEXT_CHARS = 2_000_000;
+
+/** A file up to this size is POSTed straight to the extract route (the hosting platform rejects bodies over ~4.5 MB). */
+export const MAX_DIRECT_UPLOAD_BYTES = 4 * 1024 * 1024;
+/** A bigger file goes through secure storage (signed upload URL) — up to this size. */
+export const MAX_STORAGE_UPLOAD_BYTES = 50 * 1024 * 1024;
+/** Per-kind ceilings the adapters enforce (audio: the transcription service's limit). */
+export const MAX_BYTES_BY_KIND: Record<Exclude<ExtractKind, "url" | "youtube">, number> = {
+  pdf: 50 * 1024 * 1024,
+  audio: 25 * 1024 * 1024,
+  image: 10 * 1024 * 1024,
+  text: 5 * 1024 * 1024,
+};
 
 export const TEXT_EXT = [".txt", ".text", ".md", ".markdown", ".csv", ".json"];
 export const AUDIO_EXT = [".mp3", ".m4a", ".wav", ".mp4", ".webm", ".ogg", ".mpeg", ".mpga", ".oga"];

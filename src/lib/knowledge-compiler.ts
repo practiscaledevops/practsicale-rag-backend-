@@ -1259,58 +1259,66 @@ export async function compileKnowledge(db: SupabaseClient, input: CompileInput):
   }
 
   // ---- NEW (also CONFLICT: new + contradicts edges) ----
-  const ref = await nextRef(db, orgId, prefix);
-  draft.ref = ref;
-  draft.compiled_markdown = input.overrides?.compiled_markdown?.trim() ? input.overrides.compiled_markdown : finalizeMarkdown(draft, ref);
-
-  const { data: inserted, error: insErr } = await db
-    .from("knowledge_objects")
-    .insert({
-      org_id: orgId,
-      ref,
-      name: draft.name,
-      intelligence_class: draft.intelligence_class,
-      domain: draft.domain,
-      object_type: draft.object_type,
-      subtype: draft.subtype,
-      status: draft.status,
-      priority: draft.priority,
-      founder_endorsement: draft.founder_endorsement,
-      implementation_status: draft.implementation_status,
-      internal_validation: draft.internal_validation,
-      evidence_level: draft.evidence_level,
-      authority: draft.authority,
-      applies_to: draft.applies_to,
-      goals: draft.goals,
-      business_functions: draft.business_functions,
-      applies_to_platforms: draft.applies_to_platforms,
-      tags: draft.tags,
-      content_format: draft.content_format,
-      content_job: draft.content_job,
-      funnel_stage: draft.funnel_stage,
-      brand: draft.brand,
-      audiences: draft.audiences,
-      content_length: draft.content_length,
-      source_expert: draft.source_expert,
-      source_type: draft.source_type,
-      source_platform: draft.source_platform,
-      source_url: draft.source_url,
-      source_date: draft.source_date,
-      source_claims: draft.source_claims,
-      sources: [newSource],
-      effective_from: draft.effective_from,
-      effective_until: draft.effective_until,
-      last_verified_at: draft.bucket === "company_truth" ? new Date().toISOString() : null,
-      version: 1,
-      compiled_markdown: draft.compiled_markdown,
-      summary: draft.summary,
-      attributes: { bucket: draft.bucket, key_concepts: keyConcepts },
-      created_by: createdBy,
-    })
-    .select(OBJECT_COLUMNS)
-    .single();
-  if (insErr || !inserted) throw new Error(insErr?.message ?? "knowledge object insert failed");
-  const object = inserted as unknown as KnowledgeObjectRow;
+  // nextRef is read-then-insert, and the long-source batch compiles two
+  // sections at once: when a concurrent compile takes the ref first, the
+  // unique (org_id, ref) constraint answers 23505 — take the next ref and retry.
+  let ref = "";
+  let object: KnowledgeObjectRow | null = null;
+  for (let attempt = 0; attempt < 4 && !object; attempt++) {
+    ref = await nextRef(db, orgId, prefix);
+    draft.ref = ref;
+    draft.compiled_markdown = input.overrides?.compiled_markdown?.trim() ? input.overrides.compiled_markdown : finalizeMarkdown(draft, ref);
+    const { data: inserted, error: insErr } = await db
+      .from("knowledge_objects")
+      .insert({
+        org_id: orgId,
+        ref,
+        name: draft.name,
+        intelligence_class: draft.intelligence_class,
+        domain: draft.domain,
+        object_type: draft.object_type,
+        subtype: draft.subtype,
+        status: draft.status,
+        priority: draft.priority,
+        founder_endorsement: draft.founder_endorsement,
+        implementation_status: draft.implementation_status,
+        internal_validation: draft.internal_validation,
+        evidence_level: draft.evidence_level,
+        authority: draft.authority,
+        applies_to: draft.applies_to,
+        goals: draft.goals,
+        business_functions: draft.business_functions,
+        applies_to_platforms: draft.applies_to_platforms,
+        tags: draft.tags,
+        content_format: draft.content_format,
+        content_job: draft.content_job,
+        funnel_stage: draft.funnel_stage,
+        brand: draft.brand,
+        audiences: draft.audiences,
+        content_length: draft.content_length,
+        source_expert: draft.source_expert,
+        source_type: draft.source_type,
+        source_platform: draft.source_platform,
+        source_url: draft.source_url,
+        source_date: draft.source_date,
+        source_claims: draft.source_claims,
+        sources: [newSource],
+        effective_from: draft.effective_from,
+        effective_until: draft.effective_until,
+        last_verified_at: draft.bucket === "company_truth" ? new Date().toISOString() : null,
+        version: 1,
+        compiled_markdown: draft.compiled_markdown,
+        summary: draft.summary,
+        attributes: { bucket: draft.bucket, key_concepts: keyConcepts },
+        created_by: createdBy,
+      })
+      .select(OBJECT_COLUMNS)
+      .single();
+    if (insErr?.code === "23505" && attempt < 3) continue;
+    if (insErr || !inserted) throw new Error(insErr?.message ?? "knowledge object insert failed");
+    object = inserted as unknown as KnowledgeObjectRow;
+  }
+  if (!object) throw new Error("knowledge object insert failed");
 
   try {
     // Compiled document (the retrievable object) — semantic chunks with identity.
