@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Plus } from "lucide-react";
+import { Plus, RefreshCw, Headphones } from "lucide-react";
 import { C, Chip, KBtn, KInput, KSelect, KTable, Th, Td, Field, Panel, Empty, Spinner, ErrorNote, api } from "@/components/ui/brain-ui";
 
 interface Metric { id: string; metric_key: string; label: string | null; value: number; unit: string | null; period_start: string | null; period_end: string | null; dimensions: Record<string, unknown>; source: string; object_id: string | null; note: string | null; created_at: string }
@@ -14,6 +14,23 @@ export function PerformanceClient() {
   const [busy, setBusy] = React.useState(false);
   const [f, setF] = React.useState({ metricKey: "", label: "", value: "", unit: "%", periodStart: "", periodEnd: "", dimensions: "", objectRef: "", note: "" });
   const s = (k: keyof typeof f, v: string) => setF((x) => ({ ...x, [k]: v }));
+  const [rebuilding, setRebuilding] = React.useState(false);
+  const [rebuiltMsg, setRebuiltMsg] = React.useState<string | null>(null);
+
+  async function rebuildFromCalls() {
+    setRebuilding(true);
+    setError(null);
+    setRebuiltMsg(null);
+    try {
+      const r = await api<{ calls: number; consultants: number; metricsWritten: number; snapshotRef: string | null; avgScore: number; closeRate: number }>("/api/admin/knowledge/metrics/rebuild-calls", { method: "POST" });
+      setRebuiltMsg(`Rebuilt from ${r.calls} calls · ${r.consultants} consultants · ${r.metricsWritten} metrics · team avg ${r.avgScore}/100, close rate ${r.closeRate}%${r.snapshotRef ? ` · snapshot ${r.snapshotRef}` : ""}.`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Rebuild failed");
+    } finally {
+      setRebuilding(false);
+    }
+  }
 
   const load = React.useCallback(async () => {
     try {
@@ -47,6 +64,17 @@ export function PerformanceClient() {
   return (
     <div className="grid gap-4 lg:grid-cols-3">
       <div className="space-y-3 lg:col-span-2">
+        <Panel padded={false}>
+          <div className="flex flex-wrap items-center gap-3 p-3">
+            <Headphones size={16} style={{ color: C.green }} />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium" style={{ color: C.text }}>Performance from call scores</p>
+              <p className="text-xs" style={{ color: C.muted }}>Turn the scored-call data into consultant entities + company / consultant / segment metrics + a cite-able snapshot object. Runs automatically after each call-scoring sync.</p>
+            </div>
+            <KBtn variant="primary" loading={rebuilding} onClick={rebuildFromCalls}><RefreshCw size={13} /> Rebuild from call scores</KBtn>
+          </div>
+          {rebuiltMsg && <p className="px-3 pb-3 text-xs" style={{ color: C.green }}>{rebuiltMsg}</p>}
+        </Panel>
         <div className="flex gap-2">
           <KSelect value={key} onChange={(e) => setKey(e.target.value)} placeholder="All metrics" className="w-56" options={(data?.keys ?? []).map((k) => ({ value: k, label: k }))} />
         </div>

@@ -18,7 +18,8 @@
     "reindex": "tsx scripts/reindex.ts",
     "set:prompts": "tsx scripts/set-prompts.ts",
     "set:provider-key": "tsx scripts/set-provider-key.ts",
-    "compile:knowledge": "tsx scripts/compile-knowledge.ts"
+    "compile:knowledge": "tsx scripts/compile-knowledge.ts",
+    "rebuild:call-metrics": "tsx scripts/rebuild-call-metrics.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^1.0.0",

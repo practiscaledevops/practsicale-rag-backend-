@@ -14,6 +14,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { supabaseAdmin } from "@/lib/supabase";
 import { runPull, type DataSourceRow } from "@/lib/connectors/pull";
+import { rebuildCallScoreMetrics } from "@/lib/call-score-metrics";
 import { isDemo } from "@/lib/demo/mode";
 
 export const runtime = "nodejs";
@@ -55,6 +56,9 @@ async function handle(req: Request): Promise<Response> {
   const sources = (data ?? []) as unknown as DataSourceRow[];
 
   const ran: Array<Record<string, unknown>> = [];
+  // Orgs whose call-scoring source ingested new calls this run → refresh their
+  // Performance Memory afterwards (best-effort; never fails the sync).
+  const refreshOrgs = new Set<string>();
   for (const source of sources) {
     const res = await runPull(source, { trigger: "schedule", db });
     ran.push({
@@ -66,9 +70,20 @@ async function handle(req: Request): Promise<Response> {
       chunks: res.chunksIngested,
       ...(res.error ? { error: res.error } : {}),
     });
+    if (source.source_type === "call_score" && res.documentsIngested > 0) refreshOrgs.add(source.org_id);
   }
 
-  return Response.json({ ok: true, count: sources.length, ran });
+  const refreshed: Array<Record<string, unknown>> = [];
+  for (const orgId of refreshOrgs) {
+    try {
+      const m = await rebuildCallScoreMetrics(db, orgId, { createdBy: "cron" });
+      refreshed.push({ orgId, metrics: m.metricsWritten, consultants: m.consultants, snapshot: m.snapshotRef });
+    } catch (e) {
+      refreshed.push({ orgId, error: e instanceof Error ? e.message : "rebuild failed" });
+    }
+  }
+
+  return Response.json({ ok: true, count: sources.length, ran, ...(refreshed.length ? { performanceMemory: refreshed } : {}) });
 }
 
 // Vercel Cron issues a GET; POST is accepted too for manual triggering.

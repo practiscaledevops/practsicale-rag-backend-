@@ -31,12 +31,19 @@ const OMIT_FROM_META = new Set(["full_report", "report", "full_report_md", "anal
  * and scoring analytics. String values are PII-redacted (emails/phones), and the
  * large report text is excluded (it lives in the searchable body).
  */
+// Structural string fields (dates, ids, slugs, urls) must NOT be PII-redacted:
+// the greedy phone rule otherwise mangles an ISO date / timestamp into "[PHONE]",
+// destroying the time dimension for Performance Memory. These are identifiers,
+// not personal contact data. (Emails/phones in free-text fields are still redacted.)
+const NO_REDACT_KEY = /(^|_)(id|date|at|slug|url|links|status|band|outcome|type|version|count|score|scores|ratio|duration|pct|percent|band)$/i;
+
 function recordMetadata(rec: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(rec)) {
     if (OMIT_FROM_META.has(k) || v == null || v === "") continue;
     if (typeof v === "string") {
-      out[k] = redactPII(v);
+      // Keep structural identifiers verbatim; redact everything else.
+      out[k] = NO_REDACT_KEY.test(k) && !k.toLowerCase().includes("email") ? v : redactPII(v);
     } else if (typeof v === "number" || typeof v === "boolean") {
       out[k] = v;
     } else {

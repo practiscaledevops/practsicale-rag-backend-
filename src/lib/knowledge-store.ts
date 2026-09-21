@@ -426,6 +426,48 @@ export interface EntityInput {
   value?: string | null;
 }
 
+/**
+ * Upsert a standalone entity (kind + slug), merging attributes and bumping the
+ * mention count. Returns its id, or null on failure (best-effort). Used where an
+ * entity exists on its own (e.g. a consultant derived from call scores) rather
+ * than as a mention inside an object.
+ */
+export async function upsertEntity(
+  db: SupabaseClient,
+  orgId: string,
+  e: { kind: string; name: string; attributes?: Record<string, unknown>; aliases?: string[] }
+): Promise<string | null> {
+  const name = (e.name || "").trim();
+  const kind: EntityKind = isEntityKind(e.kind) ? e.kind : "project";
+  const slug = slugify(name);
+  if (!name || !slug) return null;
+  try {
+    const { data: existing } = await db
+      .from("entities")
+      .select("id, attributes, mention_count")
+      .eq("org_id", orgId)
+      .eq("kind", kind)
+      .eq("slug", slug)
+      .maybeSingle();
+    if (existing) {
+      const row = existing as { id: string; attributes: Record<string, unknown>; mention_count: number };
+      await db
+        .from("entities")
+        .update({ attributes: { ...(row.attributes ?? {}), ...(e.attributes ?? {}) }, mention_count: (row.mention_count ?? 0) + 1 })
+        .eq("id", row.id);
+      return row.id;
+    }
+    const { data: ins } = await db
+      .from("entities")
+      .insert({ org_id: orgId, kind, name, slug, aliases: e.aliases ?? [], attributes: e.attributes ?? {}, mention_count: 1 })
+      .select("id")
+      .single();
+    return (ins as { id?: string } | null)?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Upsert entities (kind + slug) and record their mentions on an object/document. Never throws. */
 export async function upsertEntityMentions(
   db: SupabaseClient,
