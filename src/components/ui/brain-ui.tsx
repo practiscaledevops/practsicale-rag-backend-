@@ -204,6 +204,17 @@ export function Spinner({ label }: { label?: string }) {
   );
 }
 
+/** Loading placeholder: a subtle shimmering block sized by className (e.g. "h-4 w-24"). */
+export function Skeleton({ className, style }: { className?: string; style?: React.CSSProperties }) {
+  return (
+    <div
+      aria-hidden
+      className={cn("animate-pulse rounded-md motion-reduce:animate-none", className)}
+      style={{ background: "linear-gradient(90deg, rgba(145,170,160,0.08) 0%, rgba(145,170,160,0.16) 50%, rgba(145,170,160,0.08) 100%)", ...style }}
+    />
+  );
+}
+
 export function StatBox({ label, value, hint, tone = "green" }: { label: string; value: React.ReactNode; hint?: string; tone?: Tone }) {
   return (
     <div className="rounded-xl px-4 py-3" style={{ background: C.surface, border: `1px solid ${C.border}` }}>

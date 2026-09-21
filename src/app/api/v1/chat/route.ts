@@ -11,6 +11,10 @@
 //   • a mode event    2:[{type:"mode",mode,label,auto,intent}]         (Auto → detected expert)
 //   • a route event   2:[{type:"route",requested,tier,model}]           (Smart Route / Deep)
 //   • a sources event 2:[{type:"sources",sources:[…],rewritten,confidence,lanes}]
+//   • a conflicts event 2:[{type:"conflicts",pairs:[{a:{ref,name,authority},b:{ref,name,authority},note}]}]
+//                                                                       (sources in context that contradict each other; only when any)
+//   • a performance event 2:[{type:"performance",metrics:[{key,label,value,unit,period_start,period_end,dimensions,source}]}]
+//                                                                       (the Performance Memory rows the answer reasons from; only when any)
 //   • a learning event 2:[{type:"learning_candidate",…}]              (save as Org Learning?)
 //   • the answer text 0:"…"
 //
@@ -25,14 +29,17 @@
 // Headers: x-model (resolved id), x-provider (anthropic|openai).
 
 import { createDataStreamResponse, streamText, convertToCoreMessages, formatDataStreamPart } from "ai";
+import { waitUntil } from "@vercel/functions";
+import { z } from "zod";
 import { getModel } from "@/lib/llm";
-import { generationParams } from "@/lib/models-catalog";
+import { generationParams, MODELS } from "@/lib/models-catalog";
 import { buildContext, buildAttachmentBlock, modeInstruction, outputInstruction, isSmallTalk, SMALLTALK_SYSTEM } from "@/lib/prompts";
 import { REASONING_ORDER_INSTRUCTION, MODE_LABELS, normalizeMode, modeDef } from "@/lib/work-modes";
 import { getActivePrompt } from "@/lib/prompts-db";
 import { loadSettings } from "@/lib/settings";
 import { runRetrieval } from "@/lib/pipeline";
 import { runOrchestratedRetrieval, type OrchestrationOutput } from "@/lib/orchestrator";
+import { metricEventRows } from "@/lib/performance-memory";
 import { detectLearning, looksLikeLearning } from "@/lib/learning-detect";
 import { validateCitations, checkFaithfulness } from "@/lib/faithfulness";
 import { resolveContext, AuthError } from "@/lib/auth/context";
@@ -92,8 +99,38 @@ export async function POST(req: Request) {
     );
   }
 
-  const body = await req.json();
-  const { messages, model: tier } = body;
+  // The wall clock starts here: the generation deadline is measured against
+  // Vercel's function timeout, which has been running since the request began.
+  const startedAt = Date.now();
+
+  // Validate the body up front: bounded messages/strings/arrays, 400 on
+  // anything malformed (a bad payload used to surface as a 500 mid-pipeline).
+  const parsedBody = ChatBodySchema.safeParse(await req.json().catch(() => null));
+  if (!parsedBody.success) {
+    return Response.json(
+      { error: `Invalid request body: ${parsedBody.error.issues[0]?.path.join(".") || "body"} ${parsedBody.error.issues[0]?.message ?? ""}`.trim() },
+      { status: 400 }
+    );
+  }
+  const body = parsedBody.data;
+  // Only user/assistant turns reach the model; a caller-supplied "system" turn
+  // would otherwise ride along as extra instructions.
+  const messages = body.messages.filter((m) => m.role !== "system");
+  // Per-field caps still allow a ~2.7M-char prompt (60 × 40k + attachments);
+  // the per-key limit counts requests, not tokens, so cap the whole turn too.
+  const totalChars =
+    messages.reduce((n, m) => n + m.content.length, 0) +
+    (body.attachments ?? []).reduce((n, a) => n + a.text.length, 0) +
+    (body.directives?.length ?? 0);
+  if (totalChars > MAX_TURN_CHARS) {
+    return Response.json({ error: `Request too large: ${totalChars} characters across messages and attachments (limit ${MAX_TURN_CHARS}). Start a new conversation or attach less.` }, { status: 413 });
+  }
+  const tier = body.model;
+  // Model selection must be a tier alias, a routing keyword, or a catalogued id —
+  // an arbitrary id is uncapped cost (or a mid-stream 400 from the provider).
+  if (typeof tier === "string" && !isAllowedModelSelection(tier)) {
+    return Response.json({ error: `Unknown model selection '${tier.slice(0, 40)}'` }, { status: 400 });
+  }
   // Work mode: a canonical id, a legacy alias, "auto" (default) — resolved by the
   // trusted spoke (role-gated there); we never infer restricted modes from chat.
   const requestedMode: string | undefined = typeof body?.mode === "string" ? body.mode : undefined;
@@ -141,10 +178,9 @@ export async function POST(req: Request) {
   ]);
   const modelId = resolvedModel.modelId;
   const provider = modelId.startsWith("claude") ? "anthropic" : "openai";
-  const startedAt = Date.now();
 
   return createDataStreamResponse({
-    headers: { "x-model": modelId, "x-provider": provider },
+    headers: { "x-model": modelId, "x-provider": provider, ...rateLimitHeaders(rl) },
     onError: (error) => {
       console.error("[v1/chat] stream error:", error);
       return "The assistant hit an error while generating the answer. Please try again.";
@@ -199,6 +235,8 @@ export async function POST(req: Request) {
           lanes: [],
           contextBlock: buildContext(legacy.chunks),
           performanceBlock: "",
+          performanceMetrics: [],
+          conflicts: [],
           objects: [],
           annotated: legacy.chunks.map((c, i) => ({ ...c, object_id: null, intelligence_class: "business_reality", domain: null, rrf_score: 0, lane: "reality" as const, object: null, rank: i + 1, boost: 0, finalScore: 0, via: "search" as const })),
           fallback: true,
@@ -253,6 +291,11 @@ export async function POST(req: Request) {
         })),
       });
 
+      // Disagreements among the retrieved sources, and the structured numbers the
+      // answer reasons from — so the client can show both, not only the prose.
+      if (out.conflicts.length) dataStream.writeData({ type: "conflicts", pairs: out.conflicts });
+      if (out.performanceMetrics.length) dataStream.writeData({ type: "performance", metrics: metricEventRows(out.performanceMetrics) });
+
       // Ground-or-refuse: nothing retrieved (and no attached files / numbers) ⇒ refuse without a model call.
       if (settings.features.groundOrRefuse && chunks.length === 0 && !hasAttachments && !out.performanceBlock) {
         dataStream.writeData({ type: "status", stage: "retrieved", label: "No matching sources", count: 0 });
@@ -282,9 +325,13 @@ export async function POST(req: Request) {
       // emitted before the stream closes. Cheap: the heuristic gate skips most turns.
       const learningPromise =
         settings.features.learningDetection && looksLikeLearning(query)
-          ? getActivePrompt(ctx.orgId, "learning_detect").then((p) =>
-              detectLearning({ message: query, history, availableRefs: out.objects, systemPrompt: p, tier: settings.intelligence.intentTier })
-            )
+          ? getActivePrompt(ctx.orgId, "learning_detect")
+              .then((p) =>
+                detectLearning({ message: query, history, availableRefs: out.objects, systemPrompt: p, tier: settings.intelligence.intentTier })
+              )
+              // Never an unhandled rejection: if generation throws first, this
+              // promise is only awaited later (or not at all).
+              .catch(() => null)
           : Promise.resolve(null);
 
       // Stable content first (system + context), user's messages last → caching-friendly.
@@ -314,15 +361,16 @@ export async function POST(req: Request) {
       let clipped = false;
 
       for (let step = 0; step < maxSteps; step++) {
-        let stepTokens = maxTokens;
-        if (step > 0) {
-          // Fit the continuation into the time left (keep a margin to close the stream).
-          const affordable = Math.floor(((deadline - Date.now() - 15_000) / 1000) * tokensPerSec);
-          stepTokens = Math.min(maxTokens, affordable);
-          if (stepTokens < MIN_CONTINUATION_TOKENS) {
-            clipped = true;
-            break;
-          }
+        // Fit each step into the time left (keep a margin to close the stream).
+        // The first step has no observed rate yet, so it assumes a conservative
+        // one — a long orchestration must not leave step 0 a budget the wall
+        // clock can't honour (that is the silent cut this loop exists to prevent).
+        const rate = step === 0 ? ASSUMED_TOKENS_PER_SEC : tokensPerSec;
+        const affordable = Math.floor(((deadline - Date.now() - 15_000) / 1000) * rate);
+        const stepTokens = Math.min(maxTokens, Math.max(step === 0 ? MIN_CONTINUATION_TOKENS : 0, affordable));
+        if (step > 0 && stepTokens < MIN_CONTINUATION_TOKENS) {
+          clipped = true;
+          break;
         }
         const stepMessages =
           step === 0
@@ -396,30 +444,51 @@ export async function POST(req: Request) {
         });
       }
 
-      // Post-answer bookkeeping over the COMPLETE text: citations, faithfulness, metering, logs.
+      // Post-answer bookkeeping over the COMPLETE text: citations, faithfulness,
+      // metering, logs. Vercel freezes the instance once the response is done,
+      // so this work is registered with waitUntil (kept alive after the stream
+      // closes) instead of being left as fire-and-forget promises.
       const { valid, fabricated } = validateCitations(fullText, retrievedIds);
-      let grounded: boolean | null = null;
-      if (settings.features.faithfulnessCheck) {
-        const fp = await getActivePrompt(ctx.orgId, "faithfulness");
-        const verdict = await checkFaithfulness(context, fullText, fp, "fast");
-        grounded = verdict.checked ? verdict.grounded : null;
-      }
-      void supabaseAdmin().from("usage_events").insert({
-        org_id: ctx.orgId, api_key_id: ctx.key.id, kind: "chat", model: modelId,
-        tier: isTierName(tier) ? tier : settings.generation.defaultTier,
-        input_tokens: promptTokens, output_tokens: completionTokens,
-        cost_usd: costUsd(modelId, promptTokens, completionTokens),
-        latency_ms: Date.now() - startedAt, grounded, fabricated_citations: fabricated.length,
-      }).then(({ error }) => error && console.error("[usage] insert failed:", error.message), (e) => console.error("[usage] insert error:", e));
-      void logQuery({ orgId: ctx.orgId, apiKeyId: ctx.key.id, query, mode: effectiveMode, sourceTypes: retrievedSourceTypes, retrievedDocIds: docIds, grounded, confidence, refused: false });
       const citedSet = new Set(valid);
-      void logChunkRetrievals(
-        ctx.orgId,
-        chunks.map((c) => ({ chunkId: c.id, documentId: c.document_id, score: c.score ?? null, cited: citedSet.has(c.id) }))
+      const latencyMs = Date.now() - startedAt;
+      waitUntil(
+        (async () => {
+          let grounded: boolean | null = null;
+          // The faithfulness judge is an LLM call; skip it when the wall clock is
+          // nearly spent rather than lose the metering row with it.
+          if (settings.features.faithfulnessCheck && Date.now() < deadline - 30_000) {
+            try {
+              const fp = await getActivePrompt(ctx.orgId, "faithfulness");
+              // Judge against everything the model was given, numbers included.
+              const verdict = await checkFaithfulness(`${context}${performanceSection}`, fullText, fp, "fast");
+              grounded = verdict.checked ? verdict.grounded : null;
+            } catch (e) {
+              console.error("[faithfulness] check failed:", e instanceof Error ? e.message : e);
+            }
+          }
+          await Promise.allSettled([
+            supabaseAdmin().from("usage_events").insert({
+              org_id: ctx.orgId, api_key_id: ctx.key.id, kind: "chat", model: modelId,
+              tier: isTierName(tier) ? tier : settings.generation.defaultTier,
+              input_tokens: promptTokens, output_tokens: completionTokens,
+              cost_usd: costUsd(modelId, promptTokens, completionTokens),
+              latency_ms: latencyMs, grounded, fabricated_citations: fabricated.length,
+            }).then(({ error }) => error && console.error("[usage] insert failed:", error.message), (e) => console.error("[usage] insert error:", e)),
+            logQuery({ orgId: ctx.orgId, apiKeyId: ctx.key.id, query, mode: effectiveMode, sourceTypes: retrievedSourceTypes, retrievedDocIds: docIds, grounded, confidence, refused: false }),
+            logChunkRetrievals(
+              ctx.orgId,
+              chunks.map((c) => ({ chunkId: c.id, documentId: c.document_id, score: c.score ?? null, cited: citedSet.has(c.id) }))
+            ),
+          ]);
+        })()
       );
     },
   });
 }
+
+// A whole turn (messages + attachments + directives) may not exceed this many
+// characters — roughly 30k tokens of prompt, which every catalogued model accepts.
+const MAX_TURN_CHARS = 120_000;
 
 // Generation must finish (stream closed, finish part written) before Vercel's
 // 300s wall; the pre-generation work (classify → search → rerank) is already
@@ -427,6 +496,35 @@ export async function POST(req: Request) {
 const GENERATION_DEADLINE_MS = 275_000;
 // Below this a continuation step cannot add a meaningful section; stop instead.
 const MIN_CONTINUATION_TOKENS = 600;
+// Output speed assumed for the first step before any rate is observed (the
+// slowest catalogued model streams ~35-70 tok/s); later steps use the real rate.
+const ASSUMED_TOKENS_PER_SEC = 35;
+
+// Request body contract (see the header comment). Bounded everywhere so a bad
+// or hostile payload is a 400, never a 500 mid-pipeline or an unbounded prompt.
+const ChatBodySchema = z
+  .object({
+    messages: z
+      .array(z.object({ role: z.enum(["user", "assistant", "system"]), content: z.string().max(40_000) }))
+      .min(1)
+      .max(60),
+    model: z.string().max(64).optional(),
+    mode: z.string().max(64).optional(),
+    allowedModes: z.array(z.string().max(64)).max(40).optional(),
+    outputType: z.string().max(40).optional(),
+    sourceTypes: z.array(z.string().max(64)).max(50).optional(),
+    collectionIds: z.array(z.string().max(64)).max(50).optional(),
+    directives: z.string().max(8000).optional(),
+    attachments: z.array(z.object({ name: z.string().max(200), text: z.string().max(60_000) })).max(5).optional(),
+  })
+  .passthrough();
+
+const SELECTION_KEYWORDS = new Set(["fast", "recommended", "max", "smart", "auto", "deep"]);
+/** A tier alias, a routing keyword, or an id from the model catalogue. */
+function isAllowedModelSelection(v: string): boolean {
+  const s = v.trim().toLowerCase();
+  return SELECTION_KEYWORDS.has(s) || MODELS.some((m) => m.id === s);
+}
 // A "partial word" held back longer than this (a URL, a code token) is flushed as-is.
 const HOLDBACK_MAX_CHARS = 200;
 

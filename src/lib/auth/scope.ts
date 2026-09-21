@@ -47,11 +47,14 @@ export function intersectSourceType(key: ApiKeyRecord, requested?: string | null
   return [requested];
 }
 
-// A sentinel that matches no row, used when a narrowing intersection is empty —
+// Sentinels that match no row, used when a narrowing intersection is empty —
 // because an EMPTY filter array means "no restriction" (all) in the SQL, so we
-// must never collapse "nothing allowed" to []. This value can't equal any real
-// source_type or collection uuid.
+// must never collapse "nothing allowed" to []. source_types is text[] so any
+// impossible name works; collection_ids is uuid[] in the search functions, so
+// its sentinel must still be a valid uuid (the nil uuid) or Postgres raises a
+// cast error and the whole retrieval fails instead of returning nothing.
 const MATCH_NOTHING = "__none__";
+export const NO_COLLECTION = "00000000-0000-0000-0000-000000000000";
 
 /**
  * Narrow one scope dimension (source_types or collection_ids) by a caller-
@@ -64,13 +67,13 @@ const MATCH_NOTHING = "__none__";
  *   - both restricted                -> their intersection, or [MATCH_NOTHING]
  *                                       if the intersection is empty (never []).
  */
-function narrowDim(keyAllowed: string[], requested?: string[] | null): string[] {
+function narrowDim(keyAllowed: string[], requested?: string[] | null, sentinel: string = MATCH_NOTHING): string[] {
   if (requested == null) return keyAllowed;
   const req = requested.filter((s) => typeof s === "string" && s.length > 0);
   if (req.length === 0) return keyAllowed;
   if (keyAllowed.length === 0) return req;
   const inter = keyAllowed.filter((s) => req.includes(s));
-  return inter.length > 0 ? inter : [MATCH_NOTHING];
+  return inter.length > 0 ? inter : [sentinel];
 }
 
 /**
@@ -88,6 +91,6 @@ export function narrowScope(
   return {
     sourceTypes: narrowDim(base.sourceTypes, requested.sourceTypes),
     dataSourceIds: base.dataSourceIds,
-    collectionIds: narrowDim(base.collectionIds, requested.collectionIds),
+    collectionIds: narrowDim(base.collectionIds, requested.collectionIds, NO_COLLECTION),
   };
 }

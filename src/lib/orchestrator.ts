@@ -25,8 +25,8 @@ import { rewriteQueries, type ChatTurn } from "@/lib/query-transform";
 import { getActivePrompts } from "@/lib/prompts-db";
 import { structured } from "@/lib/structured";
 import { runRetrieval, type RetrievalOutput, type RetrievalStatus } from "@/lib/pipeline";
-import { getObjectsByIds, listRelationshipsFor, type KnowledgeObjectRow } from "@/lib/knowledge-store";
-import { fetchPerformanceBlock } from "@/lib/performance-memory";
+import { getObjectsByIds, listRelationshipsFor, listContradictionsAmong, type KnowledgeObjectRow } from "@/lib/knowledge-store";
+import { fetchPerformanceBlock, type MetricRow } from "@/lib/performance-memory";
 import {
   LANES,
   LANE_CLASS,
@@ -244,15 +244,23 @@ export interface LaneSummary {
   selected: number;
 }
 
+/** One side of a known disagreement (a `contradicts` edge inside the context). */
+export type ConflictParty = { ref: string; name: string; authority: string };
+export type ConflictPair = { a: ConflictParty; b: ConflictParty; note: string | null };
+
 export interface OrchestrationOutput extends RetrievalOutput {
   intent: Intent;
   mode: WorkMode;
   auto: boolean;
   lanes: LaneSummary[];
-  /** Lane-grouped, labelled context block (replaces buildContext for the prompt). */
+  /** Lane-grouped, labelled context block (replaces buildContext for the prompt), + KNOWN DISAGREEMENTS when any. */
   contextBlock: string;
   /** Performance Memory table (may be ""). */
   performanceBlock: string;
+  /** The metric rows behind `performanceBlock` (the numbers the answer used). */
+  performanceMetrics: MetricRow[];
+  /** Pairs of objects in context that contradict each other (higher authority first). */
+  conflicts: ConflictPair[];
   /** Refs of the knowledge objects in context (for the client + learning capture). */
   objects: { ref: string; name: string; lane: string }[];
   /** Per-chunk lane/object info aligned with `chunks` (for the sources event). */
@@ -509,12 +517,23 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     final = top.map((c, i) => ({ ...c, id: parents[i].id, content: parents[i].content, metadata: parents[i].metadata, parent_id: parents[i].parent_id }));
   }
 
-  // 9. Performance Memory (numbers) when the request wants them or the mode leans on it.
-  let performanceBlock = "";
-  if (laneWeights.performance >= 0.3 || intent.needsNumbers) {
-    const perf = await fetchPerformanceBlock(db, orgId, { query, keyConcepts: intent.keyConcepts, entities: intent.entities, needsNumbers: intent.needsNumbers });
-    performanceBlock = perf.block;
-  }
+  // 9. Known disagreements: `contradicts` edges with BOTH ends in context (the
+  //    compiler confirms one on a CONFLICT verdict; reviewers confirm others).
+  //    The model is told which side carries more authority and that the other
+  //    exists, instead of silently picking one.
+  const contextObjectIds = Array.from(new Set(final.map((c) => c.object_id).filter((x): x is string => !!x)));
+  // 10. Performance Memory (numbers) when the request wants them or the mode leans on it.
+  //     Both reads are independent, so they share one round trip on the critical path.
+  const wantsPerformance = laneWeights.performance >= 0.3 || intent.needsNumbers;
+  const [contradictions, perf] = await Promise.all([
+    contextObjectIds.length > 1 ? listContradictionsAmong(db, orgId, contextObjectIds) : Promise.resolve([]),
+    wantsPerformance
+      ? fetchPerformanceBlock(db, orgId, { query, keyConcepts: intent.keyConcepts, entities: intent.entities, needsNumbers: intent.needsNumbers })
+      : Promise.resolve(null),
+  ]);
+  const conflicts = contradictions.length ? pairConflicts(contradictions, objects) : [];
+  const performanceBlock = perf?.block ?? "";
+  const performanceMetrics: MetricRow[] = perf?.metrics ?? [];
 
   const lanes: LaneSummary[] = [...active, ...(includeRaw ? (["raw"] as const) : [])].map((l) => ({
     lane: l,
@@ -531,6 +550,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
 
   emit({ stage: "retrieved", label: `Retrieved ${final.length} source${final.length === 1 ? "" : "s"}${expandedCount ? ` (+${expandedCount} connected)` : ""}`, count: final.length });
 
+  const disagreements = buildDisagreementsBlock(conflicts);
   return {
     chunks: final,
     effectiveQuery: queries.join(" | "),
@@ -541,8 +561,10 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     mode,
     auto,
     lanes,
-    contextBlock: buildLaneContext(final),
+    contextBlock: disagreements ? `${buildLaneContext(final)}\n\n\n${disagreements}` : buildLaneContext(final),
     performanceBlock,
+    performanceMetrics,
+    conflicts,
     objects: objectsInContext,
     annotated: final,
     fallback: false,
@@ -601,6 +623,42 @@ export function buildLaneContext(chunks: OrchestratedChunk[]): string {
   return parts.join("\n\n\n");
 }
 
+/**
+ * De-duplicated contradiction pairs among the objects in context (the compiler
+ * writes `contradicts` both ways). Edges with an end outside `objects` are
+ * dropped; the higher-authority side comes first.
+ */
+export function pairConflicts(
+  edges: { source_object_id: string; target_object_id: string; note: string | null }[],
+  objects: Map<string, Pick<ObjectMeta, "ref" | "name" | "authority">>
+): ConflictPair[] {
+  const seen = new Set<string>();
+  const out: ConflictPair[] = [];
+  for (const e of edges) {
+    const s = objects.get(e.source_object_id);
+    const t = objects.get(e.target_object_id);
+    if (!s || !t || e.source_object_id === e.target_object_id) continue;
+    const key = [e.source_object_id, e.target_object_id].sort().join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const party = (o: Pick<ObjectMeta, "ref" | "name" | "authority">): ConflictParty => ({ ref: o.ref, name: o.name, authority: o.authority });
+    const sFirst = authorityWeight(s.authority) > authorityWeight(t.authority) || (authorityWeight(s.authority) === authorityWeight(t.authority) && s.ref <= t.ref);
+    const note = e.note ? e.note.replace(/\s+/g, " ").trim().slice(0, 300) : "";
+    out.push({ a: party(sFirst ? s : t), b: party(sFirst ? t : s), note: note || null });
+  }
+  return out;
+}
+
+/** The KNOWN DISAGREEMENTS block appended after the lane-grouped context ("" when none). */
+export function buildDisagreementsBlock(pairs: ConflictPair[]): string {
+  if (!pairs.length) return "";
+  const lines = pairs.map((p) => {
+    const note = p.note ? p.note.replace(/[.;:,\s]+$/, "") : "";
+    return `- [${p.a.ref}] "${p.a.name}" (authority ${p.a.authority}) disagrees with [${p.b.ref}] "${p.b.name}" (authority ${p.b.authority})${note ? ` — ${note}` : ""}. Reason with the higher-authority, more current source and say that the other exists.`;
+  });
+  return `### KNOWN DISAGREEMENTS — sources above that contradict each other\n\n${lines.join("\n")}`;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -651,6 +709,8 @@ function wrapLegacy(legacy: RetrievalOutput, intent: Intent, mode: WorkMode, aut
     lanes: [{ lane: "reality", label: LANE_LABEL.reality, weight: 1, candidates: legacy.chunks.length, selected: legacy.chunks.length }],
     contextBlock: buildLaneContext(annotated),
     performanceBlock: "",
+    performanceMetrics: [],
+    conflicts: [],
     objects: [],
     annotated,
     fallback: true,

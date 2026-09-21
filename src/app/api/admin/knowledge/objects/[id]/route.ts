@@ -33,7 +33,7 @@ import {
   OBJECT_STATUSES,
   EVIDENCE_LEVELS,
 } from "@/lib/intelligence-taxonomy";
-import { guard, dbError, objectStubs, str, strOrNull, strList } from "../../_shared";
+import { guard, dbError, objectStubs, str, strOrNull, strList, uuid } from "../../_shared";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
@@ -45,19 +45,19 @@ export async function GET(_req: Request, ctx: Ctx) {
   const g = await guard();
   if ("response" in g) return g.response;
   const { admin } = g;
-  const { id } = await ctx.params;
+  const id = uuid((await ctx.params).id);
+  if (!id) return Response.json({ error: "Not found" }, { status: 404 });
   const db = supabaseAdmin();
   try {
     const object = await getObject(db, admin.orgId, id, true);
     if (!object) return Response.json({ error: "Not found" }, { status: 404 });
 
-    const [edgesRes, mentionsRes, chunksRes, decisionsRes, learningRes, childrenRes] = await Promise.all([
+    const [edgesRes, mentionsRes, chunksRes, decisionsRes, learningRes] = await Promise.all([
       db.from("knowledge_relationships").select("*").eq("org_id", admin.orgId).or(`source_object_id.eq.${id},target_object_id.eq.${id}`).limit(300),
       db.from("entity_mentions").select("id, role, value, entity_id, entities(id, kind, name, slug, mention_count)").eq("org_id", admin.orgId).eq("object_id", id).limit(200),
       db.from("chunks").select("id", { count: "exact", head: true }).eq("org_id", admin.orgId).eq("object_id", id),
       db.from("ingestion_decisions").select("id, stage, decision, input, output, model, confidence, duration_ms, created_at").eq("org_id", admin.orgId).eq("object_id", id).order("created_at", { ascending: false }).limit(40),
       db.from("learning_records").select("*").eq("org_id", admin.orgId).eq("object_id", id).maybeSingle(),
-      db.from("learning_records").select("id, object_id, record_type, lifecycle_status").eq("org_id", admin.orgId).limit(500),
     ]);
 
     const edges = (edgesRes.data ?? []) as { id: string; source_object_id: string; relationship_type: string; target_object_id: string; status: string; confidence: number | null; origin: string; note: string | null }[];
@@ -69,15 +69,19 @@ export async function GET(_req: Request, ctx: Ctx) {
     }));
 
     const learning = (learningRes.data ?? null) as Record<string, unknown> | null;
-    // Learning chain: parent + children records (resolved to refs).
+    // Learning chain: the parent record + the direct children (resolved to refs).
     let chain: unknown[] = [];
     if (learning) {
-      const all = (childrenRes.data ?? []) as { id: string; object_id: string; record_type: string; lifecycle_status: string }[];
+      type ChainRow = { id: string; object_id: string; record_type: string; lifecycle_status: string; parent_record_id: string | null };
       const recId = learning.id as string;
       const parentId = learning.parent_record_id as string | null;
-      const related = all.filter((r) => r.id === parentId || (r as { parent_record_id?: string }).parent_record_id === recId);
-      const childRows = await db.from("learning_records").select("id, object_id, record_type, lifecycle_status, parent_record_id").eq("org_id", admin.orgId).eq("parent_record_id", recId);
-      const rows = [...related, ...(((childRows.data ?? []) as typeof related))];
+      const [parentRes, childRes] = await Promise.all([
+        parentId
+          ? db.from("learning_records").select("id, object_id, record_type, lifecycle_status, parent_record_id").eq("org_id", admin.orgId).eq("id", parentId).maybeSingle()
+          : Promise.resolve({ data: null }),
+        db.from("learning_records").select("id, object_id, record_type, lifecycle_status, parent_record_id").eq("org_id", admin.orgId).eq("parent_record_id", recId).limit(100),
+      ]);
+      const rows = [...(parentRes.data ? [parentRes.data as ChainRow] : []), ...((childRes.data ?? []) as ChainRow[])];
       const st = await objectStubs(admin.orgId, rows.map((r) => r.object_id));
       chain = rows.map((r) => ({ ...r, object: st[r.object_id] ?? null }));
     }

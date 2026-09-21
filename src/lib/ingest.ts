@@ -8,7 +8,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { chunkDocument, chunkKnowledgeObject, type Chunk } from "@/lib/chunking";
-import { embedMany } from "@/lib/embeddings";
+import { embedForIngest } from "@/lib/embeddings";
 import { redactPII } from "@/lib/redact";
 import { loadSettings } from "@/lib/settings";
 import { getActivePrompt } from "@/lib/prompts-db";
@@ -129,10 +129,10 @@ async function persistChunks(db: SupabaseClient, ctx: PersistContext): Promise<n
   // raw so citations/snippets stay clean, and `context` separately (the fts
   // generated column covers both — see migration 0010).
   const embedInputs = chunks.map((c, i) => (contexts[i] ? `${contexts[i]}\n\n${c.content}` : c.content));
-  const vectors = await embedMany(embedInputs);
+  const vectors = await embedForIngest(embedInputs);
 
   const lane = laneColumns(ctx);
-  const baseRow = (c: Chunk, embedding: number[], context: string) => ({
+  const baseRow = (c: Chunk, embedding: number[] | null, context: string) => ({
     org_id: orgId,
     document_id: documentId,
     content: c.content,
@@ -182,11 +182,14 @@ async function persistChunks(db: SupabaseClient, ctx: PersistContext): Promise<n
  * Ingest a single document: redact PII, skip if unchanged, insert the document
  * (+ collection memberships), then chunk -> embed -> persist.
  *
- * Transactional-ish: if anything after the document insert fails (e.g. the
- * embedding provider erroring), the just-inserted document is deleted before the
- * error is rethrown — otherwise an orphan document keeps its content_hash and
- * every future ingest of the same content would skip forever, never producing
- * chunks. Does NOT write an ingestion_runs row — the caller owns provenance.
+ * Transactional-ish: if anything after the document insert throws (a chunk
+ * insert failing, contextualisation erroring), the just-inserted document is
+ * deleted before the error is rethrown — otherwise an orphan document keeps its
+ * content_hash and every future ingest of the same content would skip forever,
+ * never producing chunks. An embedding-provider outage does NOT throw: those
+ * chunks persist with a null embedding (full-text searchable; Reprocess fills
+ * the vectors later). Does NOT write an ingestion_runs row — the caller owns
+ * provenance.
  */
 export async function ingestOne(db: SupabaseClient, params: IngestParams): Promise<IngestResult> {
   const { orgId, sourceType, title, text, uri, metadata, dataSourceId } = params;
@@ -204,7 +207,19 @@ export async function ingestOne(db: SupabaseClient, params: IngestParams): Promi
       .eq("content_hash", contentHash)
       .maybeSingle();
     if (existing) {
-      return { documentId: existing.id, chunks: 0, skipped: true };
+      // A document with no chunks is an orphan from a run that was killed
+      // (function timeout) between the document insert and persistChunks —
+      // the rollback below only runs on a thrown error. Treat it as absent so
+      // the same file can be ingested again instead of being skipped forever.
+      const { count } = await db
+        .from("chunks")
+        .select("id", { count: "exact", head: true })
+        .eq("org_id", orgId)
+        .eq("document_id", existing.id);
+      if ((count ?? 0) > 0) {
+        return { documentId: existing.id, chunks: 0, skipped: true };
+      }
+      await db.from("documents").delete().eq("id", existing.id).eq("org_id", orgId);
     }
   }
 

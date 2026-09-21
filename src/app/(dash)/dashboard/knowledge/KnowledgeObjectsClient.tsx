@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Search, PlusCircle, Filter } from "lucide-react";
 import {
   INTELLIGENCE_CLASSES,
@@ -70,13 +70,19 @@ type Tab = "all" | IntelligenceClass;
 
 export function KnowledgeObjectsClient() {
   const router = useRouter();
-  const [tab, setTab] = React.useState<Tab>("all");
-  const [q, setQ] = React.useState("");
-  const [domain, setDomain] = React.useState("");
-  const [type, setType] = React.useState("");
-  const [status, setStatus] = React.useState("");
-  const [endorsement, setEndorsement] = React.useState("");
-  const [bucket, setBucket] = React.useState("");
+  // Deep-linkable: /dashboard/knowledge?class=playbook&domain=management&type=framework
+  // (the Brain overview and other pages link straight into a filtered view).
+  const params = useSearchParams();
+  const initialClass = params.get("class");
+  const [tab, setTab] = React.useState<Tab>(
+    initialClass && INTELLIGENCE_CLASSES.some((c) => c.id === initialClass) ? (initialClass as Tab) : "all"
+  );
+  const [q, setQ] = React.useState(params.get("q") ?? "");
+  const [domain, setDomain] = React.useState(params.get("domain") ?? "");
+  const [type, setType] = React.useState(params.get("type") ?? "");
+  const [status, setStatus] = React.useState(params.get("status") ?? "");
+  const [endorsement, setEndorsement] = React.useState(params.get("endorsement") ?? "");
+  const [bucket, setBucket] = React.useState(params.get("bucket") ?? "");
   const [data, setData] = React.useState<ListResponse | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);

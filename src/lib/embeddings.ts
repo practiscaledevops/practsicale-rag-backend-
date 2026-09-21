@@ -51,8 +51,35 @@ export async function embed(text: string): Promise<number[]> {
   }
 }
 
-// Batch embed (ingestion). Demo/no-key/outage -> zero vectors (rows stay
-// full-text searchable; re-ingest once a key is set to populate real vectors).
+// Ingestion embedding: batches of ≤100 inputs per request (a whole document in
+// one call trips the provider's per-request caps), and a failed batch yields
+// `null` per chunk — NOT a zero vector. A zero vector persisted as "embedded"
+// is invisible to re-indexing and silently dead on the semantic leg; a null
+// embedding keeps the chunk full-text searchable and lets Reprocess find it.
+const EMBED_BATCH = 100;
+export async function embedForIngest(texts: string[]): Promise<(number[] | null)[]> {
+  if (isDemo() || texts.length === 0) return texts.map(() => null);
+  const c = await client();
+  if (!c) {
+    onEmbedError(new Error("no OpenAI key configured"));
+    return texts.map(() => null);
+  }
+  const out: (number[] | null)[] = [];
+  for (let i = 0; i < texts.length; i += EMBED_BATCH) {
+    const batch = texts.slice(i, i + EMBED_BATCH);
+    try {
+      const res = await c.embeddings.create({ model: MODEL, input: batch, dimensions: DIM });
+      for (const d of res.data) out.push(d.embedding);
+    } catch (err) {
+      onEmbedError(err);
+      for (let j = 0; j < batch.length; j++) out.push(null);
+    }
+  }
+  return out;
+}
+
+// Batch embed (query-time helpers / object embeddings). Demo/no-key/outage ->
+// zero vectors, which make the semantic leg inert so RRF falls back to full-text.
 export async function embedMany(texts: string[]): Promise<number[][]> {
   if (isDemo()) return texts.map(() => zeroVec());
   const c = await client();

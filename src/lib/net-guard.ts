@@ -30,10 +30,21 @@ export function isPrivateIp(ip: string): boolean {
   if (net.isIPv6(ip)) {
     const s = ip.toLowerCase().replace(/^\[|\]$/g, "");
     if (s === "::1" || s === "::") return true; // loopback / unspecified
-    if (s.startsWith("fe80") || s.startsWith("fc") || s.startsWith("fd")) return true; // link-local / unique-local
-    // IPv4-mapped (::ffff:a.b.c.d) — check the embedded v4.
-    const mapped = s.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (mapped) return isPrivateIp(mapped[1]);
+    if (s.startsWith("fe80") || s.startsWith("fec") || s.startsWith("fed") || s.startsWith("fee") || s.startsWith("fef")) return true; // link-local / site-local
+    if (s.startsWith("fc") || s.startsWith("fd")) return true; // unique-local
+    if (s.startsWith("2002:")) return true; // 6to4 (embeds an arbitrary v4)
+    if (s.startsWith("64:ff9b:")) return true; // NAT64 (embeds an arbitrary v4)
+    if (s.startsWith("ff")) return true; // multicast
+    // IPv4-mapped / -compatible addresses embed a v4 — dotted (::ffff:127.0.0.1)
+    // OR hex form, which is how the URL parser serialises them (::ffff:7f00:1).
+    const dotted = s.match(/^(?:::ffff:|::)(\d+\.\d+\.\d+\.\d+)$/);
+    if (dotted) return isPrivateIp(dotted[1]);
+    const hex = s.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (hex) {
+      const hi = parseInt(hex[1], 16);
+      const lo = parseInt(hex[2], 16);
+      return isPrivateIp(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+    }
     return false;
   }
   return true; // not a valid IP → treat as unsafe

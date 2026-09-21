@@ -78,16 +78,41 @@ export async function listMetrics(
 
 const STOP = new Set(["the", "a", "an", "of", "for", "and", "or", "our", "my", "is", "are", "what", "how", "why", "to", "in", "on", "with", "rate", "rates", "number", "numbers", "data"]);
 
+/** A metric row as the chat stream's `performance` event carries it (JSON-safe). */
+export type MetricEventRow = {
+  key: string;
+  label: string | null;
+  value: number;
+  unit: string | null;
+  period_start: string | null;
+  period_end: string | null;
+  dimensions: Record<string, string | number | boolean | null>;
+  source: string;
+};
+
+/** The rows the answer reasoned from, flattened for the client (numeric comes back as text; nested dimensions are stringified). */
+export function metricEventRows(rows: MetricRow[]): MetricEventRow[] {
+  return rows.map((m) => {
+    const dimensions: MetricEventRow["dimensions"] = {};
+    for (const [k, v] of Object.entries(m.dimensions ?? {})) {
+      dimensions[k] = v == null ? null : typeof v === "string" || typeof v === "number" || typeof v === "boolean" ? v : JSON.stringify(v);
+    }
+    return { key: m.metric_key, label: m.label ?? null, value: Number(m.value), unit: m.unit ?? null, period_start: m.period_start ?? null, period_end: m.period_end ?? null, dimensions, source: m.source };
+  });
+}
+
 /**
  * Pull the metrics relevant to a request (by metric key / label / dimension
  * keyword match) and render them as a compact Markdown table for the prompt.
- * Empty when nothing matches or the table doesn't exist yet.
+ * Returns the rows too, so the answer can show the numbers it used. Empty when
+ * nothing matches or the table doesn't exist yet.
  */
 export async function fetchPerformanceBlock(
   db: SupabaseClient,
   orgId: string,
   q: { query: string; keyConcepts: string[]; entities: string[]; needsNumbers: boolean }
-): Promise<{ block: string; count: number; keys: string[] }> {
+): Promise<{ block: string; count: number; keys: string[]; metrics: MetricRow[] }> {
+  const empty = { block: "", count: 0, keys: [], metrics: [] };
   const terms = Array.from(
     new Set(
       [...q.keyConcepts, ...q.entities, ...q.query.split(/\s+/)]
@@ -96,7 +121,7 @@ export async function fetchPerformanceBlock(
         .filter((t) => t.length > 2 && !STOP.has(t))
     )
   ).slice(0, 12);
-  if (terms.length === 0) return { block: "", count: 0, keys: [] };
+  if (terms.length === 0) return empty;
 
   let rows: MetricRow[] = [];
   try {
@@ -110,9 +135,9 @@ export async function fetchPerformanceBlock(
       .limit(q.needsNumbers ? 40 : 16);
     rows = (data ?? []) as MetricRow[];
   } catch {
-    return { block: "", count: 0, keys: [] };
+    return empty;
   }
-  if (rows.length === 0) return { block: "", count: 0, keys: [] };
+  if (rows.length === 0) return empty;
 
   const lines = rows.map((r) => {
     const period = r.period_start ? `${r.period_start}${r.period_end ? ` → ${r.period_end}` : ""}` : "—";
@@ -123,5 +148,5 @@ export async function fetchPerformanceBlock(
     return `| ${r.label ?? r.metric_key} | ${period} | ${val} | ${dims || "—"} | ${r.source} |`;
   });
   const block = `| Metric | Period | Value | Dimensions | Source |\n|---|---|---|---|---|\n${lines.join("\n")}`;
-  return { block, count: rows.length, keys: Array.from(new Set(rows.map((r) => r.metric_key))) };
+  return { block, count: rows.length, keys: Array.from(new Set(rows.map((r) => r.metric_key))), metrics: rows };
 }

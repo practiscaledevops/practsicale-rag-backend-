@@ -25,10 +25,21 @@ const ENV_VAR: Record<Provider, string> = {
 
 // ---- encryption -----------------------------------------------------------
 
+let cachedKey: Buffer | null = null;
+
 function encKey(): Buffer {
-  const secret = process.env.APP_SECRET || "insecure-dev-secret-change-me";
-  // Derive a 32-byte key deterministically from APP_SECRET.
-  return scryptSync(secret, "provider-secrets-v1", 32);
+  if (cachedKey) return cachedKey;
+  const secret = process.env.APP_SECRET;
+  // Provider keys are only as safe as APP_SECRET: a known fallback would let
+  // anyone with a DB dump decrypt them, so production refuses to run without it.
+  if (!secret) {
+    if (process.env.NODE_ENV === "production") throw new Error("APP_SECRET is required to encrypt provider keys");
+    console.warn("[secrets] APP_SECRET is not set — using an insecure development key");
+  }
+  // Derive a 32-byte key deterministically from APP_SECRET (scrypt is ~50-100ms,
+  // so the derived key is memoised for the life of the process).
+  cachedKey = scryptSync(secret || "insecure-dev-secret-change-me", "provider-secrets-v1", 32);
+  return cachedKey;
 }
 
 function encrypt(plaintext: string): string {

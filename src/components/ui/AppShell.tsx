@@ -24,6 +24,7 @@ import {
   Menu,
   X,
   Brain,
+  BrainCircuit,
   PlusCircle,
   Lightbulb,
   Tags,
@@ -74,6 +75,7 @@ const NAV_GROUPS: NavGroup[] = [
   {
     title: "AI Brain",
     items: [
+      { href: "/dashboard/brain", label: "Brain overview", icon: BrainCircuit },
       { href: "/dashboard/knowledge/add", label: "Add knowledge", icon: PlusCircle },
       { href: "/dashboard/knowledge", label: "Knowledge objects", icon: Brain },
       { href: "/dashboard/learning", label: "Learning Lab", icon: Lightbulb },

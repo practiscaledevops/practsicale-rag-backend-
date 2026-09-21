@@ -30,6 +30,8 @@ import { embed } from "@/lib/embeddings";
 import { loadSettings, type RagSettings } from "@/lib/settings";
 import { getActivePrompts } from "@/lib/prompts-db";
 import { ingestOne, reingestDocument } from "@/lib/ingest";
+import { waitUntil } from "@vercel/functions";
+import { suggestLearningFollowups } from "@/lib/learning-followup";
 import {
   DOMAINS,
   PLATFORMS,
@@ -1416,6 +1418,15 @@ export async function compileKnowledge(db: SupabaseClient, input: CompileInput):
 
     await logDecision(db, orgId, { runId: input.runId, objectId: object.id, stage: "persist", decision: dedup.decision === "conflict" ? "new_conflict" : "new", input: { ref }, output: { documentId: doc.documentId, rawDocumentId, chunks: doc.chunks } });
     await flushLog(db, orgId, input.runId ?? null, object.id, log);
+
+    // New reality may be the evidence an open experiment is waiting for: suggest
+    // follow-ups (never confirmed) without holding the commit.
+    if (draft.intelligence_class === "business_reality") {
+      // Registered with waitUntil: on Vercel the instance freezes once the
+      // response is sent, so a bare fire-and-forget promise would often never
+      // finish. Outside a request context (CLI scripts) it simply runs.
+      waitUntil(suggestLearningFollowups(db, orgId, object.id, { embedding: objEmbedding, settings, runId: input.runId }).catch(() => {}));
+    }
 
     const final = await getObject(db, orgId, object.id, false);
     return { ...preview, draft: { ...draft, ref }, object: final ?? object, documentId: doc.documentId, rawDocumentId, chunks: doc.chunks };

@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Plus, Check, X, Award, Lightbulb } from "lucide-react";
+import { Plus, Check, X, Award, Lightbulb, Link2, Calculator, Sparkles } from "lucide-react";
 import { LEARNING_RECORD_TYPES, LEARNING_STATUSES, humanize } from "@/lib/intelligence-taxonomy";
 import { C, Chip, KBtn, KInput, KSelect, KTextarea, KTabs, KTable, Th, Td, Field, Panel, Empty, Spinner, ErrorNote, StatBox, fmtDate, api } from "@/components/ui/brain-ui";
 
@@ -24,13 +24,24 @@ interface Item {
   };
   object: { id: string; ref: string; name: string; summary: string | null; internal_validation: string; founder_endorsement: string | null } | null;
 }
+/** New evidence the Brain thinks belongs to an open record (a suggested `evidence_for` edge). */
+interface Followup {
+  edgeId: string;
+  confidence: number | null;
+  reason: string | null;
+  createdAt: string;
+  evidence: { id: string; ref: string; name: string; summary: string | null; domain: string; documentId: string | null };
+  record: { id: string; objectId: string; ref: string; name: string; recordType: string; lifecycleStatus: string; department: string | null };
+}
 interface Resp {
   items: Item[];
   counts: { byType: Record<string, number>; byStatus: Record<string, number> };
   suggestedEdges: { source_object_id: string; target_object_id: string; relationship_type: string }[];
+  followups?: Followup[];
   error?: string;
   migrationMissing?: boolean;
 }
+type FollowupAction = "attach_evidence" | "compute_result" | "ignore";
 
 const TYPE_ORDER = ["experiment", "implementation", "decision", "result", "learning", "adaptation", "postmortem", "standard"];
 
@@ -41,6 +52,8 @@ export function LearningLabClient() {
   const [status, setStatus] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [recording, setRecording] = React.useState(false);
+  const [computing, setComputing] = React.useState<string | null>(null);
+  const [notice, setNotice] = React.useState<string | null>(null);
 
   const load = React.useCallback(async () => {
     try {
@@ -68,11 +81,72 @@ export function LearningLabClient() {
     }
   }
 
+  async function followup(action: FollowupAction, f: Followup) {
+    setBusy(true);
+    if (action === "compute_result") setComputing(f.edgeId);
+    setNotice(null);
+    try {
+      const r = await api<{ result?: { ref: string }; computed?: { via: "llm" | "fallback"; confidence: string } }>("/api/admin/knowledge/learning", {
+        method: "POST",
+        body: JSON.stringify({ action, edgeId: f.edgeId }),
+      });
+      if (action === "attach_evidence") setNotice(`${f.evidence.ref} attached as evidence to ${f.record.ref}.`);
+      if (action === "compute_result" && r.result) {
+        setNotice(
+          r.computed?.via === "fallback"
+            ? `${r.result.ref} proposed from ${f.evidence.ref} without a model — fill in the numbers, then validate.`
+            : `${r.result.ref} proposed from ${f.evidence.ref} (confidence ${r.computed?.confidence ?? "low"}) — review and validate.`
+        );
+      }
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Action failed");
+    } finally {
+      setBusy(false);
+      setComputing(null);
+    }
+  }
+
   const counts = data?.counts.byType ?? {};
   const openDecisions = data?.items.filter((i) => i.record.record_type === "decision" && ["open", "proposed", "implementing"].includes(i.record.lifecycle_status)).length ?? 0;
+  const followups = data?.followups ?? [];
 
   return (
     <div className="space-y-4">
+      {followups.length > 0 && (
+        <Panel
+          title={<span className="inline-flex items-center gap-1.5"><Sparkles size={14} style={{ color: C.amber }} /> The Brain found evidence that may relate to an open experiment</span>}
+          subtitle="New Business Reality that looks like it belongs to a decision, implementation or experiment you are still following. Nothing is linked until you confirm."
+        >
+          <div className="space-y-2">
+            {followups.map((f) => (
+              <div key={f.edgeId} className="flex flex-wrap items-center gap-3 rounded-lg px-3 py-2" style={{ background: C.raised, border: `1px solid ${C.border}` }}>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                    <Link href={`/dashboard/knowledge/${f.evidence.id}`} className="font-mono" style={{ color: C.green }}>{f.evidence.ref}</Link>
+                    <span className="font-medium" style={{ color: C.text }}>{f.evidence.name}</span>
+                    <span style={{ color: C.muted }}>→ may be evidence for</span>
+                    <Link href={`/dashboard/knowledge/${f.record.objectId}`} className="font-mono" style={{ color: C.green }}>{f.record.ref}</Link>
+                    <span className="font-medium" style={{ color: C.text }}>{f.record.name}</span>
+                    <Chip tone="violet">{humanize(f.record.recordType)}</Chip>
+                    <Chip tone="amber">{humanize(f.record.lifecycleStatus)}</Chip>
+                    {f.confidence != null && <Chip tone="muted" title="Match score">{Math.round(f.confidence * 100)}%</Chip>}
+                  </div>
+                  {f.evidence.summary && <div className="line-clamp-1 text-xs" style={{ color: C.muted }}>{f.evidence.summary}</div>}
+                  {f.reason && <div className="text-[11px]" style={{ color: C.muted }}>{f.reason}</div>}
+                </div>
+                <div className="flex shrink-0 flex-wrap gap-1">
+                  <KBtn size="xs" disabled={busy} onClick={() => followup("attach_evidence", f)} title="Confirm the link and add this document to the record's evidence"><Link2 size={12} /> Attach evidence</KBtn>
+                  <KBtn size="xs" variant="primary" disabled={busy} loading={computing === f.edgeId} onClick={() => followup("compute_result", f)} title="Attach the evidence and propose a Result record from it (you validate it)"><Calculator size={12} /> Compute result</KBtn>
+                  <KBtn size="xs" variant="ghost" disabled={busy} onClick={() => followup("ignore", f)} title="Not related"><X size={12} /> Ignore</KBtn>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+      {notice && <div className="rounded-lg px-3 py-2 text-xs" style={{ color: C.restricted, background: "rgba(148,220,167,0.10)", border: "1px solid rgba(148,220,167,0.35)" }}>{notice}</div>}
+
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
         <StatBox label="Experiments" value={counts.experiment ?? 0} />
         <StatBox label="Implementations" value={counts.implementation ?? 0} />

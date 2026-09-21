@@ -47,4 +47,9 @@ describe("narrowScope (role-based knowledge partitioning)", () => {
     const s = narrowScope(key({ collection_ids: [] }), { collectionIds: ["c1"] });
     expect(s.collectionIds).toEqual(["c1"]);
   });
+
+  it("an empty collection intersection uses the nil uuid (the SQL parameter is uuid[])", () => {
+    const s = narrowScope(key({ collection_ids: ["c1"] }), { collectionIds: ["c2"] });
+    expect(s.collectionIds).toEqual(["00000000-0000-0000-0000-000000000000"]);
+  });
 });

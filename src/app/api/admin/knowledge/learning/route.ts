@@ -1,6 +1,8 @@
 // /api/admin/knowledge/learning — the Learning Lab (Organizational Learning).
-//   GET   → records joined with their objects + counts by type/status
+//   GET   → records joined with their objects + counts by type/status + the
+//           follow-up queue (new evidence the Brain thinks belongs to an open record)
 //   POST  → record a learning / experiment / decision manually (compiled like any object)
+//           or a follow-up action: { action: "attach_evidence" | "compute_result" | "ignore", edgeId }
 //   PATCH → { id, lifecycleStatus?, department?, owner?, confidence?, metricsBefore?,
 //             metricsAfter?, evidenceDocumentIds?, missingEvidence?, parentRecordId?,
 //             action?: "promote_standard" (playbookRefs?) | "validate" | "reject" }
@@ -9,6 +11,17 @@ import { supabaseAdmin } from "@/lib/supabase";
 import { compileKnowledge } from "@/lib/knowledge-compiler";
 import { getObjectByRef, upsertRelationship, logDecision, OBJECT_COLUMNS } from "@/lib/knowledge-store";
 import { LEARNING_RECORD_TYPES, LEARNING_STATUSES } from "@/lib/intelligence-taxonomy";
+import { loadSettings } from "@/lib/settings";
+import {
+  listFollowupQueue,
+  loadFollowupContext,
+  attachEvidence,
+  ignoreFollowup,
+  computeResultFromEvidence,
+  resultRecordMarkdown,
+  metricsAfterObject,
+} from "@/lib/learning-followup";
+import type { AdminSession } from "@/lib/auth/session";
 import { guard, dbError, objectStubs, str, strOrNull, strList } from "../_shared";
 
 export const runtime = "nodejs";
@@ -45,10 +58,13 @@ export async function GET(req: Request) {
     const { data: suggested } = objIds.length
       ? await db.from("knowledge_relationships").select("source_object_id, target_object_id, relationship_type, confidence").eq("org_id", admin.orgId).eq("status", "suggested").in("source_object_id", objIds)
       : { data: [] };
+    // The follow-up queue is independent of the type/status filter (like the counts).
+    const followups = await listFollowupQueue(db, admin.orgId);
     return Response.json({
       items: records.map((r) => ({ record: r, object: byId.get(r.object_id) ?? null })),
       counts: { byType, byStatus },
       suggestedEdges: suggested ?? [],
+      followups,
     });
   } catch (e) {
     return dbError(e);
@@ -60,6 +76,8 @@ export async function POST(req: Request) {
   if ("response" in g) return g.response;
   const { admin } = g;
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const followupAction = str(body.action, 30);
+  if (followupAction) return followup(admin, followupAction, str(body.edgeId, 64));
   const kind = LEARNING_RECORD_TYPES.includes(str(body.kind, 40)) ? str(body.kind, 40) : "learning";
   const title = str(body.title, 200);
   const change = str(body.change, 8000);
@@ -116,6 +134,100 @@ export async function POST(req: Request) {
     });
     if (res.blocked) return Response.json({ error: res.blocked.reason }, { status: 422 });
     return Response.json({ ok: true, object: res.object, ref: res.object?.ref ?? null });
+  } catch (e) {
+    return dbError(e);
+  }
+}
+
+/**
+ * The follow-up queue actions on a suggested `evidence_for` edge:
+ *   attach_evidence → confirm the edge, add the document to the record's evidence,
+ *                     implementing → measuring
+ *   compute_result  → attach, then compare the record (changes + metrics before)
+ *                     with the evidence and propose a child Result record
+ *                     (status proposed, RES ref, `produced_result` edge)
+ *   ignore          → reject the edge (not proposed again)
+ */
+async function followup(admin: AdminSession, action: string, edgeId: string): Promise<Response> {
+  if (!["attach_evidence", "compute_result", "ignore"].includes(action)) return Response.json({ error: "Unknown action" }, { status: 400 });
+  if (!edgeId) return Response.json({ error: "edgeId required" }, { status: 400 });
+  const db = supabaseAdmin();
+  try {
+    const ctx = await loadFollowupContext(db, admin.orgId, edgeId);
+    if (!ctx) return Response.json({ error: "Not found" }, { status: 404 });
+
+    // Only a live suggestion can be dismissed; a confirmed edge is evidence the
+    // record already relies on (two reviewers, or a stale queue).
+    if (action === "ignore") {
+      if (ctx.edge.status !== "suggested") return Response.json({ error: "This suggestion was already reviewed." }, { status: 409 });
+      await ignoreFollowup(db, admin.orgId, ctx, admin.email);
+      return Response.json({ ok: true });
+    }
+    if (ctx.edge.status === "rejected") return Response.json({ error: "This suggestion was ignored earlier." }, { status: 409 });
+
+    const record = await attachEvidence(db, admin.orgId, ctx, admin.email);
+    if (action === "attach_evidence") return Response.json({ ok: true, record });
+
+    // compute_result — idempotent: a Result already computed from this evidence
+    // (a retry after a failed compile, or a second reviewer) is returned, not duplicated.
+    const { data: prior } = await db
+      .from("knowledge_relationships")
+      .select("source_object_id")
+      .eq("org_id", admin.orgId)
+      .eq("relationship_type", "uses_evidence")
+      .eq("target_object_id", ctx.evidence.id)
+      .eq("status", "confirmed")
+      .limit(1)
+      .maybeSingle();
+    if (prior?.source_object_id) {
+      return Response.json({ ok: true, existing: true, resultObjectId: prior.source_object_id as string });
+    }
+    const { settings } = await loadSettings(admin.orgId, db);
+    const computed = await computeResultFromEvidence({ record, recordObject: ctx.recordObject, evidence: ctx.evidence, tier: settings.intelligence.compileTier });
+    const { name, markdown } = resultRecordMarkdown({ record, recordObject: ctx.recordObject, evidence: ctx.evidence, computed });
+    const res = await compileKnowledge(db, {
+      orgId: admin.orgId,
+      intelligenceClass: "organizational_learning",
+      text: markdown,
+      title: name,
+      mode: "commit",
+      forceNew: true,
+      storeRaw: false,
+      createdBy: admin.email,
+      hints: {
+        objectType: "result",
+        learning: {
+          recordType: "result",
+          lifecycleStatus: "proposed",
+          department: record.department,
+          owner: record.owner,
+          relatedPlaybookRefs: record.related_playbook_refs ?? [],
+          metricsBefore: record.metrics_before ?? {},
+          metricsAfter: metricsAfterObject(computed.metricsAfter),
+          confidence: computed.confidence,
+          evidenceDocumentIds: ctx.evidence.document_id ? [ctx.evidence.document_id] : [],
+          parentRecordId: record.id,
+          source: "auto",
+        },
+      },
+    });
+    if (res.blocked || !res.object) return Response.json({ error: res.blocked?.reason ?? "Result could not be saved" }, { status: 422 });
+    await upsertRelationship(db, admin.orgId, { sourceId: ctx.recordObject.id, type: "produced_result", targetId: res.object.id, status: "confirmed", origin: "system", note: `Computed from ${ctx.evidence.ref}` });
+    await upsertRelationship(db, admin.orgId, { sourceId: res.object.id, type: "uses_evidence", targetId: ctx.evidence.id, status: "confirmed", origin: "system" });
+    await logDecision(db, admin.orgId, {
+      objectId: res.object.id,
+      stage: "learning",
+      decision: "result_computed",
+      input: { record: record.id, recordRef: ctx.recordObject.ref, evidenceRef: ctx.evidence.ref, tier: settings.intelligence.compileTier },
+      output: { ref: res.object.ref, via: computed.via, confidence: computed.confidence, metricsAfter: computed.metricsAfter, by: admin.email },
+      model: computed.model,
+    });
+    return Response.json({
+      ok: true,
+      record,
+      result: { id: res.object.id, ref: res.object.ref, name: res.object.name },
+      computed: { via: computed.via, model: computed.model, confidence: computed.confidence, summary: computed.summary, metricsAfter: computed.metricsAfter },
+    });
   } catch (e) {
     return dbError(e);
   }

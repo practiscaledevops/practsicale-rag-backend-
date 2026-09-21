@@ -54,6 +54,13 @@ export async function objectStubs(orgId: string, ids: string[]): Promise<Record<
 export function str(v: unknown, max = 2000): string {
   return typeof v === "string" ? v.trim().slice(0, max) : "";
 }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** A uuid from a route/query/body value, or "" — ids are interpolated into PostgREST filters, so never pass free text. */
+export function uuid(v: unknown): string {
+  const s = str(v, 64);
+  return UUID_RE.test(s) ? s.toLowerCase() : "";
+}
 export function strOrNull(v: unknown, max = 2000): string | null {
   const s = str(v, max);
   return s ? s : null;

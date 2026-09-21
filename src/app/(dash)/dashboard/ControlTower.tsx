@@ -4,9 +4,10 @@
 // (Team) over the same live, org-scoped data fetched server-side. Presentational
 // only — every number comes from the server; this just arranges it.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
+  BrainCircuit,
   FileText,
   PhoneCall,
   Layers,
@@ -23,8 +24,10 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/Card";
+import { Skeleton } from "@/components/ui/brain-ui";
 import { cn } from "@/lib/utils";
 import type { ControlTowerData } from "@/lib/dashboard-metrics";
+import type { BrainOverview } from "@/lib/brain-overview";
 
 const num = (v: number | null) => (v === null ? "—" : v.toLocaleString());
 const money = (v: number) =>
@@ -86,6 +89,9 @@ export function ControlTower({ data, email }: { data: ControlTowerData; email: s
           ))}
         </div>
       </div>
+
+      {/* AI Brain at a glance (CEO view) — live from the overview endpoint */}
+      {view === "ceo" && <BrainCard />}
 
       {/* Top metric cards */}
       {view === "ceo" ? (
@@ -225,6 +231,54 @@ export function ControlTower({ data, email }: { data: ControlTowerData; email: s
 
       <p className="text-xs text-muted-foreground">Signed in as {email}</p>
     </div>
+  );
+}
+
+/** Compact "AI Brain" strip: four headline numbers fetched client-side + a link to the full overview. */
+function BrainCard() {
+  const [brain, setBrain] = useState<BrainOverview | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/admin/knowledge/overview", { cache: "no-store" })
+      .then((r) => (r.ok ? (r.json() as Promise<BrainOverview>) : Promise.reject(new Error(String(r.status)))))
+      .then((d) => { if (!cancelled) setBrain(d); })
+      .catch(() => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const loading = !brain && !failed;
+  const cells: { label: string; value: number | null | undefined }[] = [
+    { label: "Objects", value: brain?.objects?.total },
+    { label: "Learnings", value: brain?.learning?.total },
+    { label: "Relationships", value: brain?.graph?.relationships.confirmed },
+    { label: "Metrics", value: brain?.performance?.metrics },
+  ];
+
+  return (
+    <Card>
+      <CardContent className="flex flex-wrap items-center gap-4 p-4">
+        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-accent/15 text-accent">
+          <BrainCircuit className="h-4 w-4" aria-hidden />
+        </span>
+        <div className="min-w-0">
+          <p className="text-sm font-semibold">AI Brain</p>
+          <p className="text-xs text-muted-foreground">What the Brain knows, trusts and has learned</p>
+        </div>
+        <div className="grid flex-1 grid-cols-2 gap-3 sm:grid-cols-4 sm:pl-4">
+          {cells.map((c) => (
+            <div key={c.label}>
+              {loading ? <Skeleton className="h-6 w-14" /> : <p className="text-xl font-semibold tabular-nums">{num(c.value ?? null)}</p>}
+              <p className="text-[11px] text-muted-foreground">{c.label}</p>
+            </div>
+          ))}
+        </div>
+        <Link href="/dashboard/brain" className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-accent transition-colors hover:bg-surface-muted">
+          Open Brain overview <ArrowRight size={12} aria-hidden />
+        </Link>
+      </CardContent>
+    </Card>
   );
 }
 

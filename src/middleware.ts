@@ -8,11 +8,13 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import { isDemo } from "@/lib/demo/mode";
 
 export async function middleware(req: NextRequest) {
   // DEMO MODE: no Supabase session — let every route through (getAdmin() returns
-  // the demo admin, so the dashboard renders).
-  if (process.env.NEXT_PUBLIC_DEMO_MODE === "1" || process.env.DEMO_MODE === "1") {
+  // the demo admin, so the dashboard renders). isDemo() ignores the client flag
+  // in production builds, so a leaked NEXT_PUBLIC_DEMO_MODE can't open the gate.
+  if (isDemo()) {
     return NextResponse.next({ request: req });
   }
 

@@ -16,7 +16,9 @@ import { checkRateLimit, rateLimitHeaders } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
-export const maxDuration = 30;
+// Query rewrite + LLM rerank over 40 passages + two DB passes per sub-query can
+// exceed 30s on a cold function.
+export const maxDuration = 60;
 
 export async function POST(req: Request) {
   let ctx;
@@ -67,17 +69,32 @@ export async function POST(req: Request) {
     settings: effective,
   });
 
-  return Response.json({
-    query: effectiveQuery,
-    rewritten,
-    confidence,
-    results: chunks.map((c) => ({
-      id: c.id,
-      content: c.content,
-      source_type: c.source_type ?? null,
-      document_id: c.document_id,
-      metadata: c.metadata,
-      score: c.score ?? null,
-    })),
-  });
+  return Response.json(
+    {
+      query: effectiveQuery,
+      rewritten,
+      confidence,
+      results: chunks.map((c) => ({
+        id: c.id,
+        content: c.content,
+        source_type: c.source_type ?? null,
+        document_id: c.document_id,
+        metadata: publicMetadata(c.metadata),
+        score: c.score ?? null,
+      })),
+    },
+    { headers: rateLimitHeaders(rl) }
+  );
+}
+
+// Chunk metadata carries internal provenance (who uploaded it) that a spoke
+// has no business seeing; keep the record/structural fields only.
+const INTERNAL_METADATA_KEYS = new Set(["uploaded_by", "created_by", "member_id", "admin_email"]);
+function publicMetadata(meta: unknown): Record<string, unknown> | null {
+  if (!meta || typeof meta !== "object") return null;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(meta as Record<string, unknown>)) {
+    if (!INTERNAL_METADATA_KEYS.has(k)) out[k] = v;
+  }
+  return out;
 }

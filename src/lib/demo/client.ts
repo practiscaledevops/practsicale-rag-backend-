@@ -6,7 +6,7 @@
 import { demoStore, DEMO_USER_ID, DEMO_ORG_ID } from "./fixtures";
 
 type Row = Record<string, any>;
-type Filter = { col: string; op: "eq" | "in" | "is" | "gte" | "lte"; val: any };
+type Filter = { col: string; op: "eq" | "in" | "is" | "gte" | "lte" | "neq" | "gt" | "lt"; val: any };
 
 const genId = () => "demo-" + Math.random().toString(36).slice(2, 10);
 
@@ -59,6 +59,20 @@ class Query implements PromiseLike<{ data: any; error: any; count?: number }> {
   is(col: string, val: any) { this.filters.push({ col, op: "is", val }); return this; }
   gte(col: string, val: any) { this.filters.push({ col, op: "gte", val }); return this; }
   lte(col: string, val: any) { this.filters.push({ col, op: "lte", val }); return this; }
+  neq(col: string, val: any) { this.filters.push({ col, op: "neq", val }); return this; }
+  gt(col: string, val: any) { this.filters.push({ col, op: "gt", val }); return this; }
+  lt(col: string, val: any) { this.filters.push({ col, op: "lt", val }); return this; }
+  // Filters the in-memory demo doesn't model are accepted as no-ops (match all)
+  // so pages that use them still render instead of throwing "x is not a function".
+  not() { return this; }
+  or() { return this; }
+  ilike() { return this; }
+  like() { return this; }
+  contains() { return this; }
+  overlaps() { return this; }
+  textSearch() { return this; }
+  filter() { return this; }
+  range() { return this; }
   match(obj: Row) { for (const k of Object.keys(obj)) this.filters.push({ col: k, op: "eq", val: obj[k] }); return this; }
   order(col: string, opts?: { ascending?: boolean }) { this._orders.push({ col, asc: opts?.ascending !== false }); return this; }
   limit(n: number) { this._limit = n; return this; }
@@ -72,6 +86,9 @@ class Query implements PromiseLike<{ data: any; error: any; count?: number }> {
         case "is": return v === f.val || (f.val === null && (v === null || v === undefined));
         case "gte": return v >= f.val;
         case "lte": return v <= f.val;
+        case "neq": return v !== f.val;
+        case "gt": return v > f.val;
+        case "lt": return v < f.val;
         default: return true;
       }
     });

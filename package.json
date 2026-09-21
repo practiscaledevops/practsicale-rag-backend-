@@ -26,6 +26,7 @@
     "@ai-sdk/openai": "^1.0.0",
     "@supabase/ssr": "^0.5.1",
     "@supabase/supabase-js": "^2.45.0",
+    "@vercel/functions": "^3.9.8",
     "ai": "^4.0.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.454.0",

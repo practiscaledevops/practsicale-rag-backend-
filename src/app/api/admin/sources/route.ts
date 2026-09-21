@@ -12,6 +12,7 @@
 
 import { supabaseAdmin } from "@/lib/supabase";
 import { requireAdmin, AdminAuthError } from "@/lib/auth/admin";
+import { isAllowedSecretRef, SECRET_REF_RULE } from "@/lib/connectors/secret-ref";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
@@ -117,12 +118,17 @@ export async function POST(req: Request) {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return Response.json({ error: "endpoint_url must be http(s)" }, { status: 400 });
   }
-  // Any auth beyond 'none' needs the env-var reference that holds the secret.
+  // Any auth beyond 'none' needs the env-var reference that holds the secret —
+  // and it may only name a connector credential, never a platform secret (the
+  // runner would otherwise send that secret to whatever endpoint_url says).
   if (authType !== "none" && !authSecretRef) {
     return Response.json(
       { error: "auth_secret_ref (the server env-var name that holds the secret) is required for this auth type" },
       { status: 400 }
     );
+  }
+  if (authSecretRef && !isAllowedSecretRef(authSecretRef)) {
+    return Response.json({ error: SECRET_REF_RULE }, { status: 400 });
   }
 
   const db = supabaseAdmin();

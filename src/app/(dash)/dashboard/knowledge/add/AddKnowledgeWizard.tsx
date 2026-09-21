@@ -5,14 +5,17 @@
 //      Intelligence (+ Organizational Learning / Performance Memory pointers),
 //      then CLASSIFICATION: Auto (the Brain decides) or choose Domain → Type →
 //      Subtype yourself — every value in the taxonomy, plus "+ New" for each.
-//   2. The source (paste or file) + light provenance hints
+//   2. The source — paste text, upload a file (PDF / text / audio / screenshot)
+//      or give a link / YouTube video; the Brain extracts the text itself via
+//      /api/admin/knowledge/extract — + light provenance hints (pre-filled
+//      from the extraction where known)
 //   3. The compiler's proposal: taxonomy, governance, dedup verdict, entities,
 //      relationships and the compiled markdown — every field editable
 //   4. Saved: ref + links
 
 import * as React from "react";
 import Link from "next/link";
-import { BookOpen, Building2, Globe2, Upload, ArrowLeft, ArrowRight, Check, AlertTriangle, Sparkles, Lightbulb, LineChart, Plus, Wand2, ListChecks } from "lucide-react";
+import { BookOpen, Building2, Globe2, ArrowLeft, ArrowRight, Check, AlertTriangle, Sparkles, Lightbulb, LineChart, Plus, Wand2, ListChecks, ClipboardPaste, FileUp, Link2, Youtube } from "lucide-react";
 import {
   DOMAINS,
   REALITY_BUCKETS,
@@ -36,8 +39,29 @@ import {
   type RealityBucket,
 } from "@/lib/intelligence-taxonomy";
 import { C, Chip, KBtn, KInput, KSelect, KTextarea, Field, Panel, ErrorNote, Spinner, api, type SelectOption } from "@/components/ui/brain-ui";
+import { kindOfFile, isYouTubeUrl, fmtBytes, PROGRESS_LABEL, type ExtractKind } from "@/lib/ingest-adapters/pure";
 
 type Step = 1 | 2 | 3 | 4;
+type SourceMode = "paste" | "file" | "link";
+
+/** What /api/admin/knowledge/extract returns (text kept in the textarea, the rest shown as chips). */
+interface ExtractInfo {
+  name: string;
+  kind: ExtractKind;
+  title: string | null;
+  chars: number;
+  truncated: boolean;
+  meta: { source_type?: string; source_platform?: string; source_url?: string; duration_s?: number; pages?: number };
+  /** Upload size, for the chip (files only). */
+  size?: number;
+}
+interface ExtractResponse extends ExtractInfo {
+  text: string;
+  error?: string;
+}
+
+const KIND_LABEL: Record<ExtractKind, string> = { url: "Web page", youtube: "YouTube", pdf: "PDF", audio: "Audio transcript", image: "Screenshot", text: "Text file" };
+const FILE_ACCEPT = ".pdf,.txt,.text,.md,.markdown,.csv,.json,.mp3,.m4a,.wav,.mp4,.webm,.ogg,.mpeg,.mpga,audio/*,.png,.jpg,.jpeg,.webp,.gif,image/*";
 
 interface Draft {
   ref: string;
@@ -125,7 +149,12 @@ export function AddKnowledgeWizard() {
   const [cls, setCls] = React.useState<IntelligenceClass | null>(null);
   const [bucket, setBucket] = React.useState<RealityBucket | null>(null);
   const [text, setText] = React.useState("");
-  const [file, setFile] = React.useState<File | null>(null);
+  // Source step: paste, or let the Brain extract the text from a file / link.
+  const [sourceMode, setSourceMode] = React.useState<SourceMode>("paste");
+  const [link, setLink] = React.useState("");
+  const [extracting, setExtracting] = React.useState<ExtractKind | null>(null);
+  const [extractError, setExtractError] = React.useState<string | null>(null);
+  const [extracted, setExtracted] = React.useState<ExtractInfo | null>(null);
   const [title, setTitle] = React.useState("");
   const [hints, setHints] = React.useState({ sourceExpert: "", sourcePlatform: "", sourceType: "", sourceUrl: "", sourceDate: "", isFounderVoice: false });
   // Classification: Auto (the Brain decides) or the human's own Domain → Type → Subtype.
@@ -172,7 +201,60 @@ export function AddKnowledgeWizard() {
     [hints, classify, pick]
   );
 
-  const canContinue2 = !!cls && (cls !== "business_reality" || !!bucket) && (text.trim().length > 20 || !!file);
+  const canContinue2 = !!cls && (cls !== "business_reality" || !!bucket) && text.trim().length > 20 && !extracting;
+
+  /** Extracted text → the textarea; provenance → the hint fields that are still empty (a human's choice is never overwritten). */
+  function applyExtracted(res: ExtractResponse, size?: number) {
+    setText(res.text);
+    setExtracted({ name: res.name, kind: res.kind, title: res.title, chars: res.chars, truncated: res.truncated, meta: res.meta ?? {}, size });
+    setHints((h) => ({
+      ...h,
+      sourceUrl: h.sourceUrl || res.meta?.source_url || "",
+      sourcePlatform: h.sourcePlatform || res.meta?.source_platform || "",
+      sourceType: h.sourceType || res.meta?.source_type || "",
+    }));
+    const nameHint = res.kind === "url" || res.kind === "youtube" ? res.title || res.name : res.name;
+    setTitle((t) => (t.trim() ? t : nameHint));
+  }
+
+  async function extractFile(f: File) {
+    const kind = kindOfFile(f.name, f.type);
+    if (!kind) {
+      setExtractError(`Unsupported file type "${f.name}". Use a PDF, text (.txt .md .csv .json), audio (mp3, m4a, wav, mp4, webm, ogg) or an image (png, jpg, webp, gif).`);
+      return;
+    }
+    setExtracting(kind);
+    setExtractError(null);
+    setExtracted(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", f);
+      const r = await fetch("/api/admin/knowledge/extract", { method: "POST", body: fd });
+      const res = (await r.json().catch(() => ({}))) as ExtractResponse;
+      if (!r.ok) throw new Error(res.error ?? `Extraction failed (${r.status})`);
+      applyExtracted(res, f.size);
+    } catch (e) {
+      setExtractError(e instanceof Error ? e.message : "Extraction failed");
+    } finally {
+      setExtracting(null);
+    }
+  }
+
+  async function extractLink() {
+    const url = link.trim();
+    if (!url) return;
+    setExtracting(isYouTubeUrl(url) ? "youtube" : "url");
+    setExtractError(null);
+    setExtracted(null);
+    try {
+      const res = await api<ExtractResponse>("/api/admin/knowledge/extract", { method: "POST", body: JSON.stringify({ url }) });
+      applyExtracted(res);
+    } catch (e) {
+      setExtractError(e instanceof Error ? e.message : "Could not fetch the link");
+    } finally {
+      setExtracting(null);
+    }
+  }
 
   async function runPreview() {
     if (!cls) return;
@@ -181,26 +263,10 @@ export function AddKnowledgeWizard() {
     setBlocked(null);
     const h = effectiveHints();
     try {
-      let res: CompileResponse;
-      if (file) {
-        const fd = new FormData();
-        fd.append("file", file);
-        fd.append("mode", "preview");
-        fd.append("class", cls);
-        if (bucket) fd.append("bucket", bucket);
-        if (title) fd.append("title", title);
-        fd.append("hints", JSON.stringify(h));
-        if (confirmTruth) fd.append("confirmTruth", "true");
-        const r = await fetch("/api/admin/knowledge/compile", { method: "POST", body: fd });
-        res = (await r.json()) as CompileResponse;
-        if (!r.ok) throw new Error(res.error ?? "Compile failed");
-        if (res.draft?.teaching_core && !text) setText(res.draft.teaching_core);
-      } else {
-        res = await api<CompileResponse>("/api/admin/knowledge/compile", {
-          method: "POST",
-          body: JSON.stringify({ mode: "preview", class: cls, bucket, text, title, hints: h, confirmTruth }),
-        });
-      }
+      const res = await api<CompileResponse>("/api/admin/knowledge/compile", {
+        method: "POST",
+        body: JSON.stringify({ mode: "preview", class: cls, bucket, text, title, hints: h, confirmTruth }),
+      });
       if (res.blocked) {
         setBlocked(res.blocked.reason);
         return;
@@ -280,7 +346,8 @@ export function AddKnowledgeWizard() {
   }
 
   function reset() {
-    setStep(1); setCls(null); setBucket(null); setText(""); setFile(null); setTitle("");
+    setStep(1); setCls(null); setBucket(null); setText(""); setTitle("");
+    setSourceMode("paste"); setLink(""); setExtracting(null); setExtractError(null); setExtracted(null);
     setHints({ sourceExpert: "", sourcePlatform: "", sourceType: "", sourceUrl: "", sourceDate: "", isFounderVoice: false });
     setClassify("auto"); setPick({ domain: "", objectType: "", subtype: "" });
     setPreview(null); setDraft(null); setResult(null); setError(null); setBlocked(null); setForceNew(false); setConfirmTruth(false);
@@ -372,15 +439,62 @@ export function AddKnowledgeWizard() {
 
       {step === 2 && cls && (
         <div className="grid gap-4 lg:grid-cols-3">
-          <Panel className="lg:col-span-2" title="The source" subtitle="Paste the transcript, caption, article, report or note. Promotional noise is removed automatically; numbers and names are kept exactly.">
+          <Panel className="lg:col-span-2" title="The source" subtitle="Paste it, upload it or link it — the Brain extracts the text. Promotional noise is removed automatically; numbers and names are kept exactly.">
             <div className="space-y-3">
-              <KTextarea rows={14} value={text} onChange={(e) => setText(e.target.value)} placeholder="Paste the raw source here… (a canonical .md with frontmatter is also accepted)" disabled={!!file} />
-              <div className="flex flex-wrap items-center gap-3">
-                <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-xs" style={{ border: `1px dashed ${C.border}`, color: C.muted }}>
-                  <Upload size={14} /> {file ? file.name : "…or upload .md / .txt / .pdf / .csv"}
-                  <input type="file" accept=".md,.markdown,.txt,.text,.pdf,.csv,.json" className="hidden" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+              <SourceSwitch mode={sourceMode} setMode={(m) => { setSourceMode(m); setExtractError(null); }} disabled={!!extracting} />
+
+              {sourceMode === "file" && (
+                <label className="flex cursor-pointer flex-col items-center justify-center gap-1 rounded-lg px-4 py-5 text-center text-xs focus-within:ring-2 focus-within:ring-[#00BFAE]" style={{ border: `1px dashed ${extracting ? C.green : C.border}`, color: C.muted }}>
+                  <FileUp size={18} style={{ color: C.green }} />
+                  <span style={{ color: C.text }}>Choose a file — PDF · .txt .md .csv .json · audio (mp3, m4a, wav, mp4, webm, ogg) · image (png, jpg, webp, gif)</span>
+                  <span className="text-[11px]">Up to 4 MB per file (the hosting limit for a direct upload). Audio is transcribed; screenshots are read by the vision model.</span>
+                  {/* sr-only (not display:none) keeps the picker reachable from the keyboard. */}
+                  <input type="file" accept={FILE_ACCEPT} className="sr-only" disabled={!!extracting} onChange={(e) => { const f = e.target.files?.[0]; if (f) void extractFile(f); e.target.value = ""; }} />
                 </label>
-                {file && <KBtn size="xs" variant="ghost" onClick={() => setFile(null)}>Remove file</KBtn>}
+              )}
+
+              {sourceMode === "link" && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="min-w-0 flex-1">
+                    <KInput
+                      value={link}
+                      onChange={(e) => setLink(e.target.value)}
+                      placeholder="https://… — an article, a LinkedIn / Instagram / X post, or a YouTube video"
+                      disabled={!!extracting}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void extractLink(); } }}
+                    />
+                  </div>
+                  <KBtn variant="primary" loading={!!extracting} disabled={!link.trim() || !!extracting} onClick={extractLink}>
+                    {isYouTubeUrl(link) ? <Youtube size={14} /> : <Link2 size={14} />} Fetch
+                  </KBtn>
+                </div>
+              )}
+
+              <div aria-live="polite">
+                {extracting && <Spinner label={PROGRESS_LABEL[extracting]} />}
+                <ErrorNote message={extractError} />
+              </div>
+              {extracted && !extracting && (
+                <div className="flex flex-wrap items-center gap-1.5 text-xs" style={{ color: C.muted }}>
+                  <Chip tone="green"><Check size={11} /> {KIND_LABEL[extracted.kind]}</Chip>
+                  <span className="max-w-[24rem] truncate" title={extracted.name} style={{ color: C.text }}>{extracted.name}</span>
+                  {typeof extracted.size === "number" && <Chip tone="muted">{fmtBytes(extracted.size)}</Chip>}
+                  {extracted.meta.pages ? <Chip tone="muted">{extracted.meta.pages} pages</Chip> : null}
+                  {extracted.meta.duration_s ? <Chip tone="muted">{fmtDuration(extracted.meta.duration_s)}</Chip> : null}
+                  {extracted.meta.source_platform && <Chip tone="info">{humanize(extracted.meta.source_platform)}</Chip>}
+                  {extracted.truncated && <Chip tone="amber"><AlertTriangle size={11} /> Trimmed to 60,000 characters</Chip>}
+                  <button type="button" className="underline" onClick={() => { setExtracted(null); setText(""); }}>clear</button>
+                </div>
+              )}
+
+              <KTextarea
+                rows={14}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder={sourceMode === "paste" ? "Paste the raw source here… (a canonical .md with frontmatter is also accepted)" : "The extracted text appears here — trim it before compiling if you like."}
+                disabled={!!extracting}
+              />
+              <div className="flex flex-wrap items-center gap-3">
                 <span className="ml-auto text-xs" style={{ color: C.muted }}>{text.length.toLocaleString()} chars</span>
               </div>
               <Field label="Title (optional)"><KInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Leave empty to let the Brain name it" /></Field>
@@ -491,6 +605,35 @@ export function AddKnowledgeWizard() {
           </div>
         </Panel>
       )}
+    </div>
+  );
+}
+
+function fmtDuration(s: number): string {
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}:${String(sec).padStart(2, "0")}` : `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+const SOURCE_MODES: { id: SourceMode; icon: React.ReactNode; title: string; hint: string }[] = [
+  { id: "paste", icon: <ClipboardPaste size={15} />, title: "Paste text", hint: "A transcript, caption, article, report or note." },
+  { id: "file", icon: <FileUp size={15} />, title: "Upload a file", hint: "PDF, text, a voice note or call recording, a screenshot." },
+  { id: "link", icon: <Link2 size={15} />, title: "From a link", hint: "A web page, a public post, or a YouTube video (captions)." },
+];
+
+/** Segmented switch for how the source arrives (same look as the classification switch). */
+function SourceSwitch({ mode, setMode, disabled }: { mode: SourceMode; setMode: (m: SourceMode) => void; disabled?: boolean }) {
+  return (
+    <div className="flex flex-col gap-2 sm:flex-row">
+      {SOURCE_MODES.map((m) => {
+        const active = mode === m.id;
+        return (
+          <button key={m.id} type="button" disabled={disabled} onClick={() => setMode(m.id)} className="flex-1 rounded-lg px-3 py-2 text-left disabled:opacity-60" style={{ background: active ? "rgba(0,191,174,0.10)" : C.bg, border: `1px solid ${active ? C.green : C.border}` }}>
+            <div className="flex items-center gap-2 text-sm font-medium" style={{ color: active ? C.green : C.text }}>{m.icon}{m.title}</div>
+            <p className="text-xs" style={{ color: C.muted }}>{m.hint}</p>
+          </button>
+        );
+      })}
     </div>
   );
 }

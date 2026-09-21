@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { scoreCandidate, heuristicIntent, buildLaneContext, type ObjectMeta, type OrchestratedChunk } from "@/lib/orchestrator";
+import { scoreCandidate, heuristicIntent, buildLaneContext, pairConflicts, buildDisagreementsBlock, type ObjectMeta, type OrchestratedChunk } from "@/lib/orchestrator";
+import { metricEventRows, type MetricRow } from "@/lib/performance-memory";
 import { effectivePolicy } from "@/lib/work-modes";
 
 const policy = effectivePolicy("management_coach", ["management"]);
@@ -107,5 +108,88 @@ describe("lane-grouped context", () => {
     expect(ctx).toContain("[l1] ⟨LRN-004 · CRM redesign");
     expect(ctx).toContain("connected via MG-001");
     expect(ctx).toContain("[r1] ⟨business reality · document · Task breakdown⟩");
+  });
+});
+
+describe("known disagreements", () => {
+  const objects = new Map<string, Pick<ObjectMeta, "ref" | "name" | "authority">>([
+    ["q1", { ref: "BR-SAL-002", name: "Q1 close-rate summary", authority: "B3" }],
+    ["q2", { ref: "BR-SAL-004", name: "Q2 close-rate report", authority: "A2" }],
+    ["pb", { ref: "SAL-001", name: "Objection ladder", authority: "B2" }],
+  ]);
+
+  it("de-duplicates the compiler's both-way edges, drops edges leaving the context, higher authority first", () => {
+    const pairs = pairConflicts(
+      [
+        { source_object_id: "q1", target_object_id: "q2", note: "Q1 says 17.2%,   Q2 says 11.8%." },
+        { source_object_id: "q2", target_object_id: "q1", note: "Q1 says 17.2%, Q2 says 11.8%." },
+        { source_object_id: "q1", target_object_id: "outside", note: null },
+        { source_object_id: "pb", target_object_id: "pb", note: null },
+      ],
+      objects
+    );
+    expect(pairs).toEqual([
+      { a: { ref: "BR-SAL-004", name: "Q2 close-rate report", authority: "A2" }, b: { ref: "BR-SAL-002", name: "Q1 close-rate summary", authority: "B3" }, note: "Q1 says 17.2%, Q2 says 11.8%." },
+    ]);
+  });
+
+  it("ties on authority order by ref; an empty note becomes null", () => {
+    const tie = new Map<string, Pick<ObjectMeta, "ref" | "name" | "authority">>([
+      ["b", { ref: "MG-002", name: "B", authority: "B2" }],
+      ["a", { ref: "MG-001", name: "A", authority: "B2" }],
+    ]);
+    const pairs = pairConflicts([{ source_object_id: "b", target_object_id: "a", note: "   " }], tie);
+    expect(pairs[0].a.ref).toBe("MG-001");
+    expect(pairs[0].b.ref).toBe("MG-002");
+    expect(pairs[0].note).toBeNull();
+  });
+
+  it("formats one line per pair and is empty when there is nothing to say", () => {
+    expect(buildDisagreementsBlock([])).toBe("");
+    const block = buildDisagreementsBlock([
+      { a: { ref: "BR-SAL-004", name: "Q2 close-rate report", authority: "A2" }, b: { ref: "BR-SAL-002", name: "Q1 close-rate summary", authority: "B3" }, note: "Q1 says 17.2%, Q2 says 11.8%." },
+      { a: { ref: "MG-001", name: "A", authority: "B2" }, b: { ref: "MG-002", name: "B", authority: "B2" }, note: null },
+    ]);
+    expect(block.startsWith("### KNOWN DISAGREEMENTS")).toBe(true);
+    expect(block).toContain(
+      '- [BR-SAL-004] "Q2 close-rate report" (authority A2) disagrees with [BR-SAL-002] "Q1 close-rate summary" (authority B3) — Q1 says 17.2%, Q2 says 11.8%. Reason with the higher-authority, more current source and say that the other exists.'
+    );
+    expect(block).toContain('- [MG-001] "A" (authority B2) disagrees with [MG-002] "B" (authority B2). Reason with the higher-authority');
+    expect(block.split("\n").filter((l) => l.startsWith("- ")).length).toBe(2);
+  });
+});
+
+describe("performance rows → stream event", () => {
+  it("maps metric rows to the JSON-safe `performance` event shape", () => {
+    const rows: MetricRow[] = [
+      {
+        id: "m1",
+        metric_key: "close_rate",
+        label: "Close rate",
+        entity_id: null,
+        dimensions: { campaign: "nemt", cohort: 2, nested: { a: 1 }, flag: true, none: null },
+        period_start: "2026-04-01",
+        period_end: "2026-06-30",
+        value: "11.8" as unknown as number, // numeric comes back as text from PostgREST
+        unit: "%",
+        source: "manual",
+        object_id: null,
+        note: null,
+        created_at: "2026-07-01T00:00:00Z",
+      },
+    ];
+    expect(metricEventRows(rows)).toEqual([
+      {
+        key: "close_rate",
+        label: "Close rate",
+        value: 11.8,
+        unit: "%",
+        period_start: "2026-04-01",
+        period_end: "2026-06-30",
+        dimensions: { campaign: "nemt", cohort: 2, nested: '{"a":1}', flag: true, none: null },
+        source: "manual",
+      },
+    ]);
+    expect(metricEventRows([])).toEqual([]);
   });
 });

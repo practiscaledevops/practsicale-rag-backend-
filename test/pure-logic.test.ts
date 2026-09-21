@@ -22,8 +22,27 @@ describe("redactPII", () => {
     const out = redactPII("Reach John at john.doe@example.com or 415-555-0199; SSN 123-45-6789.");
     expect(out).toContain("[EMAIL]");
     expect(out).toContain("[SSN]");
+    expect(out).toContain("[PHONE]");
     expect(out).not.toContain("john.doe@example.com");
     expect(out).not.toContain("123-45-6789");
+    expect(out).not.toContain("415-555-0199");
+  });
+
+  it("masks international phones and Luhn-valid card numbers", () => {
+    expect(redactPII("call +92 300 123 4567 or (021) 3456-7890")).toBe("call [PHONE] or [PHONE]");
+    expect(redactPII("card 4111 1111 1111 1111 on file")).toBe("card [CARD] on file");
+  });
+
+  it("keeps dates, timestamps, times, scores and record ids intact", () => {
+    const s = "call_date 2026-03-12T10:30:00Z scored 29.6/100 on 12/03/2026 at 10:30; id 20260312001; ms 1710236400000; duration 00:12:45";
+    expect(redactPII(s)).toBe(s);
+  });
+
+  it("keeps numeric tables and counts that happen to sit near dates", () => {
+    const table = "Q1-Q3 scores 120 135 150 and phases 85 90 88 92 by quarter";
+    expect(redactPII(table)).toBe(table);
+    const counts = "We made 12 calls on 2024-03-12 and 7 on 2024-03-13.";
+    expect(redactPII(counts)).toBe(counts);
   });
 
   it("leaves text with no PII unchanged", () => {

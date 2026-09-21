@@ -255,7 +255,7 @@ export async function saveSettings(
 ): Promise<RagSettings> {
   const settings = mergeSettings(raw);
   const client = db ?? supabaseAdmin();
-  await client.from("app_settings").upsert(
+  const { error } = await client.from("app_settings").upsert(
     {
       org_id: orgId,
       data: settings as unknown as Record<string, unknown>,
@@ -264,5 +264,8 @@ export async function saveSettings(
     },
     { onConflict: "org_id" }
   );
+  // A silent failure here would tell the dashboard "saved" while the Brain kept
+  // running on the old settings.
+  if (error) throw new Error(`settings save failed: ${error.message}`);
   return settings;
 }

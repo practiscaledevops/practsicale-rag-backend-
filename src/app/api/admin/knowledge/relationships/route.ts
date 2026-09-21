@@ -6,7 +6,7 @@
 import { supabaseAdmin } from "@/lib/supabase";
 import { getObjectByRef, upsertRelationship, logDecision } from "@/lib/knowledge-store";
 import { isRelationshipType } from "@/lib/intelligence-taxonomy";
-import { guard, dbError, objectStubs, str } from "../_shared";
+import { guard, dbError, objectStubs, str, uuid } from "../_shared";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
@@ -17,7 +17,7 @@ export async function GET(req: Request) {
   const { admin } = g;
   const url = new URL(req.url);
   const status = str(url.searchParams.get("status"), 20) || "all";
-  const objectId = str(url.searchParams.get("objectId"), 64);
+  const objectId = uuid(url.searchParams.get("objectId"));
   const limit = Math.max(1, Math.min(500, Number(url.searchParams.get("limit") ?? 300)));
   const db = supabaseAdmin();
   try {
@@ -50,7 +50,7 @@ export async function POST(req: Request) {
   const db = supabaseAdmin();
   try {
     const resolve = async (idKey: string, refKey: string) => {
-      const id = str(body[idKey], 64);
+      const id = uuid(body[idKey]);
       if (id) return id;
       const ref = str(body[refKey], 32);
       if (!ref) return null;

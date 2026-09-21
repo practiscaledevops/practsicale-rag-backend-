@@ -98,6 +98,31 @@ Prompts (editable in the Prompt Studio): `knowledge_classify`,
 
 Bulk: `npm run compile:knowledge -- <dir> --class playbook [--dry]`.
 
+### Ingestion sources — `src/lib/ingest-adapters/`
+
+One door for every source (spec §29–30): an adapter extracts the text, the
+compiler does the rest. Each returns `{ text, title?, meta: { source_type?,
+source_platform?, source_url?, duration_s?, pages? } }` or throws a readable
+`ExtractError` (its `status` becomes the HTTP status).
+
+| Adapter | Source | How |
+| --- | --- | --- |
+| `url.ts` | article, LinkedIn / Instagram / X post, any page | SSRF-guarded fetch (`assertPublicUrl` on every hop, 15 s, 2 MB, browser UA) → `<article>` / `<main>` / `<body>` → chrome and scripts stripped, entities decoded; og:title; platform from the hostname. A login wall (< 200 usable chars) is refused with a "paste the transcript" hint. A link straight to a PDF is decoded as one. |
+| `youtube.ts` | YouTube video / short | caption tracks from YouTube's player endpoint as the Android client (the web client's timedtext URLs answer empty without a browser token; the watch page is the fallback), human English → auto English → any, json3 with the srv3/XML fallback, joined into paragraphs; title / author via oEmbed; duration from the player. No captions → title + description, flagged "(no captions available — description only)". |
+| `pdf.ts` | PDF | pdf-parse (the same entry the upload path uses) + page count + embedded Title. |
+| `audio.ts` | voice note, call, meeting — mp3 m4a wav mp4 webm ogg (≤ 4 MB per direct upload: the hosting request-body limit; the adapter itself accepts up to 25 MB once a storage-upload path exists) | OpenAI `gpt-4o-mini-transcribe`, `whisper-1` when unavailable; key via `getProviderKey("openai")` (Settings → Provider API keys). |
+| `image.ts` | screenshot — png jpg webp gif, ≤ 10 MB | OpenAI vision (`gpt-4o-mini`): transcribe every piece of text in reading order, tables as Markdown, charts as data, no commentary. |
+| `index.ts` | `extractAny({ url } \| { file })` | YouTube host → `youtube`, else `url`; files by extension then MIME (txt / md / csv / json decoded as UTF-8); result capped at 60k chars (`truncated: true`). Client-safe helpers (`kindOfFile`, `isYouTubeUrl`, `parseYouTubeId`, `capText`) live in `pure.ts`. |
+
+Routes (both `maxDuration = 120`, `sin1`): `POST /api/admin/knowledge/extract`
+(admin, `documents:write`) feeds the Add-knowledge wizard's "Upload a file" /
+"From a link" modes, which drop the text into the source box and pre-fill the
+provenance hints (url, platform, source type, title). `POST /api/v1/extract`
+(scoped key, capability `chat`, rate-limited) gives a spoke the same extraction
+for what its users attach — nothing is stored. Both accept multipart `file` |
+`url` or JSON `{ url }` and reply `{ name, kind, title, text, chars, truncated,
+meta }` or `{ error }`.
+
 ## 4. The Retrieval Orchestrator — `src/lib/orchestrator.ts`
 
 ```
@@ -158,9 +183,22 @@ Legacy ids (sales, media, strategy, decision_maker, ceo) remain aliases.
 
 Public (scoped key): `POST /api/v1/chat` (accepts `mode`, `allowedModes`,
 `attachments`; streams `mode`, `sources` with lanes/refs, `learning_candidate`),
-`POST /api/v1/learning`, `GET /api/v1/collections`.
+`POST /api/v1/learning`, `GET /api/v1/collections`, `POST /api/v1/extract`
+(link / YouTube / PDF / audio / image → text for a spoke, capability `chat`; see §3).
+
+Brain map (read-only, capability `chat` **or** `retrieve`, rate-limited like
+retrieve, `Cache-Control: private, max-age=15`; logic in `src/lib/knowledge-read.ts`):
+
+| Endpoint | Contract |
+| --- | --- |
+| `GET /api/v1/knowledge?class=&domain=&type=&q=&sensitive=1\|0&includeArchive=0\|1&limit=&offset=` | `{ counts: { total, byClass, byDomain, byType, learningByType, entitiesByKind, relationships: { confirmed, suggested }, metrics }, objects: [{ id, ref, name, summary, intelligence_class, domain, object_type, subtype, tags, authority, founder_endorsement, implementation_status, internal_validation, status, current, priority, updated_at, last_verified_at, source_platform, source_expert }], page: { limit, offset, returned } }`. `counts` are org-wide (ignore the filters); `objects` respect them (`q` = ref/name/summary ilike or a tag; `updated_at` desc; `limit` ≤ 50, default 30). `raw_archive` is excluded unless `includeArchive=1`. `sensitive=0` hides business-reality `call`/`call_score`/`transcript`/`kpi_report` objects and the call-score team snapshot (`attributes.snapshot = 'call_scores'`). |
+| `GET /api/v1/knowledge/[ref]?sensitive=1\|0` | `[ref]` = stable ref (MG-001, BR-SAL-003) or uuid. `{ object: { …list projection…, compiled_markdown (≤ 12k chars + "(truncated)" marker), applies_to, goals, platforms, business_functions, effective_from, effective_until, source_type, source_url, source_date, source_claims, sources, evidence_level, bucket }, relationships: [{ id, type, direction: "out"\|"in", status, ref, name, intelligence_class }], learning: [{ id, ref, record_type, title, status, department, created_at }], chunks }`. `sensitive=0` → 404 for a sensitive object and sensitive neighbours dropped. |
+| `GET /api/v1/learning?status=&type=&limit=&offset=` | `{ records: [{ id, ref, record_type, title, status, department, owner, summary, created_at, updated_at, metrics_before, metrics_after, missing_evidence, playbooks: [{ ref, name }], object_ref }], page }`, `created_at` desc, `limit` ≤ 50. `playbooks` = the targets of the record's `used_playbook` / `implemented_in` edges. |
+
+Pre-migration (no `knowledge_objects`) these answer `503 { migrationMissing: true }`.
 
 Admin (`/api/admin/knowledge/*`): `compile` (preview/commit, JSON or multipart),
+`extract` (source → text for the wizard: multipart `file` or JSON `{ url }`),
 `objects` (list, counts) + `objects/[id]` (detail / PATCH governance + markdown
 re-index / DELETE), `taxonomy` (list / add / approve / reject / rename),
 `relationships` (list / create / confirm / reject), `entities`, `decisions`,

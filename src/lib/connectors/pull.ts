@@ -20,6 +20,7 @@ import { serializeRecord } from "@/lib/chunking";
 import { ingestOne } from "@/lib/ingest";
 import { redactPII } from "@/lib/redact";
 import { assertPublicUrl } from "@/lib/net-guard";
+import { isAllowedSecretRef } from "@/lib/connectors/secret-ref";
 
 // Big free-text fields belong in the chunked BODY, not in metadata.
 const OMIT_FROM_META = new Set(["full_report", "report", "full_report_md", "analysis"]);
@@ -35,7 +36,7 @@ const OMIT_FROM_META = new Set(["full_report", "report", "full_report_md", "anal
 // the greedy phone rule otherwise mangles an ISO date / timestamp into "[PHONE]",
 // destroying the time dimension for Performance Memory. These are identifiers,
 // not personal contact data. (Emails/phones in free-text fields are still redacted.)
-const NO_REDACT_KEY = /(^|_)(id|date|at|slug|url|links|status|band|outcome|type|version|count|score|scores|ratio|duration|pct|percent|band)$/i;
+const NO_REDACT_KEY = /(^|_)(id|date|at|slug|url|links|status|band|outcome|type|version|count|score|scores|ratio|duration|pct|percent)$/i;
 
 function recordMetadata(rec: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -110,10 +111,15 @@ export type PullTrigger = "manual" | "schedule" | "webhook";
  */
 export async function runPull(
   source: DataSourceRow,
-  opts: { trigger?: PullTrigger; db?: SupabaseClient } = {}
+  opts: { trigger?: PullTrigger; db?: SupabaseClient; deadlineAt?: number } = {}
 ): Promise<PullResult> {
   const db = opts.db ?? supabaseAdmin();
   const trigger = opts.trigger ?? "manual";
+  // A wall-clock budget (epoch ms). Past it, the run stops cleanly after the
+  // current record and records what it did — instead of being killed by the
+  // function timeout with the run stuck in "running" and the cursor unmoved.
+  const deadlineAt = opts.deadlineAt;
+  let partial = false;
 
   // Provenance row for the whole sync.
   const { data: run } = await db
@@ -146,12 +152,16 @@ export async function runPull(
       throw new Error(`data source '${source.name}' has no endpoint_url`);
     }
 
-    const records = await fetchRecords(source);
+    const records = await fetchRecords(source, deadlineAt);
     result.recordsFetched = records.length;
 
     let newCursor = source.cursor_value ?? null;
 
     for (const record of records) {
+      if (deadlineAt && Date.now() > deadlineAt) {
+        partial = true;
+        break;
+      }
       if (!record || typeof record !== "object") continue;
 
       const rec = record as Record<string, unknown>;
@@ -213,10 +223,12 @@ export async function runPull(
         documents_ingested: result.documentsIngested,
         documents_skipped: result.documentsSkipped,
         chunks_ingested: result.chunksIngested,
+        ...(partial ? { error: "partial: time budget reached; the next run resumes from the cursor" } : {}),
         finished_at: new Date().toISOString(),
       })
       .eq("id", runId);
 
+    if (partial) result.error = "partial: time budget reached";
     return result;
   } catch (e) {
     const message = e instanceof Error ? e.message : "pull failed";
@@ -241,8 +253,33 @@ export async function runPull(
 // ---- HTTP + extraction helpers -----------------------------------------------
 
 const MAX_PAGES = 40; // safety cap: MAX_PAGES * limit records per sync
+const FETCH_TIMEOUT_MS = 20_000;
+const MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // one page of records
 
-async function fetchRecords(source: DataSourceRow): Promise<unknown[]> {
+/** Read a response body as text, refusing anything over `maxBytes`. */
+async function readBounded(res: Response, maxBytes: number): Promise<string> {
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error(`pull response too large (${declared} bytes; limit ${maxBytes})`);
+  }
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error(`pull response too large (over ${maxBytes} bytes)`);
+    }
+    parts.push(value);
+  }
+  return Buffer.concat(parts).toString("utf8");
+}
+
+async function fetchRecords(source: DataSourceRow, deadlineAt?: number): Promise<unknown[]> {
   // SSRF guard: never let an admin-configured endpoint point the server at a
   // private/loopback/link-local address (e.g. cloud metadata at 169.254.169.254).
   await assertPublicUrl(source.endpoint_url as string);
@@ -274,12 +311,29 @@ async function fetchRecords(source: DataSourceRow): Promise<unknown[]> {
     for (const [k, v] of baseParams) url.searchParams.set(k, v);
     if (paged) url.searchParams.set("offset", String(offset));
 
-    const res = await fetch(url.toString(), { method, headers });
+    // No redirects: a public host answering 302 → http://10.0.0.5/… would walk
+    // straight past the SSRF guard, which only checked the original URL. A hard
+    // timeout and a bounded body keep one slow/huge upstream from pinning the run.
+    const res = await fetch(url.toString(), {
+      method,
+      headers,
+      redirect: "manual",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (res.status >= 300 && res.status < 400) {
+      throw new Error(`pull request was redirected (${res.status}); redirects are not followed — configure the final URL`);
+    }
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
+      const body = await readBounded(res, 4_096).catch(() => "");
       throw new Error(`pull request failed: ${res.status} ${res.statusText} ${body.slice(0, 200)}`);
     }
-    const json: unknown = await res.json();
+    const raw = await readBounded(res, MAX_RESPONSE_BYTES);
+    let json: unknown;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      throw new Error("pull response was not valid JSON");
+    }
     const extracted = getPath(json, source.records_path);
 
     const batch = Array.isArray(extracted)
@@ -295,6 +349,9 @@ async function fetchRecords(source: DataSourceRow): Promise<unknown[]> {
 
     all.push(...batch);
     if (!paged || batch.length < limit) break; // last page reached
+    // Out of time for this run: stop paging. Records are ingested in order and
+    // the cursor advances to the last one processed, so the next run resumes.
+    if (deadlineAt && Date.now() > deadlineAt) break;
     offset += limit;
   }
 
@@ -307,7 +364,12 @@ function buildHeaders(source: DataSourceRow): Record<string, string> {
   const authType = source.auth_type ?? "none";
   if (authType === "none") return headers;
 
-  const secret = source.auth_secret_ref ? process.env[source.auth_secret_ref] : undefined;
+  // The reference is validated on save too; re-checking here means a row edited
+  // outside the API can still never read a platform secret.
+  if (!source.auth_secret_ref || !isAllowedSecretRef(source.auth_secret_ref)) {
+    throw new Error(`auth_secret_ref '${source.auth_secret_ref ?? "(unset)"}' is not an allowed connector credential`);
+  }
+  const secret = process.env[source.auth_secret_ref];
   if (!secret) {
     throw new Error(
       `auth_type '${authType}' requires a secret; env var '${source.auth_secret_ref ?? "(unset)"}' is empty`

@@ -17,7 +17,7 @@ export default async function AddKnowledgePage() {
     <div>
       <PageHeader
         title="Add knowledge"
-        description="Paste a transcript, clip caption, article, report or note — or upload a file. Choose what kind of knowledge it is; the Brain does the classification."
+        description="Paste text, upload a file (PDF, document, spreadsheet, screenshot or voice note) or paste a link (web page or YouTube). Choose what kind of knowledge it is; the Brain extracts, classifies, de-duplicates and files it."
       />
       <AddKnowledgeWizard />
     </div>

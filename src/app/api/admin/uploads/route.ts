@@ -26,7 +26,9 @@ import { ingestOne, pdfToText } from "@/lib/ingest";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
-export const maxDuration = 60;
+// Contextual retrieval (up to 200 chunks × an LLM call) plus embeddings for a
+// large PDF takes minutes; a timeout mid-ingest used to leave an orphan document.
+export const maxDuration = 300;
 
 // Extensions we can turn into text here. PDFs go through pdfToText(); the rest
 // are read as UTF-8. Anything else is rejected before touching the DB.

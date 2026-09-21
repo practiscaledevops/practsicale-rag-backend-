@@ -20,6 +20,8 @@ import { isDemo } from "@/lib/demo/mode";
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
 export const maxDuration = 300;
+// Leave headroom under maxDuration for the metrics refresh + finalisation writes.
+const CRON_BUDGET_MS = 230_000;
 
 const SOURCE_COLUMNS =
   "id, org_id, name, slug, source_type, kind, endpoint_url, http_method, auth_type, " +
@@ -50,7 +52,8 @@ async function handle(req: Request): Promise<Response> {
     .from("data_sources")
     .select(SOURCE_COLUMNS)
     .eq("kind", "pull_http")
-    .eq("is_active", true);
+    .eq("is_active", true)
+    .order("last_run_at", { ascending: true, nullsFirst: true });
 
   if (error) return Response.json({ error: error.message }, { status: 500 });
   const sources = (data ?? []) as unknown as DataSourceRow[];
@@ -59,8 +62,17 @@ async function handle(req: Request): Promise<Response> {
   // Orgs whose call-scoring source ingested new calls this run → refresh their
   // Performance Memory afterwards (best-effort; never fails the sync).
   const refreshOrgs = new Set<string>();
+  // One wall-clock budget for the whole run (the function dies at maxDuration):
+  // each source gets the time that is left, stops cleanly when it runs out, and
+  // resumes from its cursor on the next tick. Sources are ordered by the last
+  // successful run so a slow one cannot starve the others forever.
+  const deadlineAt = Date.now() + CRON_BUDGET_MS;
   for (const source of sources) {
-    const res = await runPull(source, { trigger: "schedule", db });
+    if (Date.now() > deadlineAt) {
+      ran.push({ source: source.name, status: "skipped", reason: "time budget reached" });
+      continue;
+    }
+    const res = await runPull(source, { trigger: "schedule", db, deadlineAt });
     ran.push({
       source: source.name,
       status: res.status,
@@ -75,6 +87,12 @@ async function handle(req: Request): Promise<Response> {
 
   const refreshed: Array<Record<string, unknown>> = [];
   for (const orgId of refreshOrgs) {
+    // The rebuild is idempotent and runs again next tick; never start it inside
+    // the function's last seconds and die mid-write.
+    if (Date.now() > deadlineAt) {
+      refreshed.push({ orgId, skipped: "time budget reached; next tick rebuilds" });
+      continue;
+    }
     try {
       const m = await rebuildCallScoreMetrics(db, orgId, { createdBy: "cron" });
       refreshed.push({ orgId, metrics: m.metricsWritten, consultants: m.consultants, snapshot: m.snapshotRef });

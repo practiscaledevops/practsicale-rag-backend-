@@ -22,6 +22,8 @@ import {
 // Row shapes
 // ---------------------------------------------------------------------------
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export interface KnowledgeObjectRow {
   id: string;
   org_id: string;
@@ -547,9 +549,18 @@ export interface EdgeInput {
 export async function upsertRelationship(db: SupabaseClient, orgId: string, edge: EdgeInput): Promise<RelationshipRow | null> {
   if (!edge.sourceId || !edge.targetId || edge.sourceId === edge.targetId) return null;
   try {
+    // Both ends must be this org's objects: ids arrive from request bodies and
+    // an edge across tenants would leak one org's knowledge into another's graph.
+    const { data: ends } = await db
+      .from("knowledge_objects")
+      .select("id")
+      .eq("org_id", orgId)
+      .in("id", [edge.sourceId, edge.targetId]);
+    if ((ends ?? []).length !== 2) return null;
     const { data: existing } = await db
       .from("knowledge_relationships")
       .select("id, status")
+      .eq("org_id", orgId)
       .eq("source_object_id", edge.sourceId)
       .eq("relationship_type", edge.type)
       .eq("target_object_id", edge.targetId)
@@ -563,6 +574,7 @@ export async function upsertRelationship(db: SupabaseClient, orgId: string, edge
         .from("knowledge_relationships")
         .update({ status: next, confidence: edge.confidence ?? null, note: edge.note ?? null })
         .eq("id", ex.id)
+        .eq("org_id", orgId)
         .select("*")
         .single();
       return (data as RelationshipRow) ?? null;
@@ -594,7 +606,8 @@ export async function listRelationshipsFor(
   objectIds: string[],
   status: "confirmed" | "suggested" | "all" = "confirmed"
 ): Promise<RelationshipRow[]> {
-  const ids = Array.from(new Set(objectIds.filter(Boolean)));
+  // Ids are interpolated into a PostgREST filter string: uuids only.
+  const ids = Array.from(new Set(objectIds.filter((i) => UUID_RE.test(i))));
   if (ids.length === 0) return [];
   try {
     const list = `(${ids.join(",")})`;
@@ -605,6 +618,30 @@ export async function listRelationshipsFor(
       .or(`source_object_id.in.${list},target_object_id.in.${list}`);
     if (status !== "all") q = q.eq("status", status);
     const { data } = await q.limit(400);
+    return (data ?? []) as RelationshipRow[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Confirmed `contradicts` edges whose BOTH ends are among the objects (the
+ * disagreements inside one retrieval context). The compiler writes a CONFLICT
+ * both ways, so the caller de-duplicates pairs. [] pre-migration.
+ */
+export async function listContradictionsAmong(db: SupabaseClient, orgId: string, objectIds: string[]): Promise<RelationshipRow[]> {
+  const ids = Array.from(new Set(objectIds.filter(Boolean)));
+  if (ids.length < 2) return [];
+  try {
+    const { data } = await db
+      .from("knowledge_relationships")
+      .select("*")
+      .eq("org_id", orgId)
+      .eq("relationship_type", "contradicts")
+      .eq("status", "confirmed")
+      .in("source_object_id", ids)
+      .in("target_object_id", ids)
+      .limit(100);
     return (data ?? []) as RelationshipRow[];
   } catch {
     return [];

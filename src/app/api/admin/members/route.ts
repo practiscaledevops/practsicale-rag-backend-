@@ -23,10 +23,15 @@ export const preferredRegion = ["sin1"];
 // this so an admin can never be granted an unknown resource/action.
 const ALLOWED_PERMISSIONS: Record<string, string[]> = {
   data_sources: ["read", "write"],
+  // documents:write also covers uploads, knowledge objects, learning, taxonomy
+  // and relationships (every knowledge write route checks it).
+  documents: ["read", "write"],
+  collections: ["read", "write"],
   prompts: ["read", "write"],
   api_keys: ["read", "write", "revoke"],
   connectors: ["read", "write"],
   members: ["read", "write"],
+  settings: ["read", "write"],
   analytics: ["read"],
 };
 
@@ -166,6 +171,12 @@ export async function PATCH(req: Request) {
   if (!target) return Response.json({ error: "Member not found" }, { status: 404 });
 
   const update: Record<string, unknown> = {};
+
+  // Only a super_admin may touch a super_admin (permissions, activation, role):
+  // otherwise a members:write admin could strip or deactivate the owner.
+  if (target.role === "super_admin" && admin.role !== "super_admin") {
+    return Response.json({ error: "Only a super_admin can modify a super_admin" }, { status: 403 });
+  }
 
   if (body?.permissions !== undefined) {
     update.permissions = sanitizePermissions(body.permissions);

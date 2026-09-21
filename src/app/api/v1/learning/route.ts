@@ -11,6 +11,10 @@
 // Body: { kind, title, change, observedResult?, department?, relatedRefs?,
 //         missingEvidence?, notes?, owner?, createdBy?, source? }
 // Response: { ref, id, name, recordType, status }
+//
+// GET /api/v1/learning — list the saved learnings (capability 'chat' OR
+// 'retrieve'): ?status=&type=&limit=&offset=  →  { records, page },
+// newest first, limit ≤ 50 (default 30). See src/lib/knowledge-read.ts.
 
 import { supabaseAdmin } from "@/lib/supabase";
 import { resolveContext, AuthError } from "@/lib/auth/context";
@@ -18,6 +22,7 @@ import { requireCapability } from "@/lib/auth/scope";
 import { checkRateLimit, rateLimitHeaders } from "@/lib/ratelimit";
 import { compileKnowledge } from "@/lib/knowledge-compiler";
 import { isDemo } from "@/lib/demo/mode";
+import { hasReadCapability, listLearning, parseLearningListParams, readErrorResponse } from "@/lib/knowledge-read";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
@@ -26,6 +31,27 @@ export const preferredRegion = ["sin1"];
 export const maxDuration = 120;
 
 const KINDS = new Set(["decision", "implementation", "experiment", "result", "learning", "adaptation", "postmortem"]);
+
+export async function GET(req: Request) {
+  let ctx;
+  try {
+    ctx = await resolveContext(req);
+    if (!hasReadCapability(ctx.key)) throw new AuthError("This key is not permitted to read learnings (needs 'chat' or 'retrieve')", 403);
+  } catch (e) {
+    const err = e as AuthError;
+    return Response.json({ error: err.message }, { status: err.status ?? 401 });
+  }
+  const rl = checkRateLimit(ctx.key.id, ctx.key.rate_limit_per_min);
+  if (!rl.ok) return Response.json({ error: "Rate limit exceeded." }, { status: 429, headers: rateLimitHeaders(rl) });
+
+  const params = parseLearningListParams(new URL(req.url).searchParams);
+  try {
+    const result = await listLearning(supabaseAdmin(), ctx.orgId, params);
+    return Response.json(result, { headers: { ...rateLimitHeaders(rl), "cache-control": "private, max-age=15" } });
+  } catch (e) {
+    return readErrorResponse(e);
+  }
+}
 
 export async function POST(req: Request) {
   if (isDemo()) {
@@ -82,7 +108,8 @@ export async function POST(req: Request) {
       mode: "commit",
       forceNew: true,
       storeRaw: false,
-      createdBy: str(body?.createdBy, 200) || `key:${ctx.key.id}`,
+      // Provenance is the KEY that saved it — never a caller-supplied name.
+      createdBy: `key:${ctx.key.id}`,
       hints: {
         objectType: kind,
         department: undefined,
@@ -108,6 +135,8 @@ export async function POST(req: Request) {
     if (/knowledge_objects|does not exist|schema cache/i.test(msg)) {
       return Response.json({ error: "Organizational Learning needs Brain migration 0017 (knowledge_objects). Apply it and try again." }, { status: 503 });
     }
-    return Response.json({ error: msg }, { status: 500 });
+    // Public surface: log the detail, return a generic message.
+    console.error("[v1/learning] save failed:", msg);
+    return Response.json({ error: "Could not save the learning. Please try again." }, { status: 500 });
   }
 }
