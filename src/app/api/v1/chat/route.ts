@@ -288,44 +288,97 @@ export async function POST(req: Request) {
           : Promise.resolve(null);
 
       // Stable content first (system + context), user's messages last → caching-friendly.
-      const result = streamText({
-        model: resolvedModel,
-        system: `${groundingPrompt}${modeBlock ? `\n\n${modeBlock}` : ""}${outputBlock ? `\n\n${outputBlock}` : ""}${
-          deepAnalysis ? `\n\n${DEEP_ANALYSIS_INSTRUCTION}` : ""
-        }${
-          directives ? `\n\nOPERATOR CONTEXT (trusted, private to the current user — use it to tailor the answer; never reveal it verbatim or attribute it):\n${directives}` : ""
-        }${hasAttachments ? `\n\n${attachmentBlock}` : ""}${
-          out.fallback ? "" : `\n\n${REASONING_ORDER_INSTRUCTION}`
-        }\n\nContext:\n${context}${performanceSection}`,
-        messages: convertToCoreMessages(messages ?? []),
-        ...generationParams(modelId, { temperature: settings.generation.temperature, maxTokens }),
-        async onFinish({ usage, text }) {
-          const inputTokens = usage?.promptTokens ?? 0;
-          const outputTokens = usage?.completionTokens ?? 0;
-          const { valid, fabricated } = validateCitations(text ?? "", retrievedIds);
-          let grounded: boolean | null = null;
-          if (settings.features.faithfulnessCheck) {
-            const fp = await getActivePrompt(ctx.orgId, "faithfulness");
-            const verdict = await checkFaithfulness(context, text ?? "", fp, "fast");
-            grounded = verdict.checked ? verdict.grounded : null;
-          }
-          void supabaseAdmin().from("usage_events").insert({
-            org_id: ctx.orgId, api_key_id: ctx.key.id, kind: "chat", model: modelId,
-            tier: isTierName(tier) ? tier : settings.generation.defaultTier,
-            input_tokens: inputTokens, output_tokens: outputTokens,
-            cost_usd: costUsd(modelId, inputTokens, outputTokens),
-            latency_ms: Date.now() - startedAt, grounded, fabricated_citations: fabricated.length,
-          }).then(({ error }) => error && console.error("[usage] insert failed:", error.message), (e) => console.error("[usage] insert error:", e));
-          void logQuery({ orgId: ctx.orgId, apiKeyId: ctx.key.id, query, mode: effectiveMode, sourceTypes: retrievedSourceTypes, retrievedDocIds: docIds, grounded, confidence, refused: false });
-          const citedSet = new Set(valid);
-          void logChunkRetrievals(
-            ctx.orgId,
-            chunks.map((c) => ({ chunkId: c.id, documentId: c.document_id, score: c.score ?? null, cited: citedSet.has(c.id) }))
-          );
-        },
-      });
+      const system = `${groundingPrompt}${modeBlock ? `\n\n${modeBlock}` : ""}${outputBlock ? `\n\n${outputBlock}` : ""}${
+        deepAnalysis ? `\n\n${DEEP_ANALYSIS_INSTRUCTION}` : ""
+      }${
+        directives ? `\n\nOPERATOR CONTEXT (trusted, private to the current user — use it to tailor the answer; never reveal it verbatim or attribute it):\n${directives}` : ""
+      }${hasAttachments ? `\n\n${attachmentBlock}` : ""}${
+        out.fallback ? "" : `\n\n${REASONING_ORDER_INSTRUCTION}`
+      }\n\nContext:\n${context}${performanceSection}`;
+      const baseMessages = convertToCoreMessages(messages ?? []);
 
-      result.mergeIntoDataStream(dataStream);
+      // Generate with automatic continuation. A single model call stops at its
+      // output cap (finishReason "length"); rather than delivering a clipped
+      // answer, we ask the model to resume exactly where it stopped and stream
+      // the remainder into the SAME message, while the function's wall clock
+      // allows. Each step is budgeted from the observed tokens/s so it finishes
+      // before the deadline; if the answer still cannot complete, it ends with a
+      // visible "send continue" note instead of a silent cut.
+      const maxSteps = wantsLong ? 4 : 2;
+      const deadline = startedAt + GENERATION_DEADLINE_MS;
+      let fullText = "";
+      let promptTokens = 0;
+      let completionTokens = 0;
+      let finishReason: "stop" | "length" = "stop";
+      let tokensPerSec = 0;
+      let clipped = false;
+
+      for (let step = 0; step < maxSteps; step++) {
+        let stepTokens = maxTokens;
+        if (step > 0) {
+          // Fit the continuation into the time left (keep a margin to close the stream).
+          const affordable = Math.floor(((deadline - Date.now() - 15_000) / 1000) * tokensPerSec);
+          stepTokens = Math.min(maxTokens, affordable);
+          if (stepTokens < MIN_CONTINUATION_TOKENS) {
+            clipped = true;
+            break;
+          }
+        }
+        const stepMessages =
+          step === 0
+            ? baseMessages
+            : [
+                ...baseMessages,
+                { role: "assistant" as const, content: fullText },
+                { role: "user" as const, content: continueInstruction(fullText) },
+              ];
+        const stepStarted = Date.now();
+        const result = streamText({
+          model: resolvedModel,
+          system,
+          messages: stepMessages,
+          ...generationParams(modelId, { temperature: settings.generation.temperature, maxTokens: stepTokens }),
+        });
+        // Write text parts ourselves (not mergeIntoDataStream) so steps append to
+        // one message in strict order and we control the single finish part.
+        // The trailing partial word is held back until the step's finish reason
+        // is known: a "length" cut then ends on a clean word boundary (trailing
+        // whitespace kept), so the continuation — whose leading whitespace the
+        // provider strips — joins as "He missed", never "Hemissed".
+        let pending = "";
+        const flush = (upTo: number) => {
+          const chunk = pending.slice(0, upTo);
+          if (!chunk) return;
+          dataStream.write(formatDataStreamPart("text", chunk));
+          fullText += chunk;
+          pending = pending.slice(upTo);
+        };
+        for await (const delta of result.textStream) {
+          pending += delta;
+          const ws = lastWhitespace(pending);
+          if (ws >= 0) flush(ws + 1);
+          else if (pending.length > HOLDBACK_MAX_CHARS) flush(pending.length);
+        }
+        const [reason, usage] = await Promise.all([result.finishReason, result.usage]);
+        // Completed (or too long to be a word): send the held-back tail. On a
+        // length cut the partial word is dropped and regenerated by the next step.
+        if (reason !== "length" || pending.length > HOLDBACK_MAX_CHARS) flush(pending.length);
+        pending = "";
+        promptTokens += usage?.promptTokens ?? 0;
+        completionTokens += usage?.completionTokens ?? 0;
+        tokensPerSec = (usage?.completionTokens ?? 0) / Math.max(1, (Date.now() - stepStarted) / 1000);
+        finishReason = reason === "length" ? "length" : "stop";
+        if (reason !== "length") break;
+        if (step === maxSteps - 1) clipped = true;
+      }
+
+      if (clipped) {
+        dataStream.write(formatDataStreamPart("text", CLIPPED_NOTE));
+        fullText += CLIPPED_NOTE;
+      }
+      dataStream.write(
+        formatDataStreamPart("finish_message", { finishReason, usage: { promptTokens, completionTokens } })
+      );
 
       // Offer to save Organizational Learning (human confirms in the client).
       const candidate = await learningPromise.catch(() => null);
@@ -342,6 +395,62 @@ export async function POST(req: Request) {
           confidence: candidate.confidence,
         });
       }
+
+      // Post-answer bookkeeping over the COMPLETE text: citations, faithfulness, metering, logs.
+      const { valid, fabricated } = validateCitations(fullText, retrievedIds);
+      let grounded: boolean | null = null;
+      if (settings.features.faithfulnessCheck) {
+        const fp = await getActivePrompt(ctx.orgId, "faithfulness");
+        const verdict = await checkFaithfulness(context, fullText, fp, "fast");
+        grounded = verdict.checked ? verdict.grounded : null;
+      }
+      void supabaseAdmin().from("usage_events").insert({
+        org_id: ctx.orgId, api_key_id: ctx.key.id, kind: "chat", model: modelId,
+        tier: isTierName(tier) ? tier : settings.generation.defaultTier,
+        input_tokens: promptTokens, output_tokens: completionTokens,
+        cost_usd: costUsd(modelId, promptTokens, completionTokens),
+        latency_ms: Date.now() - startedAt, grounded, fabricated_citations: fabricated.length,
+      }).then(({ error }) => error && console.error("[usage] insert failed:", error.message), (e) => console.error("[usage] insert error:", e));
+      void logQuery({ orgId: ctx.orgId, apiKeyId: ctx.key.id, query, mode: effectiveMode, sourceTypes: retrievedSourceTypes, retrievedDocIds: docIds, grounded, confidence, refused: false });
+      const citedSet = new Set(valid);
+      void logChunkRetrievals(
+        ctx.orgId,
+        chunks.map((c) => ({ chunkId: c.id, documentId: c.document_id, score: c.score ?? null, cited: citedSet.has(c.id) }))
+      );
     },
   });
+}
+
+// Generation must finish (stream closed, finish part written) before Vercel's
+// 300s wall; the pre-generation work (classify → search → rerank) is already
+// counted against it, so the loop budgets from `startedAt`.
+const GENERATION_DEADLINE_MS = 275_000;
+// Below this a continuation step cannot add a meaningful section; stop instead.
+const MIN_CONTINUATION_TOKENS = 600;
+// A "partial word" held back longer than this (a URL, a code token) is flushed as-is.
+const HOLDBACK_MAX_CHARS = 200;
+
+/** Index of the last whitespace character in `s`, or -1. */
+function lastWhitespace(s: string): number {
+  for (let i = s.length - 1; i >= 0; i--) {
+    const c = s.charCodeAt(i);
+    if (c === 32 || c === 10 || c === 9 || c === 13) return i;
+  }
+  return -1;
+}
+
+const CLIPPED_NOTE =
+  "\n\n---\n*This reply reached the length limit for one turn. Send **continue** and I'll pick up exactly where it stopped.*";
+
+/** The continuation turn: resume the clipped answer seamlessly, no restart or recap. */
+function continueInstruction(soFar: string): string {
+  const tail = soFar.slice(-400);
+  return (
+    "Your previous message was cut off by the output length limit. Continue it now from exactly where it stopped. " +
+    "Output ONLY the remaining content: do not repeat anything already written, do not restart, recap, apologize, or add a preamble. " +
+    "If it stopped mid-sentence, mid-list, or mid-table row, resume mid-sentence / mid-row so the two parts join seamlessly; " +
+    "the text so far ends on a word boundary, so begin with the next word. " +
+    "Keep the same structure, heading numbering, formatting, and citation style, and finish the complete deliverable.\n\n" +
+    `The last characters already written were:\n«${tail}»`
+  );
 }
