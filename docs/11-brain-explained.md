@@ -99,7 +99,9 @@ become a PractiScale Standard.
 Continuous feeds: the call-scoring system syncs every 20 minutes; each scored
 call lands in Business Reality, and the Performance Memory (team average score,
 close rate, per-consultant and per-market numbers, weakest phases) is rebuilt
-automatically.
+automatically. Each call's raw transcript is pulled and stored alongside its
+score, tagged with the date, consultant and practice type, so you can ask the
+Assistant to review a specific day's or consultant's calls.
 
 ## 5. How the Brain answers
 

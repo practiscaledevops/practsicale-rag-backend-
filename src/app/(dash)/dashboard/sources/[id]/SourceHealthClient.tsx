@@ -15,6 +15,7 @@ import {
   Clock,
   GitCommitHorizontal,
   Gauge,
+  ScrollText,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
@@ -83,6 +84,7 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
   const router = useRouter();
   const [syncing, setSyncing] = React.useState(false);
   const [toggling, setToggling] = React.useState(false);
+  const [backfilling, setBackfilling] = React.useState(false);
   const [msg, setMsg] = React.useState<{ tone: "success" | "danger"; text: string } | null>(null);
 
   async function syncNow() {
@@ -102,6 +104,31 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
       setMsg({ tone: "danger", text: "Network error — please try again." });
     } finally {
       setSyncing(false);
+    }
+  }
+
+  async function backfillTranscripts() {
+    setBackfilling(true);
+    setMsg(null);
+    try {
+      const res = await fetch(`/api/admin/sources/${health.id}/backfill-transcripts`, { method: "POST" });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMsg({ tone: "danger", text: json.error ?? `Back-fill failed (${res.status})` });
+        return;
+      }
+      const created = json.transcriptsCreated ?? 0;
+      const skipped = json.transcriptsSkipped ?? 0;
+      const calls = json.calls ?? 0;
+      setMsg({
+        tone: "success",
+        text: `Back-fill complete — ${created} transcript${created === 1 ? "" : "s"} added, ${skipped} already present (${calls} call${calls === 1 ? "" : "s"} scanned).`,
+      });
+      router.refresh();
+    } catch {
+      setMsg({ tone: "danger", text: "Network error — please try again." });
+    } finally {
+      setBackfilling(false);
     }
   }
 
@@ -153,6 +180,12 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
             {toggling ? <Loader2 className="h-4 w-4 animate-spin" /> : paused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
             {paused ? "Resume sync" : "Pause sync"}
           </Button>
+          {health.kind === "pull_http" && (
+            <Button variant="outline" size="sm" onClick={backfillTranscripts} disabled={backfilling} title="Fetch and store every past call's raw transcript">
+              {backfilling ? <Loader2 className="h-4 w-4 animate-spin" /> : <ScrollText className="h-4 w-4" />}
+              {backfilling ? "Back-filling…" : "Back-fill transcripts"}
+            </Button>
+          )}
           <Button size="sm" onClick={syncNow} disabled={syncing}>
             {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
             {syncing ? "Syncing…" : errorState ? "Retry sync" : "Sync now"}

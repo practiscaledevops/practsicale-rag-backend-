@@ -153,12 +153,237 @@ export function chunkDocument(
     return chunkMarkdown(text, metadata);
   }
 
-  // Transcripts and any unknown type: recursive fallback, no parents.
-  // TODO: for transcripts, split on speaker turns with 20-50% overlap.
+  // Transcripts: a summary chunk (built from metadata + the first/last turns)
+  // followed by time-anchored, turn-aligned body chunks. See chunkTranscript.
+  if (sourceType === "transcript") {
+    return chunkTranscript(text, metadata);
+  }
+
+  // Any unknown type: recursive fallback, no parents.
   return splitRecursive(text).map((content) => ({
     content,
     metadata: { ...metadata, source_type: sourceType, tokens: approxTokens(content) },
   }));
+}
+
+// ---- transcript chunking -----------------------------------------------------
+//
+// A call transcript is a run of timestamped speaker turns:
+//   0:17 - Sherman Mathews
+//     Good afternoon, Cliff...
+//   0:19 - Cliff A
+//     Good...
+// Turns are kept WHOLE (never split inside one). We emit a compact summary chunk
+// first — the call's identity (built from metadata) plus the first/last turns —
+// so "what happened at the start/end of X's call on 22 Sept" lands immediately;
+// then we group consecutive turns into ~1,400-token chunks, each prefixed with a
+// self-describing, time-anchored locator, with ~15% turn overlap so an answer
+// spanning a boundary is not cut.
+
+/** One timestamped speaker turn parsed from a transcript. */
+export interface TranscriptTurn {
+  /** The turn's start timestamp exactly as written, e.g. "0:17" or "1:02:40". */
+  start: string;
+  /** `start` expressed in whole seconds (for ordering / spans). */
+  startSeconds: number;
+  /** Speaker label as written (may carry an email or "(email)"); "" if absent. */
+  speaker: string;
+  /** The header line, e.g. "0:17 - Sherman Mathews". */
+  header: string;
+  /** The turn's spoken body (the indented lines under the header), trimmed. */
+  body: string;
+  /** header + body — the full turn text. */
+  text: string;
+}
+
+// A transcript header line: a timestamp (M:SS, MM:SS or H:MM:SS), a dash, then
+// the speaker. Anchored to the line start (multiline) so a time inside spoken
+// text is never mistaken for a new turn.
+const TURN_HEADER_RE = /^(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(.*)$/;
+
+/** ~tokens per transcript body chunk, and the turn overlap between neighbours. */
+const TRANSCRIPT_CHUNK_TOKENS = 1400;
+const TRANSCRIPT_OVERLAP_RATIO = 0.15;
+// Cap on the carried-forward overlap prefix so target + overlap stays below the
+// ~1,800-token safety ceiling and a long turn is never duplicated wholesale.
+const TRANSCRIPT_OVERLAP_MAX_TOKENS = 350;
+
+function timestampToSeconds(ts: string): number {
+  const parts = ts.split(":").map((n) => Number(n));
+  if (parts.some((n) => Number.isNaN(n))) return 0;
+  return parts.length === 3 ? parts[0] * 3600 + parts[1] * 60 + parts[2] : parts[0] * 60 + parts[1];
+}
+
+/**
+ * Parse a transcript into timestamped turns. Text before the first timestamp
+ * (e.g. an ingest header block) is preamble and skipped — the turns are what we
+ * chunk. Pure and side-effect free; unit-tested.
+ */
+export function parseTranscriptTurns(text: string): TranscriptTurn[] {
+  const lines = (text ?? "").split(/\r?\n/);
+  const turns: TranscriptTurn[] = [];
+  let cur: { start: string; speaker: string; header: string; body: string[] } | null = null;
+
+  const flush = () => {
+    if (!cur) return;
+    const body = cur.body.join("\n").trim();
+    const header = cur.header.trim();
+    turns.push({
+      start: cur.start,
+      startSeconds: timestampToSeconds(cur.start),
+      speaker: cur.speaker.trim(),
+      header,
+      body,
+      text: body ? `${header}\n${body}` : header,
+    });
+  };
+
+  for (const line of lines) {
+    const m = TURN_HEADER_RE.exec(line);
+    if (m) {
+      flush();
+      cur = { start: m[1], speaker: m[2] ?? "", header: line.trim(), body: [] };
+    } else if (cur) {
+      cur.body.push(line);
+    }
+    // else: preamble before the first turn — skipped.
+  }
+  flush();
+  return turns;
+}
+
+function metaStr(metadata: Record<string, unknown>, key: string): string {
+  const v = metadata[key];
+  return v == null ? "" : String(v).trim();
+}
+
+/** First non-empty recording URL from `recording_links` (array or string). */
+function firstRecordingLink(metadata: Record<string, unknown>): string {
+  const links = metadata.recording_links;
+  if (Array.isArray(links)) {
+    const first = links.find((l) => typeof l === "string" && l.trim());
+    return typeof first === "string" ? first.trim() : "";
+  }
+  return typeof links === "string" ? links.trim() : "";
+}
+
+/** The call's identity line for a locator, e.g. "Sherman Mathews → Cliff A · NEMT · 2026-09-22". */
+function transcriptLocatorBase(metadata: Record<string, unknown>): string {
+  const consultant = metaStr(metadata, "consultant_name") || metaStr(metadata, "consultant") || "Consultant";
+  const prospect = metaStr(metadata, "prospect_name") || "Prospect";
+  const practice = metaStr(metadata, "practice_type");
+  const callDate = metaStr(metadata, "call_date") || metaStr(metadata, "created_at");
+  return [`${consultant} → ${prospect}`, practice, callDate].filter(Boolean).join(" · ");
+}
+
+/** Summary chunk: the call's identity (from metadata) + its first/last turns. */
+function transcriptSummary(turns: TranscriptTurn[], metadata: Record<string, unknown>): string {
+  const consultant = metaStr(metadata, "consultant_name") || metaStr(metadata, "consultant") || "Unknown consultant";
+  const prospect = metaStr(metadata, "prospect_name") || "Unknown prospect";
+  const practice = metaStr(metadata, "practice_type");
+  const callDate = metaStr(metadata, "call_date") || metaStr(metadata, "created_at");
+  const outcome = metaStr(metadata, "call_outcome");
+  const score = metaStr(metadata, "overall_score");
+  const band = metaStr(metadata, "performance_band");
+  const duration = metaStr(metadata, "call_duration_minutes");
+  const recording = firstRecordingLink(metadata);
+
+  const header = [
+    `Call transcript — ${consultant} → ${prospect}`,
+    practice ? `Practice type: ${practice}` : "",
+    callDate ? `Call date: ${callDate}` : "",
+    outcome ? `Outcome: ${outcome}` : "",
+    score ? `Score: ${score}/100${band ? ` (${band})` : ""}` : band ? `Band: ${band}` : "",
+    duration ? `Duration: ${duration} min` : "",
+    recording ? `Recording: ${recording}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const head = turns.slice(0, 2).map((t) => t.text).join("\n\n");
+  // Only add a distinct "end" block when the tail turns aren't already the head.
+  const tail = turns.length > 4 ? turns.slice(-2).map((t) => t.text).join("\n\n") : "";
+  const parts = [header, head ? `Start of call:\n${head}` : ""];
+  if (tail) parts.push(`End of call:\n${tail}`);
+  return parts.filter(Boolean).join("\n\n");
+}
+
+function chunkTranscript(text: string, metadata: Record<string, unknown>): Chunk[] {
+  const turns = parseTranscriptTurns(text);
+  // Not a timestamped transcript (or empty) → recursive fallback so nothing is lost.
+  if (turns.length === 0) {
+    return splitRecursive(text).map((content) => ({
+      content,
+      metadata: { ...metadata, source_type: "transcript", tokens: approxTokens(content) },
+    }));
+  }
+
+  const base = { ...metadata, source_type: "transcript" };
+  const chunks: Chunk[] = [];
+
+  // 1) Summary chunk first.
+  const summary = transcriptSummary(turns, metadata);
+  chunks.push({ content: summary, metadata: { ...base, is_summary: true, tokens: approxTokens(summary) } });
+
+  // 2) Body chunks: each chunk is [overlap turns from the previous chunk] +
+  //    [new turns filling up to ~TRANSCRIPT_CHUNK_TOKENS], prefixed with a
+  //    time-anchored locator. The overlap (~15% of the previous chunk's new
+  //    turns) is PREPENDED to the next chunk — never emitted on its own — so
+  //    there are no near-empty chunks and an answer spanning a boundary isn't
+  //    cut. A turn is never split; a turn larger than the target becomes its
+  //    own chunk (with no overlap prefix, so the safety ceiling holds).
+  const turnTokens = turns.map((t) => approxTokens(t.text));
+  const locBase = transcriptLocatorBase(metadata);
+  let i = 0;
+  let prevTail: TranscriptTurn[] = [];
+  while (i < turns.length) {
+    // Don't stack an overlap prefix on a turn that already exceeds the target —
+    // that would push the chunk past the safety ceiling.
+    const startBig = turnTokens[i] > TRANSCRIPT_CHUNK_TOKENS;
+    const group: TranscriptTurn[] = startBig ? [] : [...prevTail];
+    let tokens = group.reduce((s, t) => s + approxTokens(t.text), 0);
+    const startNew = i;
+    while (i < turns.length) {
+      // Always take at least one NEW turn, even if it alone exceeds the target.
+      if (i > startNew && tokens + turnTokens[i] > TRANSCRIPT_CHUNK_TOKENS) break;
+      group.push(turns[i]);
+      tokens += turnTokens[i];
+      i++;
+    }
+
+    const first = group[0];
+    const last = group[group.length - 1];
+    const span = first.start === last.start ? first.start : `${first.start}–${last.start}`;
+    const locator = `[${[locBase, span].filter(Boolean).join(" · ")}]`;
+    const content = `${locator}\n${group.map((t) => t.text).join("\n\n")}`;
+    chunks.push({
+      content,
+      metadata: {
+        ...base,
+        is_transcript_body: true,
+        turn_start: first.start,
+        turn_end: last.start,
+        tokens: approxTokens(content),
+      },
+    });
+
+    if (i >= turns.length) break;
+    // Carry the last ~15% of THIS chunk's new turns forward as the next chunk's
+    // prefix. Bound its size (drop the oldest, then all, if it's too big) so a
+    // long turn is never duplicated wholesale into the next chunk.
+    const newTurns = turns.slice(startNew, i);
+    let ov = newTurns.length > 1 ? Math.max(1, Math.round(newTurns.length * TRANSCRIPT_OVERLAP_RATIO)) : 0;
+    ov = Math.min(ov, newTurns.length - 1);
+    let tail = ov > 0 ? newTurns.slice(newTurns.length - ov) : [];
+    let tailTokens = tail.reduce((s, t) => s + approxTokens(t.text), 0);
+    while (tail.length > 1 && tailTokens > TRANSCRIPT_OVERLAP_MAX_TOKENS) {
+      tailTokens -= approxTokens(tail[0].text);
+      tail = tail.slice(1);
+    }
+    prevTail = tail.length === 1 && tailTokens > TRANSCRIPT_OVERLAP_MAX_TOKENS ? [] : tail;
+  }
+
+  return chunks;
 }
 
 // ---- knowledge-object (semantic) chunking ------------------------------------

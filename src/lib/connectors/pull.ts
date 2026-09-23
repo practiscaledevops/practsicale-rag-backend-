@@ -17,13 +17,15 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { supabaseAdmin } from "@/lib/supabase";
 import { serializeRecord } from "@/lib/chunking";
-import { ingestOne } from "@/lib/ingest";
+import { ingestOne, type IngestResult } from "@/lib/ingest";
 import { redactPII } from "@/lib/redact";
 import { assertPublicUrl } from "@/lib/net-guard";
 import { isAllowedSecretRef } from "@/lib/connectors/secret-ref";
 
-// Big free-text fields belong in the chunked BODY, not in metadata.
-const OMIT_FROM_META = new Set(["full_report", "report", "full_report_md", "analysis"]);
+// Big free-text fields belong in the chunked BODY, not in metadata. The raw
+// `transcript` is a ~46 KB field that gets its own document (see runPull), so it
+// never bloats a report doc's body or metadata.
+const OMIT_FROM_META = new Set(["full_report", "report", "full_report_md", "analysis", "transcript"]);
 
 /**
  * Structured metadata to stamp on every chunk of a record: the record's scalar
@@ -56,6 +58,11 @@ function recordMetadata(rec: Record<string, unknown>): Record<string, unknown> {
       }
     }
   }
+  // Surface the call's practice type as the generic `category` the Documents
+  // table + Collections control centre already render and filter on, so every
+  // call and transcript groups by practice type (NEMT, Phlebotomy, Home Care…).
+  // Only when the record actually carries one — otherwise leave it unset ("—").
+  if (typeof out.practice_type === "string" && out.practice_type) out.category = out.practice_type;
   return out;
 }
 
@@ -69,6 +76,85 @@ function buildTitle(rec: Record<string, unknown>, sourceType: string, recordId?:
     return `${who || sourceType}${score != null ? ` (${score})` : ""}`.trim();
   }
   return recordId ? `${sourceType} ${recordId}` : sourceType;
+}
+
+// ---- transcript document -----------------------------------------------------
+
+const str = (v: unknown): string => (v == null ? "" : String(v).trim());
+
+/** First recording URL from a record's `recording_links` (array or string). */
+function firstRecording(rec: Record<string, unknown>): string {
+  const links = rec.recording_links;
+  if (Array.isArray(links)) {
+    const first = links.find((l) => typeof l === "string" && l.trim());
+    return typeof first === "string" ? first.trim() : "";
+  }
+  return typeof links === "string" ? links.trim() : "";
+}
+
+/**
+ * Ingest a call's RAW TRANSCRIPT as its own document, linked to the call_score
+ * doc by the shared record id. The body is a short readable header (consultant,
+ * prospect, practice type, call date, outcome, score/band, duration, recording)
+ * followed by the verbatim transcript; chunkDocument("transcript") then splits
+ * it by speaker turn. Structured fields ride in metadata (consultant/date/
+ * outcome/score/band/category…) so retrieval can filter by date + consultant +
+ * practice type. Redaction (emails → [EMAIL]) happens on ingest, as intended —
+ * names stay (they're in the metadata and speaker labels). `rec` must already
+ * have `transcript` stripped. Returns null when there is no transcript text.
+ */
+async function ingestTranscript(
+  db: SupabaseClient,
+  source: DataSourceRow,
+  rec: Record<string, unknown>,
+  transcript: string,
+  recordId: string | undefined
+): Promise<IngestResult | null> {
+  if (!transcript.trim()) return null;
+
+  const consultant = str(rec.consultant_name) || str(rec.consultant) || "Unknown consultant";
+  const prospect = str(rec.prospect_name) || "Unknown prospect";
+  const practice = str(rec.practice_type);
+  const callDate = str(rec.call_date) || str(rec.created_at);
+  const score = str(rec.overall_score);
+  const band = str(rec.performance_band);
+  const recording = firstRecording(rec);
+
+  const header = [
+    `Call transcript — ${consultant} → ${prospect}`,
+    `Consultant: ${consultant}`,
+    `Prospect: ${prospect}`,
+    practice ? `Practice type: ${practice}` : "",
+    callDate ? `Call date: ${callDate}` : "",
+    str(rec.call_outcome) ? `Outcome: ${str(rec.call_outcome)}` : "",
+    score ? `Score: ${score}/100${band ? ` (${band})` : ""}` : band ? `Band: ${band}` : "",
+    str(rec.call_duration_minutes) ? `Duration: ${str(rec.call_duration_minutes)} min` : "",
+    recording ? `Recording: ${recording}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const title = `Transcript — ${consultant} → ${prospect}${callDate ? ` (${callDate})` : ""}`;
+
+  return ingestOne(db, {
+    orgId: source.org_id,
+    sourceType: "transcript",
+    // Transcripts are lived experience, not doctrine → Business Reality / sales.
+    intelligenceClass: "business_reality",
+    domain: "sales",
+    title,
+    text: `${header}\n\n${transcript}`,
+    metadata: {
+      data_source: source.name,
+      data_source_slug: source.slug ?? null,
+      source_record_id: recordId ?? null,
+      ...recordMetadata(rec),
+      kind: "transcript",
+      // Both docs share the record id, linking transcript ↔ call_score.
+      linked_call_score_id: recordId ?? null,
+    },
+    dataSourceId: source.id,
+  });
 }
 
 export interface DataSourceRow {
@@ -99,6 +185,8 @@ export interface PullResult {
   documentsIngested: number;
   documentsSkipped: number;
   chunksIngested: number;
+  /** Raw call transcripts ingested as their own linked document this run. */
+  transcriptsIngested: number;
   cursorValue: string | null;
   error?: string;
 }
@@ -141,6 +229,7 @@ export async function runPull(
     documentsIngested: 0,
     documentsSkipped: 0,
     chunksIngested: 0,
+    transcriptsIngested: 0,
     cursorValue: source.cursor_value ?? null,
   };
 
@@ -170,10 +259,16 @@ export async function runPull(
           ? String(rec[source.record_id_field])
           : undefined;
 
-      const text = serializeRecord(rec);
+      // The raw transcript (present when include_transcript=true) gets its OWN
+      // document below; strip it here so the report doc's body + metadata stay
+      // lean (a 46 KB transcript would otherwise bloat both).
+      const transcript = typeof rec.transcript === "string" ? rec.transcript.trim() : "";
+      const { transcript: _omitTranscript, ...recNoTx } = rec;
+
+      const text = serializeRecord(recNoTx);
       if (!text.trim()) continue;
 
-      const title = buildTitle(rec, source.source_type, recordId);
+      const title = buildTitle(recNoTx, source.source_type, recordId);
 
       const res = await ingestOne(db, {
         orgId: source.org_id,
@@ -181,13 +276,14 @@ export async function runPull(
         title,
         text,
         // Provenance + the record's structured fields (consultant, score, band,
-        // outcome, phase_scores…). Kept structurally separate from any instruction;
-        // string values are PII-redacted in recordMetadata().
+        // outcome, phase_scores, practice type as `category`…). Kept structurally
+        // separate from any instruction; string values are PII-redacted in
+        // recordMetadata().
         metadata: {
           data_source: source.name,
           data_source_slug: source.slug ?? null,
           source_record_id: recordId ?? null,
-          ...recordMetadata(rec),
+          ...recordMetadata(recNoTx),
         },
         dataSourceId: source.id,
       });
@@ -195,6 +291,14 @@ export async function runPull(
       if (res.skipped) result.documentsSkipped += 1;
       else result.documentsIngested += 1;
       result.chunksIngested += res.chunks;
+
+      // Second document: the raw transcript, if the record carried one. Linked to
+      // the report doc by the shared record id; chunked by speaker turn.
+      if (transcript) {
+        const tRes = await ingestTranscript(db, source, recNoTx, transcript, recordId);
+        if (tRes && !tRes.skipped) result.transcriptsIngested += 1;
+        if (tRes) result.chunksIngested += tRes.chunks;
+      }
 
       // Advance the watermark to the largest cursor value seen this run.
       if (source.cursor_field && rec[source.cursor_field] != null) {
@@ -250,6 +354,67 @@ export async function runPull(
   }
 }
 
+// ---- transcript back-fill ----------------------------------------------------
+
+export interface BackfillResult {
+  /** Reports seen that carried a transcript (the ones we attempted to ingest). */
+  calls: number;
+  transcriptsCreated: number;
+  transcriptsSkipped: number;
+}
+
+/**
+ * Back-fill transcript documents for EVERY call a source can return. Pages all
+ * reports with include_transcript=true (ignoring the incremental cursor) and
+ * ingests a `transcript` document for each call that has one. Idempotent — a
+ * call whose transcript is already stored (by content hash) is skipped. Shared
+ * by the CLI script and the admin route so both behave identically.
+ */
+export async function backfillTranscripts(
+  source: DataSourceRow,
+  opts: {
+    db?: SupabaseClient;
+    deadlineAt?: number;
+    onProgress?: (p: { done: number; total: number; created: number; skipped: number }) => void;
+  } = {}
+): Promise<BackfillResult> {
+  const db = opts.db ?? supabaseAdmin();
+  const out: BackfillResult = { calls: 0, transcriptsCreated: 0, transcriptsSkipped: 0 };
+
+  const records = await fetchRecords(source, opts.deadlineAt, {
+    ignoreCursor: true,
+    forceTranscript: true,
+    limit: 500,
+  });
+
+  // Only records that actually carry a transcript.
+  const withTranscript = records.filter(
+    (r): r is Record<string, unknown> =>
+      !!r && typeof r === "object" && typeof (r as Record<string, unknown>).transcript === "string" &&
+      ((r as Record<string, unknown>).transcript as string).trim().length > 0
+  );
+  const total = withTranscript.length;
+
+  for (const rec of withTranscript) {
+    if (opts.deadlineAt && Date.now() > opts.deadlineAt) break;
+    const recordId =
+      source.record_id_field && rec[source.record_id_field] != null
+        ? String(rec[source.record_id_field])
+        : undefined;
+    const transcript = (rec.transcript as string).trim();
+    const { transcript: _omit, ...recNoTx } = rec;
+
+    const res = await ingestTranscript(db, source, recNoTx, transcript, recordId);
+    out.calls += 1;
+    if (res?.skipped) out.transcriptsSkipped += 1;
+    else if (res) out.transcriptsCreated += 1;
+
+    opts.onProgress?.({ done: out.calls, total, created: out.transcriptsCreated, skipped: out.transcriptsSkipped });
+  }
+
+  return out;
+}
+
 // ---- HTTP + extraction helpers -----------------------------------------------
 
 const MAX_PAGES = 40; // safety cap: MAX_PAGES * limit records per sync
@@ -279,7 +444,15 @@ async function readBounded(res: Response, maxBytes: number): Promise<string> {
   return Buffer.concat(parts).toString("utf8");
 }
 
-async function fetchRecords(source: DataSourceRow, deadlineAt?: number): Promise<unknown[]> {
+/** Options that let the back-fill reuse this fetcher: sweep every record
+ *  (ignore the cursor) and force the transcript to come down on every page. */
+interface FetchOpts {
+  ignoreCursor?: boolean;
+  forceTranscript?: boolean;
+  limit?: number;
+}
+
+async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: FetchOpts = {}): Promise<unknown[]> {
   // SSRF guard: never let an admin-configured endpoint point the server at a
   // private/loopback/link-local address (e.g. cloud metadata at 169.254.169.254).
   await assertPublicUrl(source.endpoint_url as string);
@@ -293,8 +466,14 @@ async function fetchRecords(source: DataSourceRow, deadlineAt?: number): Promise
   for (const [k, v] of Object.entries(source.query_params ?? {})) {
     if (v != null) baseParams.set(k, String(v));
   }
+  // Ask the call-scoring API to include each call's raw transcript, so the run
+  // can also store it as its own document. Forced for the transcript back-fill.
+  if (source.source_type === "call_score" || opts.forceTranscript) {
+    baseParams.set("include_transcript", "true");
+  }
+  if (opts.limit && opts.limit > 0) baseParams.set("limit", String(opts.limit));
   const cursorParamName = source.cursor_param ?? source.cursor_field;
-  if (cursorParamName && source.cursor_value) {
+  if (!opts.ignoreCursor && cursorParamName && source.cursor_value) {
     baseParams.set(cursorParamName, source.cursor_value);
   }
 

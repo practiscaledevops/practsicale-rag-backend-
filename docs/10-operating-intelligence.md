@@ -124,6 +124,19 @@ multipart `file` (≤ 4 MB) | `url` or JSON `{ url }` and reply `{ name, kind,
 title, text, chars, truncated, meta }` or `{ error }`. The admin route alone
 also accepts `{ storagePath, name, mime?, full? }` and the `full` flag (below).
 
+Call transcripts: the call-scoring pull connector (`src/lib/connectors/pull.ts`)
+requests `include_transcript=true` and now emits **two** documents per call — the
+existing `call_score` report (transcript stripped, so it stays lean) and a linked
+`transcript` document (`intelligence_class = business_reality`, `domain = sales`)
+carrying the same structured metadata (consultant, date, outcome, score/band,
+`practice_type` surfaced as `category`) plus `kind: "transcript"` and
+`linked_call_score_id` (the shared record id). Transcripts chunk by speaker turn
+(`chunkDocument("transcript")`): a summary chunk first (call identity + first/last
+turns), then ~1,400-token, time-anchored chunks with ~15% turn overlap, so a
+day's or a consultant's calls filter by date + consultant + practice type.
+Back-fill past calls with `npm run backfill:transcripts` or the source health
+page's "Back-fill transcripts" button (`POST /api/admin/sources/[id]/backfill-transcripts`).
+
 ### Large uploads — `src/lib/knowledge-uploads.ts`
 
 The hosting platform rejects request bodies over ~4.5 MB before a handler runs,

@@ -19,7 +19,8 @@
     "set:prompts": "tsx scripts/set-prompts.ts",
     "set:provider-key": "tsx scripts/set-provider-key.ts",
     "compile:knowledge": "tsx scripts/compile-knowledge.ts",
-    "rebuild:call-metrics": "tsx scripts/rebuild-call-metrics.ts"
+    "rebuild:call-metrics": "tsx scripts/rebuild-call-metrics.ts",
+    "backfill:transcripts": "tsx scripts/backfill-transcripts.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^1.0.0",

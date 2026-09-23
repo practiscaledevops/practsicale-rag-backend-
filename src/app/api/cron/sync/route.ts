@@ -80,6 +80,7 @@ async function handle(req: Request): Promise<Response> {
       ingested: res.documentsIngested,
       skipped: res.documentsSkipped,
       chunks: res.chunksIngested,
+      transcripts: res.transcriptsIngested,
       ...(res.error ? { error: res.error } : {}),
     });
     if (source.source_type === "call_score" && res.documentsIngested > 0) refreshOrgs.add(source.org_id);
