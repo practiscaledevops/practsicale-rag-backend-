@@ -40,6 +40,20 @@ const OMIT_FROM_META = new Set(["full_report", "report", "full_report_md", "anal
 // not personal contact data. (Emails/phones in free-text fields are still redacted.)
 const NO_REDACT_KEY = /(^|_)(id|date|at|slug|url|links|status|band|outcome|type|version|count|score|scores|ratio|duration|pct|percent)$/i;
 
+// The scoring app leaves `call_date` blank on many recent records, and its UI
+// shows `created_at` (the report/scored date) as the call's date. To match the
+// app exactly — and never lose a recent call to a blank date — the canonical
+// `call_date` we store is the DATE PART of created_at, falling back to a reported
+// call_date. Returns "YYYY-MM-DD" or null.
+function isoDatePart(v: unknown): string | null {
+  const m = String(v ?? "").trim().match(/^(d{4}-d{2}-d{2})/);
+  return m ? m[1] : null;
+}
+/** The date to group/filter a call by: created_at's date (app-matching), else call_date. */
+function effectiveCallDate(rec: Record<string, unknown>): string | null {
+  return isoDatePart(rec.created_at) || isoDatePart(rec.call_date);
+}
+
 function recordMetadata(rec: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(rec)) {
@@ -63,6 +77,16 @@ function recordMetadata(rec: Record<string, unknown>): Record<string, unknown> {
   // call and transcript groups by practice type (NEMT, Phlebotomy, Home Care…).
   // Only when the record actually carries one — otherwise leave it unset ("—").
   if (typeof out.practice_type === "string" && out.practice_type) out.category = out.practice_type;
+  // Canonical call date = created_at's date (what the scoring app UI shows and
+  // always present); keep the raw reported one under `reported_call_date` when it
+  // differs. This makes every date filter/review match the app and stops recent
+  // calls (blank call_date) from falling into "no date".
+  const eff = effectiveCallDate(rec);
+  if (eff) {
+    const reported = isoDatePart(rec.call_date);
+    if (reported && reported !== eff) out.reported_call_date = reported;
+    out.call_date = eff;
+  }
   return out;
 }
 
@@ -115,7 +139,7 @@ async function ingestTranscript(
   const consultant = str(rec.consultant_name) || str(rec.consultant) || "Unknown consultant";
   const prospect = str(rec.prospect_name) || "Unknown prospect";
   const practice = str(rec.practice_type);
-  const callDate = str(rec.call_date) || str(rec.created_at);
+  const callDate = effectiveCallDate(rec) || str(rec.call_date) || str(rec.created_at);
   const score = str(rec.overall_score);
   const band = str(rec.performance_band);
   const recording = firstRecording(rec);

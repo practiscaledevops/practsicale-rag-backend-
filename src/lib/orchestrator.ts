@@ -20,7 +20,7 @@ import { z } from "zod";
 import { supabaseAdmin } from "@/lib/supabase";
 import { embed } from "@/lib/embeddings";
 import { hybridSearchLane, expandParents, expandTranscripts, LANE_RPC_MISSING, type LaneChunk, type RetrievedChunk } from "@/lib/retrieval";
-import { parseCallReviewFilter, fetchCallsByFilter, newestCallDate, describeFilter, type CallReviewFilter } from "@/lib/call-review";
+import { parseCallReviewFilter, fetchCallsByFilter, describeFilter, type CallReviewFilter } from "@/lib/call-review";
 import { rerank } from "@/lib/rerank";
 import { rewriteQueries, type ChatTurn } from "@/lib/query-transform";
 import { getActivePrompts } from "@/lib/prompts-db";
@@ -382,10 +382,12 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   const reviewPromise: Promise<{ filter: CallReviewFilter; chunks: RetrievedChunk[]; callCount: number; note: string | null } | null> =
     reviewProbe.isReview && transcriptsInScope
       ? (async () => {
-          // Anchor "today"/"yesterday" and an omitted year to the data's newest
-          // call_date (calls are dated in the data, not by the wall clock).
-          const ref = await newestCallDate(db, orgId);
-          const filter = parseCallReviewFilter(query, { referenceDate: ref ?? undefined });
+          // Anchor "yesterday" / "last 3 days" / an omitted year to the real
+          // calendar so consultant audits are date-accurate. The 20-minute sync
+          // keeps the call data current, and dates are stored to match the
+          // scoring app (created_at, in UTC).
+          const ref = new Date().toISOString().slice(0, 10);
+          const filter = parseCallReviewFilter(query, { referenceDate: ref });
           if (!filter.isReview) return null;
           emit({ stage: "searching", label: `Pulling every call from ${describeFilter(filter)}` });
           const res = await fetchCallsByFilter(db, orgId, filter, { maxCalls: 12, maxTokens: 120_000 });

@@ -16,6 +16,7 @@ import {
   GitCommitHorizontal,
   Gauge,
   ScrollText,
+  CalendarCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
@@ -85,6 +86,7 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
   const [syncing, setSyncing] = React.useState(false);
   const [toggling, setToggling] = React.useState(false);
   const [backfilling, setBackfilling] = React.useState(false);
+  const [repairing, setRepairing] = React.useState(false);
   const [msg, setMsg] = React.useState<{ tone: "success" | "danger"; text: string } | null>(null);
 
   async function syncNow() {
@@ -129,6 +131,30 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
       setMsg({ tone: "danger", text: "Network error — please try again." });
     } finally {
       setBackfilling(false);
+    }
+  }
+
+  async function repairDates() {
+    setRepairing(true);
+    setMsg(null);
+    try {
+      const res = await fetch(`/api/admin/repair-call-dates`, { method: "POST" });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMsg({ tone: "danger", text: json.error ?? `Repair failed (${res.status})` });
+        return;
+      }
+      const c = json.chunks?.fixed ?? 0;
+      const d = json.documents?.fixed ?? 0;
+      setMsg({
+        tone: "success",
+        text: `Call dates aligned with the scoring app — ${c} chunk${c === 1 ? "" : "s"} and ${d} document${d === 1 ? "" : "s"} corrected.`,
+      });
+      router.refresh();
+    } catch {
+      setMsg({ tone: "danger", text: "Network error — please try again." });
+    } finally {
+      setRepairing(false);
     }
   }
 
@@ -184,6 +210,12 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
             <Button variant="outline" size="sm" onClick={backfillTranscripts} disabled={backfilling} title="Fetch and store every past call's raw transcript">
               {backfilling ? <Loader2 className="h-4 w-4 animate-spin" /> : <ScrollText className="h-4 w-4" />}
               {backfilling ? "Back-filling…" : "Back-fill transcripts"}
+            </Button>
+          )}
+          {health.kind === "pull_http" && (
+            <Button variant="outline" size="sm" onClick={repairDates} disabled={repairing} title="Align every stored call date with the scoring app (fixes blank / mis-dated calls)">
+              {repairing ? <Loader2 className="h-4 w-4 animate-spin" /> : <CalendarCheck className="h-4 w-4" />}
+              {repairing ? "Repairing…" : "Repair call dates"}
             </Button>
           )}
           <Button size="sm" onClick={syncNow} disabled={syncing}>

@@ -29,6 +29,9 @@ import type { RetrievedChunk } from "@/lib/retrieval";
 export interface CallReviewFilter {
   /** ISO call_date "YYYY-MM-DD" the request named (exact match), if any. */
   date?: string;
+  /** Inclusive ISO range ("last 3 days", "this week") — used instead of `date`. */
+  dateFrom?: string;
+  dateTo?: string;
   /** Raw candidate consultant name phrases (matched case-insensitively, ANY). */
   consultants?: string[];
   /** One of the six canonical practice types, if named. */
@@ -123,6 +126,30 @@ export function resolveDate(query: string, referenceDate: string): string | unde
   return undefined;
 }
 
+/**
+ * A relative date RANGE the request names ("last 3 days", "past week", "this
+ * week"), inclusive, anchored to `referenceDate` (the caller passes the real
+ * current date). Returns { from, to } ISO or undefined.
+ */
+export function resolveDateRange(
+  query: string,
+  referenceDate: string
+): { from: string; to: string } | undefined {
+  const ref = isISODate(referenceDate) ? referenceDate : new Date().toISOString().slice(0, 10);
+  const q = (query ?? "").toLowerCase();
+  const LAST = "(?:last|past|previous|recent)";
+  let m = new RegExp(`\\b${LAST}\\s+(\\d{1,2})\\s+days?\\b`).exec(q);
+  if (m) { const nn = Math.max(1, Math.min(90, Number(m[1]))); return { from: shiftISO(ref, -(nn - 1)), to: ref }; }
+  if (new RegExp(`\\b${LAST}\\s+few\\s+days?\\b`).test(q)) return { from: shiftISO(ref, -2), to: ref };
+  m = new RegExp(`\\b${LAST}\\s+(\\d{1,2})\\s+weeks?\\b`).exec(q);
+  if (m) { const nn = Math.max(1, Math.min(26, Number(m[1]))); return { from: shiftISO(ref, -(nn * 7 - 1)), to: ref }; }
+  if (new RegExp(`\\b${LAST}\\s+weeks?\\b`).test(q)) return { from: shiftISO(ref, -6), to: ref };
+  m = new RegExp(`\\b${LAST}\\s+(\\d{1,2})\\s+months?\\b`).exec(q);
+  if (m) { const nn = Math.max(1, Math.min(12, Number(m[1]))); return { from: shiftISO(ref, -(nn * 30 - 1)), to: ref }; }
+  if (/\bthis\s+week\b/.test(q)) { const dow = (new Date(ref + "T00:00:00Z").getUTCDay() + 6) % 7; return { from: shiftISO(ref, -dow), to: ref }; }
+  return undefined;
+}
+
 /** The named practice type (canonical casing), or undefined. */
 export function detectPracticeType(query: string): string | undefined {
   const q = query;
@@ -192,6 +219,8 @@ export function detectConsultants(query: string): string[] {
     new RegExp(`\\b(${NAME_CORE})['’]?s?\\s+calls?\\b`, "g"),
     // After "calls for/by/from": "calls for James Ephrim".
     new RegExp(`\\bcalls?\\s+(?:for|by|from)\\s+(${NAME_CORE})`, "gi"),
+    // After a preposition: "performance of James Ephrim", "for James Ephrim".
+    new RegExp(`\\b(?:[Oo]f|[Ff]or|[Aa]bout)\\s+(${NAME_CORE})`, "g"),
   ];
   for (const re of patterns) {
     for (const m of query.matchAll(re)) add(m[1]);
@@ -212,14 +241,16 @@ export function parseCallReviewFilter(query: string, opts?: { referenceDate?: st
   if (!q) return { isReview: false };
   const ref = isISODate(opts?.referenceDate) ? (opts!.referenceDate as string) : new Date().toISOString().slice(0, 10);
 
-  const date = resolveDate(q, ref);
+  const range = resolveDateRange(q, ref);
+  const date = range ? undefined : resolveDate(q, ref);
   const practiceType = detectPracticeType(q);
   const consultants = detectConsultants(q);
-  const hasFilter = !!date || !!practiceType || consultants.length > 0;
+  const hasFilter = !!date || !!range || !!practiceType || consultants.length > 0;
   const isReview = hasFilter && REVIEW_RE.test(q);
 
   const filter: CallReviewFilter = { isReview };
-  if (date) filter.date = date;
+  if (range) { filter.dateFrom = range.from; filter.dateTo = range.to; }
+  else if (date) filter.date = date;
   if (consultants.length) filter.consultants = consultants;
   if (practiceType) filter.practiceType = practiceType;
   return filter;
@@ -229,6 +260,7 @@ export function parseCallReviewFilter(query: string, opts?: { referenceDate?: st
 export function describeFilter(f: CallReviewFilter): string {
   const parts: string[] = [];
   if (f.date) parts.push(f.date);
+  else if (f.dateFrom && f.dateTo) parts.push(f.dateFrom === f.dateTo ? f.dateFrom : `${f.dateFrom} to ${f.dateTo}`);
   if (f.consultants?.length) parts.push(f.consultants.join(" / "));
   if (f.practiceType) parts.push(`${f.practiceType} calls`);
   return parts.join(" · ") || "matching calls";
@@ -345,9 +377,10 @@ export async function fetchCallsByFilter(
   filter: CallReviewFilter,
   opts: { maxCalls: number; maxTokens: number }
 ): Promise<{ chunks: RetrievedChunk[]; callCount: number; note: string | null }> {
-  const applyFilters = <T extends { eq: Function; ilike: Function; or: Function }>(q: T): T => {
+  const applyFilters = <T extends { eq: Function; ilike: Function; or: Function; gte: Function; lte: Function }>(q: T): T => {
     let out = q.eq("org_id", orgId).eq("source_type", "transcript");
     if (filter.date) out = out.eq("metadata->>call_date", filter.date);
+    else if (filter.dateFrom && filter.dateTo) out = out.gte("metadata->>call_date", filter.dateFrom).lte("metadata->>call_date", filter.dateTo);
     if (filter.practiceType) out = out.ilike("metadata->>practice_type", filter.practiceType);
     const cands = (filter.consultants ?? []).map(sanitizeConsultant).filter(Boolean);
     if (cands.length) out = out.or(cands.map((c) => `metadata->>consultant_name.ilike.%${c}%`).join(","));
