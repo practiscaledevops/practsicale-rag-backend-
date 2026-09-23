@@ -19,7 +19,7 @@
 import { z } from "zod";
 import { supabaseAdmin } from "@/lib/supabase";
 import { embed } from "@/lib/embeddings";
-import { hybridSearchLane, expandParents, LANE_RPC_MISSING, type LaneChunk, type RetrievedChunk } from "@/lib/retrieval";
+import { hybridSearchLane, expandParents, expandTranscripts, LANE_RPC_MISSING, type LaneChunk, type RetrievedChunk } from "@/lib/retrieval";
 import { rerank } from "@/lib/rerank";
 import { rewriteQueries, type ChatTurn } from "@/lib/query-transform";
 import { getActivePrompts } from "@/lib/prompts-db";
@@ -515,6 +515,27 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     emit({ stage: "expanding", label: "Gathering full context" });
     const parents = await expandParents(top);
     final = top.map((c, i) => ({ ...c, id: parents[i].id, content: parents[i].content, metadata: parents[i].metadata, parent_id: parents[i].parent_id }));
+  }
+
+  // 8.5 Full-call transcript depth. Retrieval finds the right CALLS but usually
+  //     only their best few chunks (often the summary = opening + closing), so a
+  //     "review this call" ask sees only the ends, not the middle. Replace the
+  //     top calls with their WHOLE transcript, then re-wrap each fetched chunk as
+  //     an OrchestratedChunk by cloning its call's annotation (lane/object/score
+  //     from the best surviving chunk) so lane grouping, the sources event and
+  //     citation validation all treat the expanded chunks like their call.
+  if (final.some((c) => c.source_type === "transcript")) {
+    emit({ stage: "expanding", label: "Reading the full call transcript" });
+    const annByDoc = new Map<string, OrchestratedChunk>();
+    for (const c of final) {
+      if (c.source_type === "transcript" && !annByDoc.has(c.document_id)) annByDoc.set(c.document_id, c);
+    }
+    const expanded = await expandTranscripts(orgId, final, { maxCalls: 3, maxTokens: 30000 });
+    final = expanded.map((c) => {
+      if (c.source_type !== "transcript") return c as OrchestratedChunk;
+      const ann = annByDoc.get(c.document_id);
+      return ann ? { ...ann, id: c.id, content: c.content, metadata: c.metadata, parent_id: c.parent_id } : (c as OrchestratedChunk);
+    });
   }
 
   // 9. Known disagreements: `contradicts` edges with BOTH ends in context (the

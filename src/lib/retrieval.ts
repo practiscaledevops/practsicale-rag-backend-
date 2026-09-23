@@ -211,3 +211,124 @@ export async function expandParents(chunks: RetrievedChunk[]): Promise<Retrieved
   const byId = new Map(parents.map((p) => [p.id, p]));
   return chunks.map((c) => (c.parent_id && byId.get(c.parent_id)) || c);
 }
+
+// ---- Full-call transcript expansion ------------------------------------------
+
+/** Approx token count for a chunk: the ingest-stamped count, else ~4 chars/token. */
+function chunkTokens(c: RetrievedChunk): number {
+  const md = c.metadata as Record<string, unknown> | null | undefined;
+  return Number(md?.tokens) || Math.ceil((c.content?.length ?? 0) / 4);
+}
+
+/**
+ * Pure core of expandTranscripts (no DB, exported for tests). Given the ranked
+ * input `chunks` and the full created_at-ordered chunk set of each target call
+ * (`chunksByDoc`), rebuild the list so each of the first `maxCalls` transcript
+ * documents — in first-seen (rank) order — is replaced by its full call, kept in
+ * reading order until its fair token share is spent (always at least the summary
+ * + 1 body chunk). The full call takes the rank position of its best chunk; the
+ * call's other original chunks are deduped away. Non-transcript chunks and calls
+ * beyond `maxCalls` pass through untouched.
+ */
+export function assembleFullCalls(
+  chunks: RetrievedChunk[],
+  chunksByDoc: Map<string, RetrievedChunk[]>,
+  maxCalls: number,
+  maxTokens: number
+): RetrievedChunk[] {
+  // Distinct transcript document_ids in first-seen order; expand only the top few.
+  const targets: string[] = [];
+  for (const c of chunks) {
+    if (c.source_type === "transcript" && !targets.includes(c.document_id)) targets.push(c.document_id);
+  }
+  const expandTargets = targets.slice(0, Math.max(0, maxCalls));
+  if (expandTargets.length === 0) return chunks;
+
+  // Fair per-call token share: three ~30k-token calls stay within the model's
+  // input budget. Keep each call's chunks in order until the share is hit, but
+  // never drop below the summary + first body chunk (a review needs both ends).
+  const share = Math.floor(maxTokens / expandTargets.length);
+  const fullCall = new Map<string, RetrievedChunk[]>();
+  for (const docId of expandTargets) {
+    const ordered = chunksByDoc.get(docId);
+    if (!ordered || ordered.length === 0) continue; // nothing fetched → leave the originals
+    const kept: RetrievedChunk[] = [];
+    let used = 0;
+    for (const c of ordered) {
+      const t = chunkTokens(c);
+      if (kept.length >= 2 && used + t > share) break;
+      kept.push(c);
+      used += t;
+    }
+    fullCall.set(docId, kept);
+  }
+
+  // Rebuild: pass every non-target chunk through; the FIRST time a target doc's
+  // chunk appears, splice in its full ordered set and skip that doc's other
+  // originals (deduped). Overall ordering is preserved.
+  const spliced = new Set<string>();
+  const out: RetrievedChunk[] = [];
+  for (const c of chunks) {
+    const full = c.source_type === "transcript" ? fullCall.get(c.document_id) : undefined;
+    if (!full) {
+      out.push(c);
+      continue;
+    }
+    if (spliced.has(c.document_id)) continue;
+    spliced.add(c.document_id);
+    out.push(...full);
+  }
+  return out;
+}
+
+/**
+ * Depth expansion for call reviews. Retrieval FINDS the right calls but usually
+ * pulls only each call's best few chunks — often the summary (opening + closing)
+ * — so the model can only see the ends of a call, not the middle. Reviewing a
+ * whole call needs the FULL transcript. For the first `maxCalls` transcript
+ * documents among `chunks` (in rank order), fetch every chunk of the call in one
+ * query and splice the full, in-order transcript back in where its best chunk
+ * ranked, within a per-call token budget so the calls together stay ~`maxTokens`.
+ * Non-transcript inputs and calls beyond `maxCalls` are untouched. Migration- and
+ * edge-safe: no transcript chunks, or a DB error, returns `chunks` unchanged.
+ */
+export async function expandTranscripts(
+  orgId: string,
+  chunks: RetrievedChunk[],
+  opts?: { maxCalls?: number; maxTokens?: number }
+): Promise<RetrievedChunk[]> {
+  const maxCalls = opts?.maxCalls ?? 3;
+  const maxTokens = opts?.maxTokens ?? 30_000;
+
+  // Distinct transcript document_ids in first-seen (rank) order; expand the top few.
+  const targets: string[] = [];
+  for (const c of chunks) {
+    if (c.source_type === "transcript" && !targets.includes(c.document_id)) targets.push(c.document_id);
+  }
+  const expandTargets = targets.slice(0, maxCalls);
+  if (expandTargets.length === 0) return chunks;
+
+  // One query for every chunk of the target calls, in reading order (created_at
+  // ASC = summary first, then body chunks by timestamp). Select only the fields
+  // the pipeline uses — never `*`, which would pull the 1024-float embeddings.
+  // Re-filter by org_id: these document_ids already passed scoped retrieval, and
+  // the explicit org filter keeps the fetch tenant-safe on its own.
+  const db = supabaseAdmin();
+  const { data, error } = await db
+    .from("chunks")
+    .select("id, content, metadata, document_id, parent_id, source_type, created_at")
+    .eq("org_id", orgId)
+    .in("document_id", expandTargets)
+    .order("created_at", { ascending: true });
+  if (error || !data) {
+    // Never throw: a failed depth expansion falls back to the top-K picks.
+    console.error("[expandTranscripts] fetch failed:", error?.message ?? "no data");
+    return chunks;
+  }
+
+  const chunksByDoc = new Map<string, RetrievedChunk[]>();
+  for (const c of data as RetrievedChunk[]) {
+    chunksByDoc.set(c.document_id, [...(chunksByDoc.get(c.document_id) ?? []), c]);
+  }
+  return assembleFullCalls(chunks, chunksByDoc, maxCalls, maxTokens);
+}
