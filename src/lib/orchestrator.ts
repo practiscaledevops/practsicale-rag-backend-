@@ -530,7 +530,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     for (const c of final) {
       if (c.source_type === "transcript" && !annByDoc.has(c.document_id)) annByDoc.set(c.document_id, c);
     }
-    const expanded = await expandTranscripts(orgId, final, { maxCalls: 3, maxTokens: 30000 });
+    const expanded = await expandTranscripts(orgId, final, { maxCalls: 6, maxTokens: 90000 });
     final = expanded.map((c) => {
       if (c.source_type !== "transcript") return c as OrchestratedChunk;
       const ann = annByDoc.get(c.document_id);

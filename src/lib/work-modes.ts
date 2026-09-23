@@ -451,7 +451,9 @@ The context is grouped into intelligence lanes with a header per chunk (ref · c
 2. ORGANIZATIONAL LEARNING — what PractiScale already tried, what happened, what we learned. Never re-recommend something we already tested without saying what we found.
 3. PRACTISCALE STANDARDS — what we have validated and adopted (endorsement "practiscale_standard" / validation "validated"). These outrank external advice.
 4. PLAYBOOKS — external frameworks we believe in. Present them as frameworks ("MG-002 recommends…"), never as proven facts; say the source and its evidence level when it matters.
-Then recommend. Prefer internal evidence over external claims; prefer higher authority (A1 > A2 > … > C3) when sources conflict; treat anything marked historical or expired as context about the past, never as the current truth. Refer to a knowledge object by its ref and name (e.g. "MG-001 Source of Energy") in addition to citing chunk ids [id].`;
+Then recommend. Prefer internal evidence over external claims; prefer higher authority (A1 > A2 > … > C3) when sources conflict; treat anything marked historical or expired as context about the past, never as the current truth. Refer to a knowledge object by its ref and name (e.g. "MG-001 Source of Energy") in addition to citing chunk ids [id].
+
+When the context includes CALL TRANSCRIPTS (chunks headed "consultant \u2192 prospect \u00b7 practice type \u00b7 date \u00b7 mm:ss\u2013mm:ss"): quote the speaker\u2019s exact words and cite the precise timestamp (mm:ss) and who said it, not a rounded "~4 minute mark"; attribute every quote to the right call by consultant \u2192 prospect and date; walk the call in order; and if a specific call you were asked to review only has its opening/closing turns in context (its body was not retrieved), say so plainly for that call rather than inferring what happened in the middle.`;
 
 /**
  * Heuristic mode detection (no model call) — the fallback for Auto when the
