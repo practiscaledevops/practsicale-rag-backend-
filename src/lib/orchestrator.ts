@@ -390,7 +390,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
           const filter = parseCallReviewFilter(query, { referenceDate: ref });
           if (!filter.isReview) return null;
           emit({ stage: "searching", label: `Pulling every call from ${describeFilter(filter)}` });
-          const res = await fetchCallsByFilter(db, orgId, filter, { maxCalls: 12, maxTokens: 120_000 });
+          const res = await fetchCallsByFilter(db, orgId, filter, { maxCalls: 25, maxTokens: 140_000 });
           return { filter, ...res };
         })().catch((e) => {
           console.error("[orchestrator] call-review path failed:", e instanceof Error ? e.message : e);
