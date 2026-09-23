@@ -46,6 +46,8 @@ import {
 import { C, Chip, KBtn, KInput, KSelect, KTextarea, Field, Panel, ErrorNote, Spinner, api, type SelectOption } from "@/components/ui/brain-ui";
 import { kindOfFile, isYouTubeUrl, fmtBytes, capText, PROGRESS_LABEL, MAX_TEXT_CHARS, MAX_LONG_TEXT_CHARS, MAX_DIRECT_UPLOAD_BYTES, MAX_STORAGE_UPLOAD_BYTES, MAX_BYTES_BY_KIND, type ExtractKind } from "@/lib/ingest-adapters/pure";
 import { LONG_SOURCE_CHARS, sourceKey } from "@/lib/long-source-pure";
+import { VoiceInput } from "@/components/ui/VoiceInput";
+import { appendText } from "@/lib/voice-shared";
 import { LongSourcePanel } from "./LongSourcePanel";
 
 type Step = 1 | 2 | 3 | 4;
@@ -644,6 +646,11 @@ export function AddKnowledgeWizard() {
                     disabled={!!extracting}
                   />
                   <div className="flex flex-wrap items-center gap-3">
+                    {/* Dictate: speak instead of type — appends the transcript to the box, in every source mode. */}
+                    <VoiceInput
+                      onText={(t) => { setSingleAnyway(false); setText((cur) => appendText(cur, t)); }}
+                      disabled={!!extracting || longRunning || busy}
+                    />
                     <span className="ml-auto text-xs" style={{ color: C.muted }}>{text.length.toLocaleString()} chars</span>
                   </div>
                   <Field label="Title (optional)"><KInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Leave empty to let the Brain name it" /></Field>

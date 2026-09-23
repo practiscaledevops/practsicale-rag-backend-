@@ -1,10 +1,19 @@
-import { describe, it, expect } from "vitest";
-import { parseYouTubeId, isYouTubeUrl, kindOfFile, capText, MAX_TEXT_CHARS } from "@/lib/ingest-adapters/pure";
-import { htmlToText, stripHtml, htmlTitle, decodeEntities, platformOfHost } from "@/lib/ingest-adapters/url";
+import { describe, it, expect, vi } from "vitest";
+import { parseYouTubeId, isYouTubeUrl, isFathomUrl, kindOfFile, capText, MAX_TEXT_CHARS } from "@/lib/ingest-adapters/pure";
+import { htmlToText, stripHtml, htmlTitle, decodeEntities, platformOfHost, socialCaption } from "@/lib/ingest-adapters/url";
 import { readJsonValue, parseCaptionTracks, pickCaptionTrack, parseVideoDetails, parseJson3, parseTimedTextXml, parseTimedText, segmentsToParagraphs } from "@/lib/ingest-adapters/youtube";
 import { extractAny, ExtractError } from "@/lib/ingest-adapters";
+import { extractFathom } from "@/lib/ingest-adapters/fathom";
 
-// Pure parts only — no network, no SDK calls.
+// Pure parts only — no network, no SDK calls. The fathom adapter (which would
+// fetch) is stubbed so the dispatch can be exercised without a network call.
+vi.mock("@/lib/ingest-adapters/fathom", () => ({
+  extractFathom: vi.fn(async (url: string) => ({
+    text: "CALL TRANSCRIPT",
+    title: "Impromptu Zoom Meeting",
+    meta: { source_type: "call", source_platform: "fathom", source_url: url },
+  })),
+}));
 
 describe("parseYouTubeId", () => {
   it("reads every common URL shape", () => {
@@ -38,6 +47,49 @@ describe("parseYouTubeId", () => {
       expect(parseYouTubeId(u), u).toBeNull();
       expect(isYouTubeUrl(u), u).toBe(false);
     }
+  });
+});
+
+describe("isFathomUrl", () => {
+  it("recognizes fathom.video share and call links", () => {
+    for (const u of [
+      "https://fathom.video/share/abc123",
+      "https://fathom.video/share/ABC-def_123?x=1",
+      "https://fathom.video/calls/833455201?timestamp=1",
+      "https://www.fathom.video/share/xyz",
+      "  https://fathom.video/share/xyz  ",
+    ]) {
+      expect(isFathomUrl(u), u).toBe(true);
+    }
+  });
+
+  it("rejects non-fathom links", () => {
+    for (const u of [
+      "https://fathom.video.evil.com/share/x",
+      "https://notfathom.video/share/x",
+      "https://example.com/share/abc",
+      "https://youtube.com/watch?v=dQw4w9WgXcQ",
+      "not a url",
+      "",
+    ]) {
+      expect(isFathomUrl(u), u).toBe(false);
+    }
+  });
+});
+
+describe("socialCaption (best-effort text from a login-walled page)", () => {
+  it("takes the longest of og:/twitter: description and embedded caption", () => {
+    const html = `<meta property="og:description" content="12 likes - user on Instagram">
+      <meta name="twitter:description" content="A short twitter blurb.">
+      <script>{"edge_media_to_caption":{"edges":[{"node":{"text":"The full reel caption \\u2014 with details, line one, and a good deal more text so it is clearly the longest candidate.\\nLine two of the caption here."}}]}}</script>`;
+    const cap = socialCaption(html);
+    // The embedded caption is the longest candidate; entities/escapes are decoded.
+    expect(cap).toContain("The full reel caption — with details");
+    expect(cap).toContain("Line two of the caption here.");
+  });
+
+  it("returns null when there is nothing usable", () => {
+    expect(socialCaption("<html><body>login</body></html>")).toBeNull();
   });
 });
 
@@ -269,5 +321,16 @@ describe("extractAny (files, no network)", () => {
 
   it("refuses a link that is not http(s) before any network call", async () => {
     await expect(extractAny({ url: "ftp://example.com/file.txt" })).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("routes a fathom.video link to the fathom adapter (before the generic url adapter)", async () => {
+    const url = "https://fathom.video/share/abc123";
+    const r = await extractAny({ url });
+    expect(vi.mocked(extractFathom)).toHaveBeenCalledWith(url);
+    expect(r.kind).toBe("url");
+    expect(r.title).toBe("Impromptu Zoom Meeting");
+    expect(r.meta.source_type).toBe("call");
+    expect(r.meta.source_platform).toBe("fathom");
+    expect(r.text).toContain("CALL TRANSCRIPT");
   });
 });

@@ -218,8 +218,35 @@ const PAGE_HEADERS = {
   cookie: "CONSENT=YES+cb.20240101-00-p0.en+FX+000; SOCS=CAI",
 };
 
-const ANDROID_VERSION = "20.10.38";
-const ANDROID_UA = `com.google.android.youtube/${ANDROID_VERSION} (Linux; U; Android 11) gzip`;
+// The datacenter bot wall lands on the ANDROID client, so we try several
+// innertube clients in order and stop at the first whose caption track URL
+// actually serves a body; the watch page is the last resort.
+interface InnertubeClient {
+  key: string;
+  client: Record<string, unknown>;
+  ua: string;
+  clientNameHeader: string;
+}
+const INNERTUBE_CLIENTS: InnertubeClient[] = [
+  {
+    key: "ANDROID",
+    client: { clientName: "ANDROID", clientVersion: "20.10.38", androidSdkVersion: 30, hl: "en", gl: "US" },
+    ua: "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip",
+    clientNameHeader: "3",
+  },
+  {
+    key: "IOS",
+    client: { clientName: "IOS", clientVersion: "20.10.6", hl: "en", gl: "US" },
+    ua: "com.google.ios.youtube/20.10.6 (iPhone; U; CPU iOS 18_3 like Mac OS X)",
+    clientNameHeader: "5",
+  },
+  {
+    key: "TVHTML5",
+    client: { clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", clientVersion: "2.0", hl: "en", gl: "US" },
+    ua: BROWSER_UA,
+    clientNameHeader: "85",
+  },
+];
 
 interface PlayerInfo {
   details: VideoDetails;
@@ -228,8 +255,8 @@ interface PlayerInfo {
   reason?: string;
 }
 
-/** YouTube's player endpoint as the Android app: details + caption tracks whose URLs serve a body. */
-async function fetchPlayer(id: string): Promise<PlayerInfo | null> {
+/** YouTube's player endpoint as one innertube client: details + caption tracks. */
+async function fetchPlayer(id: string, c: InnertubeClient): Promise<PlayerInfo | null> {
   try {
     const r = await guardedFetch("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", {
       method: "POST",
@@ -238,16 +265,11 @@ async function fetchPlayer(id: string): Promise<PlayerInfo | null> {
       headers: {
         "content-type": "application/json",
         accept: "application/json",
-        "user-agent": ANDROID_UA,
-        "x-youtube-client-name": "3",
-        "x-youtube-client-version": ANDROID_VERSION,
+        "user-agent": c.ua,
+        "x-youtube-client-name": c.clientNameHeader,
+        "x-youtube-client-version": String(c.client.clientVersion),
       },
-      body: JSON.stringify({
-        context: { client: { clientName: "ANDROID", clientVersion: ANDROID_VERSION, androidSdkVersion: 30, hl: "en", gl: "US" } },
-        videoId: id,
-        contentCheckOk: true,
-        racyCheckOk: true,
-      }),
+      body: JSON.stringify({ context: { client: c.client }, videoId: id, contentCheckOk: true, racyCheckOk: true }),
     });
     if (r.status !== 200) return null;
     const j = JSON.parse(r.text) as {
@@ -262,24 +284,27 @@ async function fetchPlayer(id: string): Promise<PlayerInfo | null> {
       reason: j.playabilityStatus?.reason,
     };
   } catch {
-    return null; // the watch page is the fallback
+    return null; // the next client / the watch page is the fallback
   }
 }
 
-/** The watch page: details + tracks (+ playability), throwing a readable error when YouTube refuses. */
-async function fetchWatchPage(watchUrl: string): Promise<PlayerInfo> {
-  let html: string;
+/**
+ * The watch page: details + tracks (+ playability). Unlike a hard fetch, this
+ * never throws — a bot-walled 429/403 or a network error returns `ok: false`
+ * so the caller can still fall back to the innertube details or a clear
+ * "paste the transcript" message.
+ */
+async function fetchWatchPage(watchUrl: string): Promise<PlayerInfo & { ok: boolean }> {
   try {
     const page = await guardedFetch(watchUrl, { timeoutMs: 15_000, maxBytes: 6 * 1024 * 1024, headers: PAGE_HEADERS });
-    if (page.status >= 400) throw new ExtractError(`YouTube returned HTTP ${page.status} for this video.`, 502);
-    html = page.text;
-  } catch (e) {
-    if (e instanceof ExtractError) throw e;
-    throw new ExtractError(`Could not reach YouTube (${e instanceof Error ? e.message : String(e)}).`, 502);
+    if (page.status >= 400) return { details: {}, tracks: [], ok: false, reason: `HTTP ${page.status}` };
+    const html = page.text;
+    const status = html.match(/"playabilityStatus":\{"status":"(\w+)"/)?.[1];
+    const reason = html.match(/"playabilityStatus":\{[^}]*?"reason":"((?:[^"\\]|\\.)*)"/)?.[1]?.replace(/\\"/g, '"');
+    return { details: parseVideoDetails(html), tracks: parseCaptionTracks(html), status, reason, ok: true };
+  } catch {
+    return { details: {}, tracks: [], ok: false };
   }
-  const status = html.match(/"playabilityStatus":\{"status":"(\w+)"/)?.[1];
-  const reason = html.match(/"playabilityStatus":\{[^}]*?"reason":"((?:[^"\\]|\\.)*)"/)?.[1]?.replace(/\\"/g, '"');
-  return { details: parseVideoDetails(html), tracks: parseCaptionTracks(html), status, reason };
 }
 
 async function fetchOEmbed(watchUrl: string): Promise<{ title?: string; author?: string }> {
@@ -294,7 +319,7 @@ async function fetchOEmbed(watchUrl: string): Promise<{ title?: string; author?:
 }
 
 /** json3 first (fmt set on the URL so it overrides the track's own), then whatever the bare URL serves. */
-async function fetchTranscript(track: CaptionTrack): Promise<CaptionSegment[]> {
+async function fetchTranscript(track: CaptionTrack, ua: string): Promise<CaptionSegment[]> {
   let u: URL;
   try {
     u = new URL(track.baseUrl);
@@ -307,7 +332,8 @@ async function fetchTranscript(track: CaptionTrack): Promise<CaptionSegment[]> {
   json3.searchParams.set("fmt", "json3");
   for (const variant of [json3.toString(), u.toString()]) {
     try {
-      const r = await guardedFetch(variant, { timeoutMs: 15_000, maxBytes: 4 * 1024 * 1024, headers: { "user-agent": ANDROID_UA, accept: "*/*" } });
+      // Fetch the timedtext URL with the same client UA that listed the track.
+      const r = await guardedFetch(variant, { timeoutMs: 15_000, maxBytes: 4 * 1024 * 1024, headers: { "user-agent": ua, accept: "*/*" } });
       if (r.status === 200) {
         const segs = parseTimedText(r.text);
         if (segs.length) return segs;
@@ -319,40 +345,89 @@ async function fetchTranscript(track: CaptionTrack): Promise<CaptionSegment[]> {
   return [];
 }
 
+const YT_BOT_WALL =
+  "YouTube is blocking automated transcript access for this video from our servers. Open the video → ⋯ (More) → Show transcript → copy it and paste it here, or download the video and upload the file.";
+
+/** A playability reason that is the bot wall itself (as opposed to private / removed / members-only). */
+function isBotReason(reason: string): boolean {
+  return /sign in|not a bot|not a robot|confirm you|unusual traffic/i.test(reason);
+}
+
 export async function extractFromYouTube(url: string): Promise<Extracted> {
   const id = parseYouTubeId(url);
   if (!id) throw new ExtractError("That doesn't look like a YouTube video link (watch?v=…, youtu.be/… or /shorts/…).", 400);
   const watchUrl = `https://www.youtube.com/watch?v=${id}`;
 
-  // Player API first; the watch page fills in whatever is still missing (or
-  // is the only source when the API is unreachable).
-  let info = await fetchPlayer(id);
-  if (!info || (!info.tracks.length && info.status !== "OK")) {
-    const page = await fetchWatchPage(watchUrl);
-    info = info
-      ? { details: { ...page.details, ...info.details }, tracks: info.tracks.length ? info.tracks : page.tracks, status: page.status ?? info.status, reason: page.reason ?? info.reason }
-      : page;
+  // Try each innertube client, then the watch page, keeping the best details we
+  // see and stopping at the first source whose captions actually serve a body.
+  let details: VideoDetails = {};
+  let hadTracks = false; // a source listed caption tracks (so the video is captioned)
+  let status: string | undefined;
+  let reason: string | undefined;
+  let transcript = "";
+  let usedTrack: CaptionTrack | null = null;
+
+  const note = (info: PlayerInfo | (PlayerInfo & { ok: boolean })) => {
+    details = { ...info.details, ...details }; // earlier (better) sources win, later ones fill gaps
+    if (info.status && info.status !== "OK" && !reason) {
+      status = info.status;
+      reason = info.reason;
+    }
+  };
+  // Returns the track it read a body from (and sets `transcript`), else null.
+  const tryTracks = async (tracks: CaptionTrack[], ua: string): Promise<CaptionTrack | null> => {
+    if (!tracks.length) return null;
+    hadTracks = true;
+    const track = pickCaptionTrack(tracks);
+    if (!track) return null;
+    const segs = await fetchTranscript(track, ua);
+    if (!segs.length) return null;
+    transcript = segmentsToParagraphs(segs);
+    return track;
+  };
+
+  for (const client of INNERTUBE_CLIENTS) {
+    const info = await fetchPlayer(id, client);
+    if (!info) continue;
+    note(info);
+    const t = await tryTracks(info.tracks, client.ua);
+    if (t) {
+      usedTrack = t;
+      break;
+    }
   }
-  if (!info.tracks.length && info.status && info.status !== "OK") {
-    throw new ExtractError(`YouTube won't serve this video to the Brain${info.reason ? ` (${info.reason})` : ""}. Paste the transcript instead.`, 422);
+  if (!transcript) {
+    const page = await fetchWatchPage(watchUrl);
+    if (page.ok) note(page);
+    usedTrack = await tryTracks(page.tracks, BROWSER_UA);
   }
 
   const oembed = await fetchOEmbed(watchUrl);
-  const title = (oembed.title ?? info.details.title ?? "").trim() || `YouTube video ${id}`;
-  const author = (oembed.author ?? info.details.author ?? "").trim();
+  const title = (oembed.title ?? details.title ?? "").trim() || `YouTube video ${id}`;
+  const author = (oembed.author ?? details.author ?? "").trim();
   const meta: Extracted["meta"] = { source_type: "video", source_platform: "youtube", source_url: watchUrl };
-  if (info.details.lengthSeconds) meta.duration_s = info.details.lengthSeconds;
-  const byline = [author ? `by ${author}` : "", "YouTube", info.details.lengthSeconds ? fmtDuration(info.details.lengthSeconds) : ""].filter(Boolean).join(" · ");
-
-  const track = pickCaptionTrack(info.tracks);
-  const transcript = track ? segmentsToParagraphs(await fetchTranscript(track)) : "";
+  if (details.lengthSeconds) meta.duration_s = details.lengthSeconds;
+  const byline = [author ? `by ${author}` : "", "YouTube", details.lengthSeconds ? fmtDuration(details.lengthSeconds) : ""].filter(Boolean).join(" · ");
 
   if (!transcript) {
-    const description = collapseWhitespace(info.details.description ?? "");
-    if (!description) throw new ExtractError("This video has no captions and no description to read. Paste the transcript instead.", 422);
-    return { text: `# ${title}\n${byline}\n(no captions available — description only)\n\n${description}`, title, meta };
+    // Captions exist but every source served an empty body → we're bot-walled
+    // off the transcript itself. Never return that as an empty "success".
+    if (hadTracks) throw new ExtractError(YT_BOT_WALL, 422);
+    // A definitive non-bot reason (private / removed / members-only): say it.
+    if (status && status !== "OK" && reason && !isBotReason(reason)) {
+      throw new ExtractError(`YouTube won't serve this video to the Brain (${reason}). Paste the transcript instead.`, 422);
+    }
+    const description = collapseWhitespace(details.description ?? "");
+    // No captions, but we did read the video — hand back the description, flagged.
+    if (description) {
+      return { text: `# ${title}\n${byline}\n(no captions available — description only)\n\n${description}`, title, meta };
+    }
+    // We know the video but there is nothing to read.
+    if (details.title) throw new ExtractError("This video has no captions and no description to read. Paste the transcript instead.", 422);
+    // Player + watch page both refused outright → the datacenter bot wall.
+    throw new ExtractError(YT_BOT_WALL, 422);
   }
 
-  const kind = track?.kind === "asr" ? "auto-generated captions" : `captions${track?.languageCode ? ` (${track.languageCode})` : ""}`;
+  const kind = usedTrack?.kind === "asr" ? "auto-generated captions" : `captions${usedTrack?.languageCode ? ` (${usedTrack.languageCode})` : ""}`;
   return { text: `# ${title}\n${byline}\nTranscript from ${kind}:\n\n${transcript}`, title, meta };
 }

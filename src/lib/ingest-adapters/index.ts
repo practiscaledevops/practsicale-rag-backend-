@@ -12,16 +12,17 @@
 
 import { extractFromUrl } from "./url";
 import { extractFromYouTube } from "./youtube";
+import { extractFathom } from "./fathom";
 import { extractPdf } from "./pdf";
 import { transcribeAudio } from "./audio";
 import { extractImageText } from "./image";
-import { capText, extOf, isYouTubeUrl, kindOfFile, IMAGE_MIME, MAX_TEXT_CHARS, MAX_LONG_TEXT_CHARS, type ExtractKind } from "./pure";
+import { capText, extOf, isYouTubeUrl, isFathomUrl, kindOfFile, IMAGE_MIME, MAX_TEXT_CHARS, MAX_LONG_TEXT_CHARS, type ExtractKind } from "./pure";
 import { ExtractError, type Extracted, type ExtractMeta } from "./types";
 
 export type { ExtractKind } from "./pure";
 export type { Extracted, ExtractMeta } from "./types";
 export { ExtractError } from "./types";
-export { capText, kindOfFile, isYouTubeUrl, parseYouTubeId, MAX_TEXT_CHARS, MAX_LONG_TEXT_CHARS } from "./pure";
+export { capText, kindOfFile, isYouTubeUrl, isFathomUrl, parseYouTubeId, MAX_TEXT_CHARS, MAX_LONG_TEXT_CHARS } from "./pure";
 
 export interface ExtractInput {
   url?: string;
@@ -77,6 +78,12 @@ export async function extractAny(input: ExtractInput, opts?: ExtractOptions): Pr
     if (isYouTubeUrl(url)) {
       const r = await extractFromYouTube(url);
       return finish("youtube", r.title ?? url, r, opts);
+    }
+    // Fathom before the generic url adapter — a share link is a login wall to the
+    // page scraper, but its transcript endpoint is token-authed (see ./fathom).
+    if (isFathomUrl(url)) {
+      const r = await extractFathom(url);
+      return finish("url", r.title ?? url, r, opts);
     }
     const r = await extractFromUrl(url);
     return finish("url", r.title ?? url, r, opts);

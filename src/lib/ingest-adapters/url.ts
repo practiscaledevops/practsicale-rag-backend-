@@ -6,13 +6,26 @@
 // Login-walled pages (LinkedIn, Instagram) render a near-empty shell to a
 // server — under 200 usable characters we say so instead of ingesting noise.
 
-import { guardedFetch } from "./fetch";
+import { guardedFetch, type GuardedResponse } from "./fetch";
 import { extractPdf } from "./pdf";
 import { ExtractError, type Extracted } from "./types";
 
 const MIN_USABLE_CHARS = 200;
+/** A best-effort social caption is only worth returning past this length (below it is chrome, not content). */
+const MIN_SOCIAL_CAPTION_CHARS = 80;
 export const LOGIN_WALL_MESSAGE = "This page doesn't expose its text (login wall). Paste the transcript or caption instead.";
 const SOCIAL_PLATFORMS = new Set(["linkedin", "instagram", "facebook", "x", "tiktok"]);
+
+// Login-walled hosts hand a server a shell, not the post — but the caption
+// often survives in og:/twitter: metas or embedded JSON. When even that is
+// missing, each host gets a message that names the concrete fix.
+const SOCIAL_FALLBACK: Record<string, string> = {
+  instagram: "Instagram doesn't expose this reel's text to non-logged-in visitors. Copy the caption (or the transcript from the ⋯ menu) and paste it, or upload a screenshot and we'll read the text.",
+  linkedin: "LinkedIn doesn't show this post's text to logged-out visitors. Copy the post text and paste it, or upload a screenshot and we'll read the text.",
+  x: "X (Twitter) doesn't expose this post's text to logged-out visitors. Copy the post text and paste it, or upload a screenshot and we'll read the text.",
+  facebook: "Facebook doesn't show this post's text to logged-out visitors. Copy the post text and paste it, or upload a screenshot and we'll read the text.",
+  tiktok: "TikTok doesn't expose this video's text to logged-out visitors. Copy the caption (or the transcript) and paste it, or upload a screenshot and we'll read the text.",
+};
 
 // ---- pure helpers (unit-tested; no network) --------------------------------
 
@@ -148,6 +161,41 @@ export function htmlTitle(html: string): string | null {
   return t ? t.slice(0, 200) : null;
 }
 
+/** JSON string-body → its decoded value (`\n`, `\"`, `\uXXXX`, `\/`). */
+function jsonUnescape(raw: string): string {
+  try {
+    return JSON.parse(`"${raw}"`) as string;
+  } catch {
+    return raw.replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\//g, "/").replace(/\\\\/g, "\\");
+  }
+}
+
+/**
+ * A best-effort caption for a login-walled social page: the longest of
+ * og:description / twitter:description / a page-embedded caption
+ * (`edge_media_to_caption` or `caption`). null when nothing usable is present.
+ */
+export function socialCaption(html: string): string | null {
+  const cands: string[] = [];
+  const meta = (prop: string) =>
+    html.match(new RegExp(`<meta\\b[^>]*(?:property|name)=["']${prop}["'][^>]*content=["']([^"']*)["']`, "i"))?.[1] ??
+    html.match(new RegExp(`<meta\\b[^>]*content=["']([^"']*)["'][^>]*(?:property|name)=["']${prop}["']`, "i"))?.[1];
+  for (const p of ["og:description", "twitter:description", "description"]) {
+    const v = meta(p);
+    if (v) cands.push(decodeEntities(v));
+  }
+  const edge = html.match(/"edge_media_to_caption":\{"edges":\[\{"node":\{"text":"((?:[^"\\]|\\.)*)"/)?.[1];
+  if (edge) cands.push(jsonUnescape(edge));
+  const cap = html.match(/"caption":\{[^{}]*?"text":"((?:[^"\\]|\\.)*)"/)?.[1] ?? html.match(/"caption":"((?:[^"\\]|\\.)*)"/)?.[1];
+  if (cap) cands.push(jsonUnescape(cap));
+  let best = "";
+  for (const c of cands) {
+    const t = collapseWhitespace(c);
+    if (t.length > best.length) best = t;
+  }
+  return best || null;
+}
+
 /** Taxonomy platform for a hostname (linkedin · instagram · x · facebook · tiktok · youtube · podcast · website). */
 export function platformOfHost(hostname: string): string {
   const h = hostname.toLowerCase().replace(/^www\./, "");
@@ -167,15 +215,31 @@ export function platformOfHost(hostname: string): string {
 
 // ---- the adapter -----------------------------------------------------------
 
+/** A social page's caption if we could scrape one, else its host-specific "paste it / upload a screenshot" 422. */
+function socialCaptionResult(res: GuardedResponse, platform: string): Extracted {
+  const caption = res.text ? socialCaption(res.text) : null;
+  if (caption && caption.length >= MIN_SOCIAL_CAPTION_CHARS) {
+    const title = htmlTitle(res.text);
+    return {
+      text: title ? `# ${title}\n\n${caption}` : caption,
+      title: title ?? undefined,
+      meta: { source_type: "text", source_platform: platform, source_url: res.finalUrl },
+    };
+  }
+  throw new ExtractError(SOCIAL_FALLBACK[platform] ?? LOGIN_WALL_MESSAGE, 422);
+}
+
 export async function extractFromUrl(url: string): Promise<Extracted> {
   const clean = url.trim();
   if (!/^https?:\/\//i.test(clean)) throw new ExtractError("Enter a full link starting with http:// or https://.", 400);
 
   const res = await guardedFetch(clean, { timeoutMs: 15_000, maxBytes: 2 * 1024 * 1024 });
   const platform = platformOfHost(new URL(res.finalUrl).hostname);
+  // Social hosts never serve their post body to a logged-out server (they answer
+  // 401/403/429/999 or a login shell) — go straight to a best-effort caption.
+  if (SOCIAL_PLATFORMS.has(platform)) return socialCaptionResult(res, platform);
   if (res.status >= 400) {
-    // Social platforms answer a server with 401/403/429/999 or a login redirect — never the post.
-    if (SOCIAL_PLATFORMS.has(platform) || res.status === 401 || res.status === 403 || res.status === 999) throw new ExtractError(LOGIN_WALL_MESSAGE, 422);
+    if (res.status === 401 || res.status === 403 || res.status === 999) throw new ExtractError(LOGIN_WALL_MESSAGE, 422);
     if (res.status === 404) throw new ExtractError("The link returned 404 — check the URL.", 422);
     throw new ExtractError(`The link returned HTTP ${res.status}.`, 502);
   }

@@ -83,6 +83,19 @@ export function isYouTubeUrl(url: string): boolean {
 }
 
 /**
+ * True when the URL is a Fathom recording link (host `fathom.video`). Routing
+ * only needs the host — the fathom adapter parses the share id and call id
+ * itself (parseFathomUrl in ./fathom).
+ */
+export function isFathomUrl(url: string): boolean {
+  try {
+    return new URL(url.trim()).hostname.toLowerCase().replace(/^www\./, "") === "fathom.video";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The 11-character video id from any of the common URL shapes:
  * watch?v=ID · youtu.be/ID · /shorts/ID · /embed/ID · /live/ID · /v/ID.
  * null for anything else (including a bare channel or playlist URL).

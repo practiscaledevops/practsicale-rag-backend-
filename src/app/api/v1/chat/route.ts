@@ -240,6 +240,7 @@ export async function POST(req: Request) {
           objects: [],
           annotated: legacy.chunks.map((c, i) => ({ ...c, object_id: null, intelligence_class: "business_reality", domain: null, rrf_score: 0, lane: "reality" as const, object: null, rank: i + 1, boost: 0, finalScore: 0, via: "search" as const })),
           fallback: true,
+          callReview: undefined,
         };
       }
       const { chunks, rewritten, confidence } = out;
@@ -290,6 +291,19 @@ export async function POST(req: Request) {
           via: c.via,
         })),
       });
+
+      // Exhaustive call-review set: when the structured path pulled EVERY call
+      // matching a named date/consultant/practice, tell the client so it can show
+      // "Reviewing all N calls from …" (and any "narrow it down" note).
+      if (out.callReview) {
+        const f = out.callReview.filter;
+        dataStream.writeData({
+          type: "call_review",
+          count: out.callReview.count,
+          note: out.callReview.note,
+          filter: { date: f.date ?? null, consultants: f.consultants ?? null, practiceType: f.practiceType ?? null },
+        });
+      }
 
       // Disagreements among the retrieved sources, and the structured numbers the
       // answer reasons from — so the client can show both, not only the prose.

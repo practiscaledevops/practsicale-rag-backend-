@@ -20,6 +20,7 @@ import { z } from "zod";
 import { supabaseAdmin } from "@/lib/supabase";
 import { embed } from "@/lib/embeddings";
 import { hybridSearchLane, expandParents, expandTranscripts, LANE_RPC_MISSING, type LaneChunk, type RetrievedChunk } from "@/lib/retrieval";
+import { parseCallReviewFilter, fetchCallsByFilter, newestCallDate, describeFilter, type CallReviewFilter } from "@/lib/call-review";
 import { rerank } from "@/lib/rerank";
 import { rewriteQueries, type ChatTurn } from "@/lib/query-transform";
 import { getActivePrompts } from "@/lib/prompts-db";
@@ -267,6 +268,12 @@ export interface OrchestrationOutput extends RetrievalOutput {
   annotated: OrchestratedChunk[];
   /** true when the classic pipeline was used (pre-migration / RPC missing). */
   fallback: boolean;
+  /**
+   * Set when the structured "call review" path ran: EVERY call matching a named
+   * date / consultant / practice type was pulled in full (not a semantic sample),
+   * so the answer can say "Reviewing all N calls from …". Undefined otherwise.
+   */
+  callReview?: { count: number; note: string | null; filter: CallReviewFilter };
 }
 
 export interface OrchestrateOptions {
@@ -358,6 +365,36 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   const def = modeDef(mode)!;
   const policy = effectivePolicy(mode, [intent.primaryDomain, ...intent.relatedDomains].filter((d): d is string => !!d));
   emit({ stage: "planning", label: auto ? `Auto → ${def.label}` : `${def.label} mode`, mode });
+
+  // 1b. Structured "call review" fast-path. A request that NAMES a date /
+  //     consultant / practice type and is about reviewing calls must see EVERY
+  //     matching call in full, not the semantic top few (which surfaces the most
+  //     relevant handful — one run found 2 of a day's 6 calls). Kicked off here so
+  //     it runs concurrently with the lane search; merged at step 8.5.
+  //     Transcripts are sensitive, so run ONLY when the key's scope permits them:
+  //     source_types unrestricted or including "transcript", and NO data-source /
+  //     collection narrowing (the semantic path enforces those inside the SQL; the
+  //     structured chunk query can't, so a narrowed key safely falls back to it).
+  const st = scope.sourceTypes;
+  const transcriptsInScope =
+    (st.length === 0 || st.includes("transcript")) && scope.dataSourceIds.length === 0 && scope.collectionIds.length === 0;
+  const reviewProbe = parseCallReviewFilter(query);
+  const reviewPromise: Promise<{ filter: CallReviewFilter; chunks: RetrievedChunk[]; callCount: number; note: string | null } | null> =
+    reviewProbe.isReview && transcriptsInScope
+      ? (async () => {
+          // Anchor "today"/"yesterday" and an omitted year to the data's newest
+          // call_date (calls are dated in the data, not by the wall clock).
+          const ref = await newestCallDate(db, orgId);
+          const filter = parseCallReviewFilter(query, { referenceDate: ref ?? undefined });
+          if (!filter.isReview) return null;
+          emit({ stage: "searching", label: `Pulling every call from ${describeFilter(filter)}` });
+          const res = await fetchCallsByFilter(db, orgId, filter, { maxCalls: 12, maxTokens: 120_000 });
+          return { filter, ...res };
+        })().catch((e) => {
+          console.error("[orchestrator] call-review path failed:", e instanceof Error ? e.message : e);
+          return null;
+        })
+      : Promise.resolve(null);
 
   // 2. Search queries: intent's (already discriminative) or the rewrite stage.
   let queries = intent.searchQueries.length ? intent.searchQueries : [query];
@@ -517,25 +554,57 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     final = top.map((c, i) => ({ ...c, id: parents[i].id, content: parents[i].content, metadata: parents[i].metadata, parent_id: parents[i].parent_id }));
   }
 
-  // 8.5 Full-call transcript depth. Retrieval finds the right CALLS but usually
-  //     only their best few chunks (often the summary = opening + closing), so a
-  //     "review this call" ask sees only the ends, not the middle. Replace the
-  //     top calls with their WHOLE transcript, then re-wrap each fetched chunk as
-  //     an OrchestratedChunk by cloning its call's annotation (lane/object/score
-  //     from the best surviving chunk) so lane grouping, the sources event and
-  //     citation validation all treat the expanded chunks like their call.
-  if (final.some((c) => c.source_type === "transcript")) {
+  // 8.5 Full-call transcript depth. Two sources of full calls converge here:
+  //     (a) the STRUCTURED review path (step 1b) — EVERY call matching a named
+  //         date / consultant / practice type, pulled in full; and
+  //     (b) the SEMANTIC path — a "review this call" ask finds the right calls but
+  //         usually only their best few chunks (often the summary = opening +
+  //         closing), so replace those top calls with their WHOLE transcript.
+  //     The structured full calls REPLACE the semantic transcript results for the
+  //     same calls (dedupe by document_id) and lead the Business Reality lane; a
+  //     call the structured path already pulled in full is NOT double-expanded.
+  const review = await reviewPromise;
+  const reviewDocIds = new Set((review?.chunks ?? []).map((c) => c.document_id));
+
+  // (b) semantic transcript expansion — over the calls the structured path did
+  //     NOT already own (avoid double-expand and duplicate chunks).
+  const semantic = reviewDocIds.size
+    ? final.filter((c) => !(c.source_type === "transcript" && reviewDocIds.has(c.document_id)))
+    : final;
+  if (semantic.some((c) => c.source_type === "transcript")) {
     emit({ stage: "expanding", label: "Reading the full call transcript" });
     const annByDoc = new Map<string, OrchestratedChunk>();
-    for (const c of final) {
+    for (const c of semantic) {
       if (c.source_type === "transcript" && !annByDoc.has(c.document_id)) annByDoc.set(c.document_id, c);
     }
-    const expanded = await expandTranscripts(orgId, final, { maxCalls: 6, maxTokens: 90000 });
+    const expanded = await expandTranscripts(orgId, semantic, { maxCalls: 6, maxTokens: 90000 });
     final = expanded.map((c) => {
       if (c.source_type !== "transcript") return c as OrchestratedChunk;
       const ann = annByDoc.get(c.document_id);
       return ann ? { ...ann, id: c.id, content: c.content, metadata: c.metadata, parent_id: c.parent_id } : (c as OrchestratedChunk);
     });
+  } else {
+    final = semantic;
+  }
+
+  // (a) prepend the structured full calls as high-priority Business Reality
+  //     (reality lane) chunks, keeping their DB ids so [id] citations resolve and
+  //     the sources event / citation validation treat them like any transcript.
+  if (review && review.chunks.length) {
+    const reviewAnnotated: OrchestratedChunk[] = review.chunks.map((c, i) => ({
+      ...c,
+      object_id: null,
+      intelligence_class: "business_reality",
+      domain: null,
+      rrf_score: 0,
+      lane: "reality" as const,
+      object: null,
+      rank: i + 1,
+      boost: 0,
+      finalScore: 1, // placed directly, not scored against the candidate pool
+      via: "search" as const,
+    }));
+    final = [...reviewAnnotated, ...final];
   }
 
   // 9. Known disagreements: `contradicts` edges with BOTH ends in context (the
@@ -572,6 +641,15 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   emit({ stage: "retrieved", label: `Retrieved ${final.length} source${final.length === 1 ? "" : "s"}${expandedCount ? ` (+${expandedCount} connected)` : ""}`, count: final.length });
 
   const disagreements = buildDisagreementsBlock(conflicts);
+  // When the structured path ran, tell the model the transcript set is EXHAUSTIVE
+  // (all N calls, not a sample) so the answer reviews every one, and surface the
+  // count/note/filter on the output. The note leads the context, before the
+  // Business Reality lane where the transcripts sit.
+  const callReview = review ? { count: review.callCount, note: review.note, filter: review.filter } : undefined;
+  const structuredNote =
+    review && review.chunks.length
+      ? `STRUCTURED CALL SET: these are ALL ${review.callCount} call transcript${review.callCount === 1 ? "" : "s"} matching ${describeFilter(review.filter)} (not a sample). Review every one.${review.note ? ` ${review.note}` : ""}`
+      : "";
   return {
     chunks: final,
     effectiveQuery: queries.join(" | "),
@@ -582,13 +660,14 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     mode,
     auto,
     lanes,
-    contextBlock: disagreements ? `${buildLaneContext(final)}\n\n\n${disagreements}` : buildLaneContext(final),
+    contextBlock: [structuredNote, buildLaneContext(final), disagreements].filter(Boolean).join("\n\n\n"),
     performanceBlock,
     performanceMetrics,
     conflicts,
     objects: objectsInContext,
     annotated: final,
     fallback: false,
+    callReview,
   };
 }
 
@@ -735,5 +814,6 @@ function wrapLegacy(legacy: RetrievalOutput, intent: Intent, mode: WorkMode, aut
     objects: [],
     annotated,
     fallback: true,
+    callReview: undefined,
   };
 }
