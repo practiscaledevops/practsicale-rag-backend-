@@ -65,6 +65,11 @@ export const PRACTICE_TYPES = ["NEMT", "Home Care", "Home Health", "Assisted Liv
 const REVIEW_RE =
   /\b(review|reviews|reviewing|analy[sz]e|analy[sz]ing|analysis|assess|evaluate|audit|go through|going through|walk through|walking through|break ?down|summar(?:y|ise|ize|ies)|which consultant|list (?:the |all )?calls?|list (?:the )?transcripts?|(?:all|each|every|these|those|the) (?:the )?(?:calls?|transcripts?)|transcripts?)\b/i;
 
+/** True when the query carries a review/audit/analyse verb (no filter required). */
+export function looksLikeReview(query: string): boolean {
+  return REVIEW_RE.test(query ?? "");
+}
+
 const MONTHS: Record<string, number> = {
   january: 1, jan: 1, february: 2, feb: 2, march: 3, mar: 3, april: 4, apr: 4, may: 5,
   june: 6, jun: 6, july: 7, jul: 7, august: 8, aug: 8, september: 9, sep: 9, sept: 9,
@@ -296,7 +301,7 @@ export function detectConsultants(query: string): string[] {
  * as a review/analysis/list of calls AND at least one of date/consultant/practice
  * is present; otherwise `{ isReview: false }` (fall back to semantic retrieval).
  */
-export function parseCallReviewFilter(query: string, opts?: { referenceDate?: string }): CallReviewFilter {
+export function parseCallReviewFilter(query: string, opts?: { referenceDate?: string; knownConsultants?: string[] }): CallReviewFilter {
   // Normalize dashed / slashed word-dates ("24-sep-2026", "sep-24-2026") so the
   // month-name parsers below see spaces; digit-digit dates (9/22, 2026-09-24) are
   // left intact.
@@ -310,7 +315,21 @@ export function parseCallReviewFilter(query: string, opts?: { referenceDate?: st
   const range = resolveDateRange(q, ref);
   const date = range ? undefined : resolveDate(q, ref);
   const practiceType = detectPracticeType(q);
-  const consultants = detectConsultants(q);
+  let consultants = detectConsultants(q);
+  // Fallback: match KNOWN consultant names case-insensitively, so a lowercase
+  // first name ("audit of james calls") still resolves. The DB match is an
+  // ILIKE substring, so "james" correctly covers every "James ...".
+  if (consultants.length === 0 && opts?.knownConsultants?.length) {
+    const lc = " " + q.toLowerCase().replace(/[^a-z0-9]+/g, " ") + " ";
+    const hits = new Set<string>();
+    for (const full of opts.knownConsultants) {
+      const fl = full.toLowerCase();
+      if (lc.includes(" " + fl + " ") || lc.includes(fl)) { hits.add(full); continue; }
+      const first = fl.split(" ")[0];
+      if (first.length >= 3 && lc.includes(" " + first + " ")) hits.add(first);
+    }
+    if (hits.size) consultants = [...hits];
+  }
   const hasFilter = !!date || !!range || !!practiceType || consultants.length > 0;
   const isReview = hasFilter && REVIEW_RE.test(q);
 
@@ -410,6 +429,67 @@ const MAX_MATCH_ROWS = 5000;
  * The data's newest transcript `call_date` (ISO), or null. Anchors "today"/
  * "yesterday" and an omitted year to the data, not the wall clock. Best-effort.
  */
+/** Every matching call's document_id + a complete scorecard, no transcript fetch
+ *  (used to PLAN a background audit job). Filters by created_at business day. */
+export async function matchingCallDocs(
+  db: SupabaseClient,
+  orgId: string,
+  filter: CallReviewFilter
+): Promise<{ docIds: string[]; scorecard: ScorecardRow[] }> {
+  const apply = <T extends { eq: Function; ilike: Function; or: Function; gte: Function; lt: Function }>(q: T): T => {
+    let out = q.eq("org_id", orgId).eq("source_type", "transcript");
+    if (filter.date) {
+      const b = dayBoundsUTC(filter.date);
+      out = out.gte("metadata->>created_at", b.start).lt("metadata->>created_at", b.end);
+    } else if (filter.dateFrom && filter.dateTo) {
+      out = out
+        .gte("metadata->>created_at", dayBoundsUTC(filter.dateFrom).start)
+        .lt("metadata->>created_at", dayBoundsUTC(filter.dateTo).end);
+    }
+    if (filter.practiceType) out = out.ilike("metadata->>practice_type", filter.practiceType);
+    const cands = (filter.consultants ?? []).map(sanitizeConsultant).filter(Boolean);
+    if (cands.length) out = out.or(cands.map((c) => `metadata->>consultant_name.ilike.%${c}%`).join(","));
+    return out;
+  };
+  try {
+    const { data } = await apply(db.from("chunks").select("document_id, metadata, created_at"))
+      .order("document_id", { ascending: true })
+      .order("created_at", { ascending: true })
+      .limit(MAX_MATCH_ROWS);
+    const docIds: string[] = [];
+    const cardByDoc = new Map<string, ScorecardRow>();
+    for (const r of (data ?? []) as { document_id: string; metadata: Record<string, unknown> }[]) {
+      if (!r.document_id) continue;
+      if (!docIds.includes(r.document_id)) docIds.push(r.document_id);
+      if (!cardByDoc.has(r.document_id)) cardByDoc.set(r.document_id, toScorecardRow(r.metadata ?? {}));
+    }
+    return { docIds, scorecard: [...cardByDoc.values()] };
+  } catch {
+    return { docIds: [], scorecard: [] };
+  }
+}
+
+/** Distinct consultant names present in the org's transcripts (for name matching). */
+export async function knownConsultants(db: SupabaseClient, orgId: string): Promise<string[]> {
+  try {
+    const { data } = await db
+      .from("chunks")
+      .select("cn:metadata->>consultant_name")
+      .eq("org_id", orgId)
+      .eq("source_type", "transcript")
+      .not("metadata->>consultant_name", "is", null)
+      .limit(4000);
+    const set = new Set<string>();
+    for (const r of (data ?? []) as { cn?: string | null }[]) {
+      const v = (r.cn ?? "").trim();
+      if (v && v.length <= 60) set.add(v);
+    }
+    return [...set];
+  } catch {
+    return [];
+  }
+}
+
 export async function newestCallDate(db: SupabaseClient, orgId: string): Promise<string | null> {
   try {
     const { data, error } = await db

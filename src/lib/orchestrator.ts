@@ -20,7 +20,7 @@ import { z } from "zod";
 import { supabaseAdmin } from "@/lib/supabase";
 import { embed } from "@/lib/embeddings";
 import { hybridSearchLane, expandParents, expandTranscripts, LANE_RPC_MISSING, type LaneChunk, type RetrievedChunk } from "@/lib/retrieval";
-import { parseCallReviewFilter, fetchCallsByFilter, describeFilter, businessDay, TZ_OFFSET_MIN, type CallReviewFilter, type ScorecardRow } from "@/lib/call-review";
+import { parseCallReviewFilter, fetchCallsByFilter, describeFilter, businessDay, knownConsultants, looksLikeReview, TZ_OFFSET_MIN, type CallReviewFilter, type ScorecardRow } from "@/lib/call-review";
 import { rerank } from "@/lib/rerank";
 import { rewriteQueries, type ChatTurn } from "@/lib/query-transform";
 import { getActivePrompts } from "@/lib/prompts-db";
@@ -386,14 +386,29 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
 
   const reviewProbe = parseCallReviewFilter(query);
   const reviewPromise: Promise<{ filter: CallReviewFilter; chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number } | null> =
-    reviewProbe.isReview && transcriptsInScope
+    (reviewProbe.isReview || looksLikeReview(query)) && transcriptsInScope
       ? (async () => {
           // Anchor "yesterday" / "last 3 days" / an omitted year to the real
           // calendar so consultant audits are date-accurate. The 20-minute sync
           // keeps the call data current, and dates are stored to match the
           // scoring app (created_at, in UTC).
-          const filter = parseCallReviewFilter(query, { referenceDate: todayISO });
+          const known = await knownConsultants(db, orgId);
+          let filter = parseCallReviewFilter(query, { referenceDate: todayISO, knownConsultants: known });
           if (!filter.isReview) return null;
+          // Carry a date/range from the recent conversation when this follow-up
+          // narrows to a consultant/practice but names no date of its own (e.g.
+          // "audit james calls" right after "today's calls"), so the deep audit
+          // reads that day's calls in FULL rather than a diluted history-wide sample.
+          if (!filter.date && !filter.dateFrom) {
+            for (const turn of [...history].reverse()) {
+              if (turn.role !== "user") continue;
+              const prior = parseCallReviewFilter(turn.content, { referenceDate: todayISO, knownConsultants: known });
+              if (prior.date || prior.dateFrom) {
+                filter = { ...filter, date: prior.date, dateFrom: prior.dateFrom, dateTo: prior.dateTo };
+                break;
+              }
+            }
+          }
           emit({ stage: "searching", label: `Pulling every call from ${describeFilter(filter)}` });
           const res = await fetchCallsByFilter(db, orgId, filter, { maxCalls: 25, maxTokens: 140_000 });
           return { filter, ...res };
