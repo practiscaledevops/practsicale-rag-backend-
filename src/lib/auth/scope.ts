@@ -94,3 +94,19 @@ export function narrowScope(
     collectionIds: narrowDim(base.collectionIds, requested.collectionIds, NO_COLLECTION),
   };
 }
+
+/**
+ * Narrow an already-resolved scope's source types by a further allow-list (a
+ * knowledge scope's, e.g. "Consultant calls" = the call data). Same rules as
+ * narrowScope — NEVER widens; an empty intersection matches nothing (never [],
+ * which would mean "all"). No allow-list = the scope unchanged.
+ */
+export function narrowSourceTypes(scope: ScopeFilters, sourceTypes?: readonly string[] | null): ScopeFilters {
+  if (!sourceTypes || sourceTypes.length === 0) return scope;
+  return { ...scope, sourceTypes: narrowDim(scope.sourceTypes, [...sourceTypes]) };
+}
+
+/** True when a scope's source types can match no row (a narrowing emptied them). */
+export function matchesNoSourceType(scope: ScopeFilters): boolean {
+  return scope.sourceTypes.length > 0 && scope.sourceTypes.every((t) => t === MATCH_NOTHING);
+}

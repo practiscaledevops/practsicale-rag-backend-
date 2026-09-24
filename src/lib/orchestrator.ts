@@ -10,7 +10,11 @@
 //     → RELATIONSHIP EXPANSION (what is explicitly connected to what we found)
 //     → RERANK (what matters most right now) with lane balance so the model gets
 //       Reality + Learning + Playbooks, not 20 look-alike chunks
-//     → labelled, lane-grouped CONTEXT (+ Performance Memory numbers)
+//     → labelled, lane-grouped CONTEXT (+ Performance Memory numbers when call
+//       scores are in scope)
+//
+// A trusted spoke may send its user's capability ids; they only switch features
+// OFF for the request (capabilityGates), never widen the key's scope.
 //
 // Graceful: falls back to the classic pipeline before migration 0017 or when
 // the lane RPC is unavailable, and to a keyword heuristic when the intent
@@ -20,7 +24,7 @@ import { z } from "zod";
 import { supabaseAdmin } from "@/lib/supabase";
 import { embed } from "@/lib/embeddings";
 import { hybridSearchLane, expandParents, expandTranscripts, LANE_RPC_MISSING, type LaneChunk, type RetrievedChunk } from "@/lib/retrieval";
-import { parseCallReviewFilter, fetchCallsByFilter, describeFilter, businessDay, knownConsultants, looksLikeReview, TZ_OFFSET_MIN, type CallReviewFilter, type ScorecardRow } from "@/lib/call-review";
+import { resolveReviewFilterWithHistory, isReviewFollowUp, isConversationSummary, summaryCarriesCallFilter, fetchCallsByFilter, describeFilter, businessDay, knownConsultants, looksLikeReview, TZ_OFFSET_MIN, type CallReviewFilter, type ScorecardRow } from "@/lib/call-review";
 import { rerank } from "@/lib/rerank";
 import { rewriteQueries, type ChatTurn } from "@/lib/query-transform";
 import { getActivePrompts } from "@/lib/prompts-db";
@@ -51,8 +55,9 @@ import {
   PRIORITIES,
   DOMAINS,
 } from "@/lib/intelligence-taxonomy";
+import { knowledgeScopeDef, planLaneWeights } from "@/lib/knowledge-scopes";
 import type { RagSettings } from "@/lib/settings";
-import type { ScopeFilters } from "@/lib/auth/scope";
+import { narrowSourceTypes, type ScopeFilters } from "@/lib/auth/scope";
 
 // ---------------------------------------------------------------------------
 // Intent
@@ -234,6 +239,67 @@ export function scoreCandidate(args: {
 }
 
 // ---------------------------------------------------------------------------
+// Capability narrowing + data gates (pure, exported for tests)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-request feature gates from the capability ids a trusted spoke resolved
+ * for its user (the ids of GET /api/v1/capabilities, e.g. "chat.call_review").
+ * They can only NARROW: absent (an older client) = every gate open, today's
+ * behaviour; a list = a gate is open only when its id is in the list. A gate
+ * never widens what the key's scope reaches: the data checks below
+ * (callReviewInScope, performanceInScope) apply on top, whatever is granted.
+ */
+export interface CapabilityGates {
+  /** "chat.call_review" — the structured every-call review path. */
+  callReview: boolean;
+  /** "knowledge.performance" — the Performance Memory block (prompt + event). */
+  performance: boolean;
+  /** "learning.write" — detect a learning and offer to save it. */
+  learning: boolean;
+  /** "knowledge.conflicts" — the conflicts event (source disagreements). */
+  conflicts: boolean;
+}
+
+export function capabilityGates(capabilities?: readonly string[] | null): CapabilityGates {
+  if (capabilities == null) return { callReview: true, performance: true, learning: true, conflicts: true };
+  const granted = new Set(capabilities);
+  return {
+    callReview: granted.has("chat.call_review"),
+    performance: granted.has("knowledge.performance"),
+    learning: granted.has("learning.write"),
+    conflicts: granted.has("knowledge.conflicts"),
+  };
+}
+
+/**
+ * Whether the structured call-review path may read transcripts in full for this
+ * scope: source types unrestricted or including "transcript", and NO data-source
+ * / collection narrowing (the semantic path enforces those inside the SQL; the
+ * structured chunk query can't, so a narrowed scope safely falls back to it).
+ */
+export function callReviewInScope(scope: ScopeFilters): boolean {
+  const st = scope.sourceTypes;
+  return (st.length === 0 || st.includes("transcript")) && scope.dataSourceIds.length === 0 && scope.collectionIds.length === 0;
+}
+
+/**
+ * Performance Memory rows are call-score data (per-consultant scores, close
+ * rates, team KPIs), so the block is in scope only when the EFFECTIVE source
+ * types (key ∩ caller ∩ knowledge scope) are unrestricted or include
+ * "call_score". A scope narrowed to nothing (the match-nothing sentinel) never is.
+ */
+export function performanceInScope(scope: Pick<ScopeFilters, "sourceTypes">): boolean {
+  const st = scope.sourceTypes;
+  return st.length === 0 || st.includes("call_score");
+}
+
+/** Fetch / emit Performance Memory: the scope reaches call scores AND the caller's capabilities allow it. */
+export function performanceAllowed(scope: Pick<ScopeFilters, "sourceTypes">, gates: Pick<CapabilityGates, "performance">): boolean {
+  return gates.performance && performanceInScope(scope);
+}
+
+// ---------------------------------------------------------------------------
 // Orchestrated retrieval
 // ---------------------------------------------------------------------------
 
@@ -279,6 +345,13 @@ export interface OrchestrationOutput extends RetrievalOutput {
 export interface OrchestrateOptions {
   orgId: string;
   query: string;
+  /**
+   * Earlier user/assistant turns (the chat API's list ends with `query` itself).
+   * May start with a compaction summary pseudo-turn ({ role: "system", content:
+   * "[Conversation summary] …" }) — used ONLY for call-review continuity; the
+   * intent classifier and query rewriter read user/assistant turns only. A turn's
+   * optional `createdAt` (ISO) anchors its relative dates for call review.
+   */
   history?: ChatTurn[];
   scope: ScopeFilters;
   settings: RagSettings;
@@ -286,6 +359,19 @@ export interface OrchestrateOptions {
   requestedMode?: string | null;
   /** Modes the caller's user may use; Auto never resolves outside this list (restricted modes stay gated). */
   allowedModes?: string[] | null;
+  /**
+   * The caller's "Search in" choice (lib/knowledge-scopes id; undefined / unknown
+   * = "auto"). A fixed scope overrides the lane plan and may narrow the source
+   * types (always intersected with `scope`, never widened).
+   */
+  knowledgeScope?: string | null;
+  /**
+   * Capability ids the trusted spoke resolved for its user. They can only
+   * NARROW this request (capabilityGates): absent = today's behaviour; a list
+   * without "chat.call_review" skips the structured call review, without
+   * "knowledge.performance" the Performance Memory block. Never widens the scope.
+   */
+  capabilities?: readonly string[] | null;
   onStatus?: (s: RetrievalStatus & { mode?: string; lanes?: string[] }) => void;
 }
 
@@ -341,7 +427,12 @@ function balancedPool(byLane: Map<Lane | "raw", OrchestratedChunk[]>, limit: num
 }
 
 export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promise<OrchestrationOutput> {
-  const { orgId, query, scope, settings } = opts;
+  const { orgId, query, settings } = opts;
+  // A knowledge scope that restricts source types ("Consultant calls") narrows
+  // the key scope here too (idempotent with the route's narrowing; never widens).
+  const scope = narrowSourceTypes(opts.scope, knowledgeScopeDef(opts.knowledgeScope).retrieval.sourceTypes);
+  // The spoke user's capabilities: can only switch features OFF for this request.
+  const gates = capabilityGates(opts.capabilities);
   const history = opts.history ?? [];
   const emit = opts.onStatus ?? (() => {});
   const db = supabaseAdmin();
@@ -365,6 +456,8 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   const def = modeDef(mode)!;
   const policy = effectivePolicy(mode, [intent.primaryDomain, ...intent.relatedDomains].filter((d): d is string => !!d));
   emit({ stage: "planning", label: auto ? `Auto → ${def.label}` : `${def.label} mode`, mode });
+  // The lane plan (step 3), decided now because the call-review path (1b) needs it.
+  const plan = planLaneWeights(opts.knowledgeScope, policy, intent);
 
   // 1b. Structured "call review" fast-path. A request that NAMES a date /
   //     consultant / practice type and is about reviewing calls must see EVERY
@@ -375,40 +468,56 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   //     source_types unrestricted or including "transcript", and NO data-source /
   //     collection narrowing (the semantic path enforces those inside the SQL; the
   //     structured chunk query can't, so a narrowed key safely falls back to it).
-  const st = scope.sourceTypes;
-  const transcriptsInScope =
-    (st.length === 0 || st.includes("transcript")) && scope.dataSourceIds.length === 0 && scope.collectionIds.length === 0;
+  //     And only when the spoke's user may run call reviews ("chat.call_review");
+  //     without it a review-shaped ask takes the semantic path like any other.
+  const transcriptsInScope = callReviewInScope(scope);
   // Current date/time so the model can resolve "today"/"yesterday"/"this month"
   // and never guess. UTC to match how calls are dated in the data.
   const todayISO = businessDay(new Date().toISOString()) ?? new Date().toISOString().slice(0, 10);
   const weekday = new Date(Date.now() + TZ_OFFSET_MIN * 60000).toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
   const dateNote = `CURRENT DATE: ${todayISO} (${weekday}), UTC. Resolve "today", "yesterday", "this week", "this month" against this exact date.`;
 
-  const reviewProbe = parseCallReviewFilter(query);
+  // The filter is resolved against the CONVERSATION, not only this message:
+  // "audit them" / "analyse all calls do audit" / "and David's?" after "list
+  // yesterday consultants calls" keeps yesterday (and any consultant / practice
+  // type), and a compaction summary turn is the last-resort source. The gate is
+  // computed from that resolved filter (a cheap, DB-free probe) plus two signals
+  // the probe cannot settle without the org's consultant roster: a review verb
+  // on this message, and a short turn inside a thread that already reviewed calls
+  // (a lowercase first name, "and david?", only resolves against the roster).
+  // The full resolve inside decides; a false gate costs one roster read.
+  const reviewProbe = resolveReviewFilterWithHistory(query, history, { referenceDate: todayISO, knownConsultants: [] });
+  // A summary turn counts only when it carries a call filter: its "[Conversation
+  // summary]" marker alone reads as review intent to looksLikeReview.
+  const reviewThread =
+    query.trim().split(/\s+/).length <= 8 &&
+    history.some(
+      (t) =>
+        t.content.trim() !== query.trim() &&
+        (t.role === "user"
+          ? looksLikeReview(t.content.slice(0, 4000))
+          : isConversationSummary(t)
+            ? summaryCarriesCallFilter(t.content, { referenceDate: todayISO, knownConsultants: [] })
+            : false)
+    );
+  const reviewGate = reviewProbe.isReview || looksLikeReview(query) || isReviewFollowUp(query) || reviewThread;
+  // The knowledge scope decides whether the path may run: "gated" = the probe
+  // above, "forced" (Consultant calls) = skip the probe and let the roster-aware
+  // resolve decide, "off" (Playbooks / Learnings) = never.
+  const reviewAllowed = gates.callReview && (plan.callReview === "forced" || (plan.callReview === "gated" && reviewGate));
   const reviewPromise: Promise<{ filter: CallReviewFilter; chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number } | null> =
-    (reviewProbe.isReview || looksLikeReview(query)) && transcriptsInScope
+    reviewAllowed && transcriptsInScope
       ? (async () => {
           // Anchor "yesterday" / "last 3 days" / an omitted year to the real
           // calendar so consultant audits are date-accurate. The 20-minute sync
           // keeps the call data current, and dates are stored to match the
-          // scoring app (created_at, in UTC).
+          // scoring app (created_at, in UTC). Inheriting the conversation's
+          // filter (e.g. "audit james calls" right after "today's calls") makes
+          // the deep audit read that day's calls in FULL rather than a diluted
+          // history-wide sample.
           const known = await knownConsultants(db, orgId);
-          let filter = parseCallReviewFilter(query, { referenceDate: todayISO, knownConsultants: known });
+          const filter = resolveReviewFilterWithHistory(query, history, { referenceDate: todayISO, knownConsultants: known });
           if (!filter.isReview) return null;
-          // Carry a date/range from the recent conversation when this follow-up
-          // narrows to a consultant/practice but names no date of its own (e.g.
-          // "audit james calls" right after "today's calls"), so the deep audit
-          // reads that day's calls in FULL rather than a diluted history-wide sample.
-          if (!filter.date && !filter.dateFrom) {
-            for (const turn of [...history].reverse()) {
-              if (turn.role !== "user") continue;
-              const prior = parseCallReviewFilter(turn.content, { referenceDate: todayISO, knownConsultants: known });
-              if (prior.date || prior.dateFrom) {
-                filter = { ...filter, date: prior.date, dateFrom: prior.dateFrom, dateTo: prior.dateTo };
-                break;
-              }
-            }
-          }
           emit({ stage: "searching", label: `Pulling every call from ${describeFilter(filter)}` });
           const res = await fetchCallsByFilter(db, orgId, filter, { maxCalls: 25, maxTokens: 140_000 });
           return { filter, ...res };
@@ -427,13 +536,12 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   }
   const rewritten = queries.length > 1 || queries[0] !== query;
 
-  // 3. Lane plan: policy weight × intent weight (either can silence a lane).
-  const laneWeights: Record<Lane, number> = { reality: 0, learning: 0, playbook: 0, platform: 0, performance: 0 };
-  for (const l of LANES) laneWeights[l] = Math.max(0, Math.min(1, Math.sqrt(policy.lanes[l] * (intent.lanes[l] ?? 0.5))));
-  // Reality is never silenced entirely (it is the evidence).
-  laneWeights.reality = Math.max(laneWeights.reality, 0.5);
-  const active = LANES.filter((l) => l !== "performance" && laneWeights[l] >= 0.15);
-  const includeRaw = !!policy.includeRaw && intent.intentKind === "analyze";
+  // 3. Lane plan (lib/knowledge-scopes → planLaneWeights): Auto = policy weight ×
+  //    intent weight (either can silence a lane) with Business Reality floored at
+  //    0.5; a fixed knowledge scope ("Playbooks", "All Brain" …) sets the lanes.
+  const laneWeights: Record<Lane, number> = plan.weights;
+  const active = plan.active;
+  const includeRaw = plan.includeRaw;
   emit({ stage: "searching", label: `Searching ${active.map((l) => LANE_LABEL[l]).join(" · ")}`, lanes: active });
 
   // 4. Parallel lane searches (one embedding per query, shared across lanes).
@@ -521,8 +629,13 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     const relatedIds = Array.from(related.keys()).slice(0, 8);
     if (relatedIds.length) {
       emit({ stage: "expanding", label: "Following connected knowledge" });
+      // A fixed knowledge scope keeps connected knowledge inside its lanes
+      // ("Playbooks" never pulls a Reality object in through an edge).
+      const expansionClasses = plan.restrictToActive
+        ? [...active.flatMap((l) => LANE_CLASS[l] as string[]), ...(includeRaw ? ["raw_archive"] : [])]
+        : undefined;
       try {
-        const more = await hybridSearchLane({ orgId, query: queries[0], scope, objectIds: relatedIds, matchCount: 12, fullTextWeight: retrieval.fullTextWeight, semanticWeight: retrieval.semanticWeight, rrfK: retrieval.rrfK });
+        const more = await hybridSearchLane({ orgId, query: queries[0], scope, classes: expansionClasses, objectIds: relatedIds, matchCount: 12, fullTextWeight: retrieval.fullTextWeight, semanticWeight: retrieval.semanticWeight, rrfK: retrieval.rrfK });
         const extraObjects = await getObjectsByIds(db, orgId, relatedIds);
         for (const [k, v] of extraObjects) objects.set(k, v);
         const seen = new Set(Array.from(byLane.values()).flat().map((c) => c.id));
@@ -634,9 +747,13 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   //    The model is told which side carries more authority and that the other
   //    exists, instead of silently picking one.
   const contextObjectIds = Array.from(new Set(final.map((c) => c.object_id).filter((x): x is string => !!x)));
-  // 10. Performance Memory (numbers) when the request wants them or the mode leans on it.
+  // 10. Performance Memory (numbers) when the request wants them or the mode leans on it
+  //     (per the lane plan: a fixed knowledge scope may turn it off). Its rows are
+  //     call-score data (per-consultant scores, close rates), so it is fetched ONLY
+  //     when the effective scope reaches call_score and the caller's capabilities
+  //     allow it — a key / spoke user narrowed away from call scores never sees them.
   //     Both reads are independent, so they share one round trip on the critical path.
-  const wantsPerformance = laneWeights.performance >= 0.3 || intent.needsNumbers;
+  const wantsPerformance = plan.wantsPerformance && performanceAllowed(scope, gates);
   const [contradictions, perf] = await Promise.all([
     contextObjectIds.length > 1 ? listContradictionsAmong(db, orgId, contextObjectIds) : Promise.resolve([]),
     wantsPerformance
@@ -654,7 +771,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     candidates: byLane.get(l)?.length ?? 0,
     selected: final.filter((c) => c.lane === l).length,
   }));
-  if (laneWeights.performance >= 0.3 || intent.needsNumbers) {
+  if (wantsPerformance) {
     lanes.push({ lane: "performance", label: LANE_LABEL.performance, weight: laneWeights.performance, candidates: performanceBlock ? 1 : 0, selected: performanceBlock ? 1 : 0 });
   }
 

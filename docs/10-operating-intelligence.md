@@ -107,12 +107,13 @@ source_platform?, source_url?, duration_s?, pages? } }` or throws a readable
 
 | Adapter | Source | How |
 | --- | --- | --- |
-| `url.ts` | article, LinkedIn / Instagram / X post, any page | SSRF-guarded fetch (`assertPublicUrl` on every hop, 15 s, 2 MB, browser UA) → `<article>` / `<main>` / `<body>` → chrome and scripts stripped, entities decoded; og:title; platform from the hostname. A login wall (< 200 usable chars) is refused with a "paste the transcript" hint. A link straight to a PDF is decoded as one. |
-| `youtube.ts` | YouTube video / short | caption tracks from YouTube's player endpoint as the Android client (the web client's timedtext URLs answer empty without a browser token; the watch page is the fallback), human English → auto English → any, json3 with the srv3/XML fallback, joined into paragraphs; title / author via oEmbed; duration from the player. No captions → title + description, flagged "(no captions available — description only)". |
+| `url.ts` | article, LinkedIn / Instagram / X / TikTok / Facebook / Threads post, any page | SSRF-guarded fetch (`assertPublicUrl` on every hop, 15 s, 2 MB, browser UA) → `<article>` / `<main>` / `<body>` → chrome and scripts stripped, entities decoded; og:title; platform from the hostname. A link straight to a PDF is decoded as one. **Blocked pages** (401/403/429/5xx/999, network error, timeout) and **JS-only / login shells** (< 200 usable chars) are read through Exa (`exa.ts`) before the "paste the transcript" 422. **Social posts**: Exa and the og:/embedded-caption scrape run side by side; Exa's text wins only when it is the post (not a shell of handles / "Log in" / a bare-brand title), then the scraped caption, then the host-specific "paste it / upload a screenshot" 422. Measured: Exa returns only a login shell for Instagram reels, so those still end in the 422. |
+| `youtube.ts` | YouTube video / short | **Native** (free): caption tracks from YouTube's player endpoint as the Android → iOS → TV clients (the web client's timedtext URLs answer empty without a browser token; the watch page is the fallback), human English → auto English → any, json3 with the srv3/XML fallback, joined into paragraphs; title / author via oEmbed; duration from the player. No captions → title + description, flagged "(no captions available — description only)". **Exa**: YouTube bot-walls datacenter IPs, so on Vercel (`VERCEL` / `VERCEL_REGION` set) Exa goes first (fresh crawl, `livecrawl: "preferred"`) and native is the fallback; elsewhere native goes first and Exa takes over when native throws or finds no captions. Measured from a residential IP: native 0.65–0.85 s, Exa 0.4–1.4 s. |
+| `exa.ts` | any link the two above can't read | Exa web-contents API (`POST api.exa.ai/contents`, ~$0.001 a page) through `guardedFetch` (25 s, 8 MB body, no redirects); ≤ 1M characters (Exa's limit). Key: `getProviderKey("exa")` → `provider_secrets` (Settings → Provider API keys, or `npm run set:provider-key -- exa`) → `EXA_API_KEY`. No key → the adapters behave exactly as without Exa. API errors (401/402/429/5xx, crawl errors, empty text) become a logged `ExaError` with the key redacted; users see the adapter's own message. |
 | `pdf.ts` | PDF, ≤ 50 MB | pdf-parse (the same entry the upload path uses) + page count + embedded Title. A scan (no text layer) is refused with an "export it with OCR" hint — no OCR here. |
 | `audio.ts` | voice note, call, meeting — mp3 m4a wav mp4 webm ogg, ≤ 25 MB (the transcription service's limit) | OpenAI `gpt-4o-mini-transcribe`, `whisper-1` when unavailable; key via `getProviderKey("openai")` (Settings → Provider API keys). |
 | `image.ts` | screenshot — png jpg webp gif, ≤ 10 MB | OpenAI vision (`gpt-4o-mini`): transcribe every piece of text in reading order, tables as Markdown, charts as data, no commentary. |
-| `index.ts` | `extractAny({ url } \| { file }, { full? })` | YouTube host → `youtube`, else `url`; files by extension then MIME (txt / md / csv / json decoded as UTF-8); result capped at 60k chars (`truncated: true`) — or at `MAX_LONG_TEXT_CHARS` (2M) with `full`, which only the admin route may ask for. Client-safe helpers (`kindOfFile`, `isYouTubeUrl`, `parseYouTubeId`, `capText`, the size limits) live in `pure.ts`. |
+| `index.ts` | `extractAny({ url } \| { file }, { full? })` | YouTube host → `youtube`, `fathom.video` → `fathom` (never Exa), else `url`; files by extension then MIME (txt / md / csv / json decoded as UTF-8); result capped at 60k chars (`truncated: true`) — or at `MAX_LONG_TEXT_CHARS` (2M) with `full`, which only the admin route may ask for. Client-safe helpers (`kindOfFile`, `isYouTubeUrl`, `parseYouTubeId`, `capText`, the size limits) live in `pure.ts`. |
 
 Routes (`sin1`): `POST /api/admin/knowledge/extract` (admin, `documents:write`,
 `maxDuration = 300`) feeds the Add-knowledge wizard's "Upload a file" / "From a
@@ -267,9 +268,31 @@ Legacy ids (sales, media, strategy, decision_maker, ceo) remain aliases.
 ## 7. API surface
 
 Public (scoped key): `POST /api/v1/chat` (accepts `mode`, `allowedModes`,
-`attachments`; streams `mode`, `sources` with lanes/refs, `learning_candidate`),
+`attachments`, `knowledgeScope`; streams `mode`, `sources` with lanes/refs, `learning_candidate`),
 `POST /api/v1/learning`, `GET /api/v1/collections`, `POST /api/v1/extract`
 (link / YouTube / PDF / audio / image → text for a spoke, capability `chat`; see §3).
+
+**Knowledge scopes ("Search in")** — `src/lib/knowledge-scopes.ts` is the one
+catalogue. `GET /api/v1/collections` returns `{ collections, scopes: [{ id, label,
+description, sensitive }] }` (scopes the key's source-type scope can ever reach;
+`calls` only for an unrestricted key or one that includes `call_score` /
+`transcript`). `POST /api/v1/chat` takes `knowledgeScope` (default `auto`, else
+400 on an unknown id); `planLaneWeights(scope, policy, intent)` replaces step 3 of
+the orchestrator:
+
+| Scope | Lanes searched | Raw archive | Performance block | Call-review path | Source types |
+| --- | --- | --- | --- | --- | --- |
+| `auto` | policy × intent (reality floor 0.5) | analysts on analyze asks | weight ≥ 0.3 or numbers | when the ask reads as a review | key scope |
+| `all` | reality, learning, playbook, platform at 1 | always (0.3) | weight ≥ 0.3 or numbers | when the ask reads as a review | key scope |
+| `reality` | Business Reality | always (0.3) | only when the ask needs numbers | when the ask reads as a review | key scope |
+| `playbook` | Playbooks | never | never | never | key scope |
+| `learning` | Organizational Learning | never | never | never | key scope |
+| `calls` (sensitive) | Business Reality (where call docs live) | never | never | probe skipped; the roster-aware resolve decides | key scope ∩ `call_score`, `transcript` |
+
+A fixed scope keeps relationship expansion inside its lanes. A scope can only
+narrow: when `calls` intersects to nothing for the key / the spoke's `sourceTypes`,
+the answer says no call data is available (no retrieval, no model call). The
+classic (non-orchestrator) pipeline applies only the source-type narrowing.
 
 Brain map (read-only, capability `chat` **or** `retrieve`, rate-limited like
 retrieve, `Cache-Control: private, max-age=15`; logic in `src/lib/knowledge-read.ts`):

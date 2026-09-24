@@ -72,7 +72,9 @@ drawer it belongs to; the **Knowledge Compiler** does the rest:
 
 1. **Give it a source** — paste text, upload a file (PDF, document, spreadsheet),
    paste a link (a web page or a YouTube video — captions are pulled
-   automatically), a screenshot (text is read out of the image) or a voice note
+   automatically; YouTube from the live server, blocked pages and social posts
+   are read through Exa, whose key lives encrypted in Settings → Provider API
+   keys), a screenshot (text is read out of the image) or a voice note
    (transcribed). A whole book, course or long report (files up to 50 MB) is
    split into its chapters and each chapter becomes its own object — one
    framework per object, not one blurry object per book.

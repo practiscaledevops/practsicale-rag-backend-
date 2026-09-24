@@ -1,15 +1,22 @@
-// GET /api/v1/collections — the collections a scoped key may search, so a
-// consumer app can offer a "source scope" selector for /api/v1/chat's
-// `collectionIds`.
+// GET /api/v1/collections — what a consumer app's "Search in" picker can offer:
+// the knowledge SCOPES (intelligence lanes: Auto, All Brain, Reality, Playbooks,
+// Learnings, Consultant calls — sent to /api/v1/chat as `knowledgeScope`) and
+// the collections a scoped key may search (for /api/v1/chat's `collectionIds`,
+// an additional narrowing filter).
 //
 // Auth:  Authorization: Bearer psk_...  (any valid key)
-// Scope: constrained to the key's own collection scope — if the key is limited to
-//        specific collections, only those are returned; an unrestricted key sees
-//        every collection in its org. org_id is resolved SERVER-SIDE.
-// Returns: { collections: [{ id, name }] }
+// Scope: collections are constrained to the key's own collection scope — if the
+//        key is limited to specific collections, only those are returned; an
+//        unrestricted key sees every collection in its org. Scopes come from the
+//        catalogue (lib/knowledge-scopes) filtered to those the key's source-type
+//        scope can ever reach: "calls" only when the key is unrestricted or
+//        includes call_score / transcript. org_id is resolved SERVER-SIDE.
+// Returns: { collections: [{ id, name }], scopes: [{ id, label, description, sensitive }] }
+//          (`collections` unchanged — older clients keep working.)
 
 import { supabaseAdmin } from "@/lib/supabase";
 import { resolveContext, AuthError } from "@/lib/auth/context";
+import { scopesForKey } from "@/lib/knowledge-scopes";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
@@ -39,5 +46,5 @@ export async function GET(req: Request) {
     id: c.id,
     name: c.name ?? "Untitled",
   }));
-  return Response.json({ collections });
+  return Response.json({ collections, scopes: scopesForKey(ctx.key) });
 }

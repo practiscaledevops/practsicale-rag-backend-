@@ -1,5 +1,6 @@
-// Provider API-key store — lets a super-admin set/rotate OpenAI, Anthropic, and
-// Cohere keys from the dashboard instead of via env + redeploy.
+// Provider API-key store — lets a super-admin set/rotate OpenAI, Anthropic,
+// Cohere and Exa (link capture, see ingest-adapters/exa.ts) keys from the
+// dashboard instead of via env + redeploy.
 //
 // - Keys are stored ENCRYPTED (AES-256-GCM, key derived from APP_SECRET) in the
 //   global `provider_secrets` table, read only through the service-role client.
@@ -14,13 +15,14 @@ import { createHash, createCipheriv, createDecipheriv, randomBytes, scryptSync }
 import { supabaseAdmin } from "@/lib/supabase";
 import { isDemo } from "@/lib/demo/mode";
 
-export type Provider = "openai" | "anthropic" | "cohere";
-export const PROVIDERS: Provider[] = ["openai", "anthropic", "cohere"];
+export type Provider = "openai" | "anthropic" | "cohere" | "exa";
+export const PROVIDERS: Provider[] = ["openai", "anthropic", "cohere", "exa"];
 
 const ENV_VAR: Record<Provider, string> = {
   openai: "OPENAI_API_KEY",
   anthropic: "ANTHROPIC_API_KEY",
   cohere: "COHERE_API_KEY",
+  exa: "EXA_API_KEY",
 };
 
 // ---- encryption -----------------------------------------------------------
@@ -154,7 +156,7 @@ export async function setProviderKey(
 ): Promise<void> {
   const clean = secret.trim();
   if (!clean) throw new Error("secret is empty");
-  await supabaseAdmin()
+  const { error } = await supabaseAdmin()
     .from("provider_secrets")
     .upsert(
       {
@@ -166,6 +168,9 @@ export async function setProviderKey(
       },
       { onConflict: "provider" }
     );
+  // A silent write failure would leave the old key (or env) active while the
+  // caller reports success.
+  if (error) throw new Error(`could not store the ${provider} key: ${error.message}`);
   bustProviderCache(provider);
 }
 

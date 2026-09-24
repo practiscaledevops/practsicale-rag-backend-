@@ -62,8 +62,17 @@ export const PRACTICE_TYPES = ["NEMT", "Home Care", "Home Health", "Assisted Liv
 // Review / analyse / list intent over calls or transcripts. Bare "call(s)" is
 // NOT a trigger (that is any sales question); an explicit review verb or an
 // exhaustive quantifier ("all/each/every … calls", "which consultant") is.
-const REVIEW_RE =
-  /\b(review|reviews|reviewing|analy[sz]e|analy[sz]ing|analysis|assess|evaluate|audit|go through|going through|walk through|walking through|break ?down|summar(?:y|ise|ize|ies)|which consultant|list (?:the |all )?calls?|list (?:the )?transcripts?|(?:all|each|every|these|those|the) (?:the )?(?:calls?|transcripts?)|transcripts?)\b/i;
+// A listing verb may sit a few words before "calls" ("list yesterday consultants
+// calls", "show me James's NEMT calls"); "show up" (the show-up rate) is not one.
+// The words in between must point AT calls (a date, name, practice, determiner):
+// a question word, preposition or coaching noun makes it a how-to question
+// ("give me tips for NEMT calls", "show me how James handles calls").
+const LIST_GAP_STOP =
+  "(?:how|what|why|when|where|to|for|on|about|with|tips?|advice|ideas?|examples?|scripts?|ways?|best|pointers?|suggestions?|guidance|help|feedback|techniques?|strateg(?:y|ies)|openers?|lines?)";
+const REVIEW_RE = new RegExp(
+  String.raw`\b(review|reviews|reviewing|analy[sz]e|analy[sz]ing|analysis|assess|evaluate|audit|deep[- ]?dive|go through|going through|walk through|walking through|break ?down|summar(?:y|ise|ize|ies)|which consultant|list (?:the |all )?calls?|list (?:the )?transcripts?|(?:list|show me|pull up|pull|fetch|give me)\s+(?:(?!${LIST_GAP_STOP}\b)[\w'’-]+\s+){0,3}?(?:calls?|transcripts?)|(?:all|each|every|these|those|the) (?:the )?(?:calls?|transcripts?)|transcripts?)\b`,
+  "i"
+);
 
 /** True when the query carries a review/audit/analyse verb (no filter required). */
 export function looksLikeReview(query: string): boolean {
@@ -240,6 +249,11 @@ const NAME_STOPWORDS = new Set<string>([
   "brain", "practiscale", "the", "all", "each", "every", "which", "what", "how", "who",
   "show", "me", "please", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
   "today", "yesterday", "and", "from", "for", "by", "on", "of",
+  // Follow-up / conversational openers ("And David's?", "Now James's calls").
+  "about", "also", "now", "then", "ok", "okay", "same", "plus", "or", "but", "so", "just", "again",
+  "do", "did", "can", "could", "would", "should", "deep", "dive", "score", "scores", "grade", "compare",
+  "coach", "them", "these", "those", "both", "everyone", "everybody", "team", "whole",
+  "last", "this", "next", "past", "previous", "recent", "current", "week", "month", "year",
 ]);
 
 // A broad run of capitalised tokens (each starts uppercase; possessive marks and
@@ -262,12 +276,17 @@ export function detectConsultants(query: string): string[] {
     if (!raw) return;
     // Drop possessive markers anywhere, then keep only the leading run of proper
     // name words (initial cap, not all-caps, not a stop/month/practice word).
+    // Stop words BEFORE the name are skipped, so a capitalised sentence opener
+    // ("And David's?", "Review James's calls") doesn't swallow the name.
     const words = raw.replace(/['’]s?\b/g, "").trim().split(/\s+/);
     const kept: string[] = [];
     for (const w of words) {
-      const clean = w.replace(/[.,]+$/, "");
+      const clean = w.replace(/[.,?!;:]+$/, "");
       const lw = clean.toLowerCase();
-      if (!clean || !/^[A-Z]/.test(clean) || /^[A-Z]{2,}$/.test(clean) || NAME_STOPWORDS.has(lw)) break;
+      if (!clean || !/^[A-Z]/.test(clean) || /^[A-Z]{2,}$/.test(clean) || NAME_STOPWORDS.has(lw)) {
+        if (kept.length === 0 && clean && NAME_STOPWORDS.has(lw)) continue;
+        break;
+      }
       kept.push(clean);
     }
     const name = kept.join(" ").trim();
@@ -349,6 +368,336 @@ export function describeFilter(f: CallReviewFilter): string {
   if (f.consultants?.length) parts.push(f.consultants.join(" / "));
   if (f.practiceType) parts.push(`${f.practiceType} calls`);
   return parts.join(" · ") || "matching calls";
+}
+
+// ---------------------------------------------------------------------------
+// Conversation continuity (pure) — follow-ups inherit the earlier filter
+// ---------------------------------------------------------------------------
+//
+// "list yesterday consultants calls" → "analyse all calls do audit" / "audit
+// them" / "and David's?" must keep yesterday (and any consultant / practice) from
+// the earlier turn. Deterministic and cheap: regex parses only, no model call.
+
+/** A conversation turn as the chat / jobs APIs carry it. */
+export interface ReviewHistoryTurn {
+  role: string;
+  content: string;
+  /**
+   * When the turn was sent (ISO timestamp), if the caller supplied it. Relative
+   * dates in that turn ("yesterday", "last week") are resolved against ITS
+   * business day, not today's, so a chat continued the next day keeps the same calls.
+   */
+  createdAt?: string;
+}
+
+/** A compaction summary is a system turn whose content starts with this marker. */
+export const CONVERSATION_SUMMARY_PREFIX = "[Conversation summary]";
+
+/** True for a compaction-summary system turn ("[Conversation summary] …"). */
+export function isConversationSummary(turn: { role?: unknown; content?: unknown } | null | undefined): boolean {
+  return (
+    !!turn &&
+    turn.role === "system" &&
+    typeof turn.content === "string" &&
+    turn.content.trimStart().startsWith(CONVERSATION_SUMMARY_PREFIX)
+  );
+}
+
+// An analysis / audit action on results ("audit", "deep dive", "score", "break … down").
+const FOLLOW_UP_VERB_RE =
+  /\b(audit(?:s|ed|ing)?|analy[sz](?:e|es|ed|ing)|analysis|review(?:s|ed|ing)?|scor(?:e|es|ed|ing)|grad(?:e|es|ed|ing)|summar(?:y|ise|ize|ised|ized|ising|izing)|break(?:ing)?\s+(?:[a-z]+\s+)?down|breakdown|compar(?:e|es|ed|ing|ison)|deep[- ]?dive|evaluat(?:e|es|ed|ing|ion)|assess(?:ment)?|coach(?:ing)?|critique|go(?:ing)? through|walk(?:ing)? (?:me )?through)\b/i;
+
+// A reference to the previous results. Bare "all/each/every" counts only when it
+// points at calls / "of them" / ends the request — "compare all our pricing
+// plans" is not a reference to earlier calls.
+const FOLLOW_UP_REF_RE =
+  /\b(?:them|these|those|they|their|both|above|the same|the (?:calls?|transcripts?|ones|list))\b|\b(?:all|each|every)(?=\s*(?:$|[?.!,;:]|(?:of|one|ones|them|these|those)\b|(?:the\s+)?(?:[\w'’-]+\s+)?(?:calls?|transcripts?)\b))/i;
+
+// Content-creation asks are not call reviews even when short ("write David's post").
+const GENERATION_RE =
+  /\b(write|draft|compose|create|generate|rewrite|translate|linkedin|tweet|post|email|e-mail|blog|newsletter|caption|script|hook|slogan|ad copy|landing page|poem)\b/i;
+// Thanks / acknowledgement — "thanks, great review!" must not re-run a review.
+const ACK_RE = /\b(thanks?|thank you|thx|appreciated?|great job|good job|nice work|well done|awesome|perfect|love (?:it|this|that))\b/i;
+
+// Explicit widening: drop the inherited consultant / practice / date dimension.
+const WIDEN_CONSULTANTS_RE =
+  /\b(?:(?:all|every|each|any)\s+(?:(?:of\s+)?(?:the|our)\s+)?(?:consultants?|reps?|closers?|setters?|agents?|sales ?people|team members?)|(?:whole|entire|full)\s+team|everyone|everybody|team[- ]?wide|across the (?:whole |entire )?team|regardless of (?:the )?consultants?)\b/i;
+const WIDEN_PRACTICE_RE =
+  /\b(?:(?:all|every|each|any)\s+(?:(?:of\s+)?the\s+)?(?:practices?|practice types?|verticals?)|regardless of (?:the )?practice(?: type)?)\b/i;
+const WIDEN_DATE_RE = /\b(?:all[- ]time|all dates|any date|every date|ever|since (?:the )?(?:start|beginning))\b/i;
+
+// A turn that is about calls (so its filter can anchor a later follow-up even
+// without a review verb — "how did today's calls go?" then "audit james calls").
+const CALL_CONTEXT_RE = /\b(calls?|transcripts?|consultants?)\b/i;
+
+// Call-specific analysis verbs. A GENERIC action ("compare / summarise / break
+// down these") refers to the immediately preceding answer, so it only reaches
+// back past an unrelated turn to an older call review when it uses one of these
+// or names calls ("audit them", "compare those calls").
+const STRONG_FOLLOW_UP_VERB_RE = /\b(audit(?:s|ed|ing)?|review(?:s|ed|ing)?|scor(?:e|es|ed|ing)|grad(?:e|es|ed|ing)|deep[- ]?dive|coach(?:ing)?)\b/i;
+
+// A short turn right after a review can be a bare follow-up ("and David's?").
+const SHORT_FOLLOW_UP_WORDS = 8;
+// Bound the text parsed per history turn (a pasted document is not a filter).
+const MAX_PARSE_CHARS = 4000;
+const MAX_SUMMARY_PARSE_CHARS = 20_000;
+
+function hasFilterDims(f: CallReviewFilter): boolean {
+  return !!(f.date || (f.dateFrom && f.dateTo) || f.consultants?.length || f.practiceType);
+}
+
+/**
+ * True when the request is an analysis / audit ACTION on the previous results
+ * rather than a self-contained request: an analysis verb (audit, analyse,
+ * review, score, grade, summarise, break down, compare, deep dive, evaluate,
+ * coach) plus a reference to earlier results (them / these / those / all /
+ * each / every / the calls). Content-creation asks ("summarize them into an
+ * email") and thanks ("thanks, can you summarize all of that?") never are.
+ * Pure; history-independent.
+ */
+export function isReviewFollowUp(query: string): boolean {
+  const q = (query ?? "").trim().slice(0, MAX_PARSE_CHARS);
+  if (!q) return false;
+  if (GENERATION_RE.test(q) || ACK_RE.test(q)) return false;
+  return FOLLOW_UP_VERB_RE.test(q) && FOLLOW_UP_REF_RE.test(q);
+}
+
+// Words a bare filter-swap fragment may carry besides the filter itself
+// ("and David's?", "what about NEMT?", "now the NEMT ones", "same for last week").
+const FRAGMENT_FILLER = new Set<string>([
+  "and", "what", "about", "how", "now", "then", "also", "too", "same", "for", "on", "from", "of", "in", "to",
+  "the", "a", "ones", "one", "only", "just", "instead", "again", "plus", "or", "but", "so", "ok", "okay",
+  "calls", "call", "transcripts", "transcript", "his", "her", "their", "those", "these", "them", "with",
+  "yesterday", "yesterdays", "today", "todays", "last", "this", "past", "previous", "prior", "recent", "current",
+  "day", "days", "week", "weeks", "month", "months", "year", "few", "st", "nd", "rd", "th",
+]);
+
+/** True when the turn is ONLY a filter swap: nothing but date / consultant / practice + filler words. */
+function isBareFilterFragment(query: string, own: CallReviewFilter): boolean {
+  let s = " " + query.toLowerCase() + " ";
+  for (const n of own.consultants ?? []) s = s.split(n.toLowerCase()).join(" ");
+  s = s
+    .replace(/\b(?:nemt|home\s*health|home\s*care|assisted\s*living|phlebotomy|other)\b/g, " ")
+    .replace(new RegExp(`\\b(?:${MONTH_ALT})\\b`, "g"), " ")
+    .replace(/['’]s?\b/g, " ")
+    .replace(/[^a-z]+/g, " ");
+  return s.split(/\s+/).filter(Boolean).every((w) => FRAGMENT_FILLER.has(w));
+}
+
+/** A very short turn that continues the previous review ("and David's?", "what about yesterday?", "do a deep audit"). */
+function isShortFollowUp(query: string, own: CallReviewFilter): boolean {
+  const q = (query ?? "").trim();
+  const words = q.split(/\s+/).filter(Boolean);
+  if (!words.length || words.length > SHORT_FOLLOW_UP_WORDS) return false;
+  if (GENERATION_RE.test(q)) return false;
+  // Naming a date / consultant / practice is a follow-up only when that is ALL the
+  // turn says - "what's our NEMT pricing?" is a pricing question, not a review.
+  if (hasFilterDims(own)) return isBareFilterFragment(q, own) || (FOLLOW_UP_VERB_RE.test(q) && !ACK_RE.test(q));
+  if (WIDEN_CONSULTANTS_RE.test(q) || WIDEN_PRACTICE_RE.test(q)) return true;
+  return FOLLOW_UP_VERB_RE.test(q) && !ACK_RE.test(q);
+}
+
+/** `own` (what this turn names) over `prior` (the conversation's active filter), minus explicit widenings. */
+function mergeFilters(own: CallReviewFilter, prior: CallReviewFilter, query: string): CallReviewFilter {
+  const out: CallReviewFilter = { isReview: false };
+  const dateSrc = own.date || own.dateFrom ? own : WIDEN_DATE_RE.test(query) ? null : prior;
+  if (dateSrc?.dateFrom && dateSrc.dateTo) {
+    out.dateFrom = dateSrc.dateFrom;
+    out.dateTo = dateSrc.dateTo;
+  } else if (dateSrc?.date) out.date = dateSrc.date;
+  if (own.consultants?.length) out.consultants = [...own.consultants];
+  else if (prior.consultants?.length && !WIDEN_CONSULTANTS_RE.test(query)) out.consultants = [...prior.consultants];
+  if (own.practiceType) out.practiceType = own.practiceType;
+  else if (prior.practiceType && !WIDEN_PRACTICE_RE.test(query)) out.practiceType = prior.practiceType;
+  out.isReview = hasFilterDims(out);
+  return out;
+}
+
+type ParseOpts = { referenceDate: string; knownConsultants: string[] };
+
+/** Resolve one turn against the conversation's active filter (null = none yet). */
+function resolveTurn(query: string, active: CallReviewFilter | null, prevWasReview: boolean, opts: ParseOpts): CallReviewFilter {
+  const own = parseCallReviewFilter(query, opts);
+  if (!active) return own;
+  // An action on earlier results continues the review right after it; past an
+  // unrelated turn only a call-specific action ("audit them", "compare those calls") does.
+  const action =
+    isReviewFollowUp(query) && (prevWasReview || CALL_CONTEXT_RE.test(query) || STRONG_FOLLOW_UP_VERB_RE.test(query));
+  const followUp = own.isReview || action || (prevWasReview && isShortFollowUp(query, own));
+  return followUp ? mergeFilters(own, active, query) : own;
+}
+
+const ISO_DATE_G = /\b(20\d{2})-(\d{2})-(\d{2})\b/g;
+const FILTER_NONE_RE = /^(?:none|n\/a|na|all|any|everyone|everybody|unspecified|not specified|unknown|-|—)$/i;
+
+function isoDatesIn(s: string): string[] {
+  const out: string[] = [];
+  for (const m of s.matchAll(ISO_DATE_G)) {
+    const iso = toISO(Number(m[1]), Number(m[2]), Number(m[3]));
+    if (iso) out.push(iso);
+  }
+  return out;
+}
+
+/**
+ * The structured line the compaction prompt asks for:
+ *   "Active call-review filter: date=2026-09-24 | range=… to … | consultants=A, B | practice=NEMT"
+ * Tolerant of spacing / separators; unknown or "none" parts are ignored.
+ */
+function parseFilterLine(seg: string): CallReviewFilter | null {
+  const s = seg.slice(0, 1000);
+  const out: CallReviewFilter = { isReview: false };
+  const part = (re: RegExp) => re.exec(s)?.[1]?.trim() ?? "";
+  const rangeDates = isoDatesIn(part(/\b(?:range|dates?\s*range|from)\s*[:=]\s*([^|;\n]+)/i)).sort();
+  const dateOne = isoDatesIn(part(/\bdate\s*[:=]\s*([^|;\n]+)/i))[0];
+  const all = isoDatesIn(s).sort();
+  if (rangeDates.length >= 2) {
+    out.dateFrom = rangeDates[0];
+    out.dateTo = rangeDates[rangeDates.length - 1];
+  } else if (dateOne) out.date = dateOne;
+  else if (all.length >= 2) {
+    out.dateFrom = all[0];
+    out.dateTo = all[all.length - 1];
+  } else if (all.length === 1) out.date = all[0];
+  const names = part(/\bconsultants?\s*[:=]\s*([^|;\n]+)/i)
+    .split(/\s*(?:,|\/|&|\band\b)\s*/i)
+    .map((n) => n.replace(/[."'`]+$/g, "").trim())
+    .filter((n) => n.length >= 2 && n.length <= 60 && /[a-z]/i.test(n) && !FILTER_NONE_RE.test(n));
+  if (names.length) out.consultants = names.slice(0, 5);
+  const practice = part(/\bpractice(?:[ _-]?type)?\s*[:=]\s*([^|;\n]+)/i);
+  if (practice && !FILTER_NONE_RE.test(practice)) {
+    const pt = detectPracticeType(practice) ?? PRACTICE_TYPES.find((p) => p.toLowerCase() === practice.toLowerCase());
+    if (pt) out.practiceType = pt;
+  }
+  out.isReview = hasFilterDims(out);
+  return out.isReview ? out : null;
+}
+
+/**
+ * The call filter a compaction summary carries, or null. Prefers the explicit
+ * "Active call-review filter:" line; otherwise (last resort) the LAST line that
+ * is about CALLS — review intent first, then any call line that is not a
+ * content-creation ask. A line that never mentions calls / transcripts /
+ * consultants ("an analysis of the SOP revision dated …") is never a filter.
+ */
+function filterFromSummary(text: string, opts: ParseOpts): CallReviewFilter | null {
+  const body = text.trimStart().slice(CONVERSATION_SUMMARY_PREFIX.length).slice(0, MAX_SUMMARY_PARSE_CHARS);
+  const lines = body.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /active call[- ]?review filter\s*[:=\-–—]\s*(.*)$/i.exec(lines[i]);
+    // An explicit line is authoritative: "none" means no active filter — don't guess.
+    if (m) return parseFilterLine(m[1]);
+  }
+  for (const accept of [
+    // "summary" is how every summary talks, not review intent.
+    (l: string) => CALL_CONTEXT_RE.test(l) && REVIEW_RE.test(l.replace(/\bsummar(?:y|ise|ize|ies)\b/gi, "")),
+    (l: string) => CALL_CONTEXT_RE.test(l) && !GENERATION_RE.test(l),
+  ]) {
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!accept(lines[i])) continue;
+      const f = parseCallReviewFilter(lines[i].slice(0, MAX_PARSE_CHARS), opts);
+      if (hasFilterDims(f)) return { ...f, isReview: true };
+    }
+  }
+  return null;
+}
+
+/**
+ * True when a compaction-summary turn carries a call filter (its explicit
+ * "Active call-review filter" line, or a call-review line). The orchestrator's
+ * review-thread signal uses this instead of keyword-testing the summary, whose
+ * "[Conversation summary]" marker alone reads as review intent.
+ */
+export function summaryCarriesCallFilter(text: string, opts: { referenceDate: string; knownConsultants?: string[] }): boolean {
+  return !!filterFromSummary(text, { referenceDate: opts.referenceDate, knownConsultants: opts.knownConsultants ?? [] });
+}
+
+/** The business day a history turn was sent (its ISO `createdAt`), never later than `today`; else `today`. */
+function turnReferenceDate(createdAt: unknown, today: string): string {
+  if (typeof createdAt !== "string") return today;
+  const ts = createdAt.trim();
+  // ISO only ("2026-09-24", "2026-09-24T10:00:00Z", "… +00:00"): Date.parse is
+  // lenient enough to read "1" as a year, which must not move the anchor.
+  if (!/^\d{4}-\d{2}-\d{2}(?:$|[T ]\d{2}:\d{2})/.test(ts)) return today;
+  const day = isISODate(ts) ? (Number.isNaN(Date.parse(ts)) ? null : ts) : businessDay(ts);
+  return day && day <= today ? day : today;
+}
+
+/**
+ * Resolve a request's call-review filter WITH the conversation, so follow-ups
+ * keep the earlier filters. PURE + unit-tested.
+ *
+ *  1. Parse the current query on its own (parseCallReviewFilter).
+ *  2. The conversation's ACTIVE filter is the most recent earlier USER turn that
+ *     resolves as a review (itself resolved against the turns before it, so a
+ *     chain "list yesterday's calls" → "and David's?" → "what about NEMT?" keeps
+ *     building), or that is about calls and names a date / consultant / practice
+ *     ("how did today's calls go?"). A leading compaction summary system turn
+ *     ("[Conversation summary] …") is the last resort when no user turn yields one.
+ *  3. A current query that is a review by itself inherits each dimension it
+ *     does not name (date/range, consultants, practice type). Consultants are
+ *     NOT inherited when it widens explicitly ("all consultants", "everyone",
+ *     "whole team", "team-wide"); likewise "all practice types" / "all-time".
+ *  4. A current query that is NOT a review by itself is still a review
+ *     (inheriting the active filter) when it is an action on the previous results
+ *     (isReviewFollowUp: "audit them", "analyse all calls", "do a deep audit of
+ *     these") or a very short follow-up right after a review that is only a
+ *     filter swap or an analysis verb ("and David's?", "what about yesterday?",
+ *     "do a deep audit" — not "what's our NEMT pricing?"). Past an unrelated turn,
+ *     only a call-specific action ("audit them", "compare those calls") reaches
+ *     back. Content-creation asks ("write me a LinkedIn post") and thanks are
+ *     never follow-ups, and a content-creation turn expires the active filter.
+ *
+ * A history turn's relative dates resolve against the business day in its
+ * `createdAt` (when supplied and not in the future), else `referenceDate`. The
+ * chat API's history ends with the current message; that trailing copy is
+ * ignored. Returns the standalone parse when nothing is inherited.
+ */
+export function resolveReviewFilterWithHistory(
+  query: string,
+  history: ReviewHistoryTurn[],
+  opts: { referenceDate: string; knownConsultants: string[] }
+): CallReviewFilter {
+  const parseOpts: ParseOpts = { referenceDate: opts.referenceDate, knownConsultants: opts.knownConsultants ?? [] };
+  const q = (query ?? "").trim();
+  const turns = (Array.isArray(history) ? history : []).filter(
+    (t): t is ReviewHistoryTurn => !!t && typeof t.role === "string" && typeof t.content === "string"
+  );
+  let end = turns.length;
+  if (end > 0 && turns[end - 1].role === "user" && turns[end - 1].content.trim() === q) end--;
+
+  let active: CallReviewFilter | null = null;
+  let prevWasReview = false;
+  for (let i = 0; i < end; i++) {
+    const t = turns[i];
+    // Relative dates in an earlier turn mean the day THAT turn was sent ("list
+    // yesterday's calls" asked on the 24th is the 23rd, even when the chat is
+    // continued on the 25th). `active` then holds absolute ISO dates.
+    const turnOpts: ParseOpts = { ...parseOpts, referenceDate: turnReferenceDate(t.createdAt, parseOpts.referenceDate) };
+    if (t.role === "user") {
+      const text = t.content.slice(0, MAX_PARSE_CHARS);
+      const r = resolveTurn(text, active, prevWasReview, turnOpts);
+      if (r.isReview && hasFilterDims(r)) {
+        active = r;
+        prevWasReview = true;
+      } else if (hasFilterDims(r) && CALL_CONTEXT_RE.test(text) && !GENERATION_RE.test(text)) {
+        active = { ...r, isReview: true };
+        prevWasReview = true;
+      } else {
+        prevWasReview = false;
+        // A content-creation ask replaces what "these / them" refer to: a later
+        // "compare these" is about the new content, not the old call set.
+        if (GENERATION_RE.test(text)) active = null;
+      }
+    } else if (!active && isConversationSummary(t)) {
+      const s = filterFromSummary(t.content, turnOpts);
+      if (s) {
+        active = s;
+        prevWasReview = true;
+      }
+    }
+  }
+  return resolveTurn(q, active, prevWasReview, parseOpts);
 }
 
 // ---------------------------------------------------------------------------

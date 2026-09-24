@@ -8,6 +8,10 @@
 //   extractAny(input, { full: true })           → same, with the LONG text cap (2M chars)
 //                                                 for the wizard's long-source ("book") mode
 //
+// Links our own fetch can't read — YouTube from Vercel's bot-walled IPs, social
+// posts, blocked or JS-only pages — are read through Exa's web-contents API
+// (./exa; key in provider_secrets or EXA_API_KEY). Fathom links never use it.
+//
 // Server-only (SDKs, pdf-parse, DNS). The client-safe helpers live in ./pure.
 
 import { extractFromUrl } from "./url";

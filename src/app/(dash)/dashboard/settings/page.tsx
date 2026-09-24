@@ -411,12 +411,12 @@ export default function SettingsPage() {
 }
 
 // ---------------------------------------------------------------------------
-// Provider API keys — set/rotate OpenAI, Anthropic, Cohere from the dashboard.
+// Provider API keys — set/rotate OpenAI, Anthropic, Cohere, Exa from the dashboard.
 // Secrets are write-only: the server returns only a masked status.
 // ---------------------------------------------------------------------------
 
 interface ProviderStatus {
-  provider: "openai" | "anthropic" | "cohere";
+  provider: "openai" | "anthropic" | "cohere" | "exa";
   configured: boolean;
   source: "db" | "env" | "none";
   last4: string | null;
@@ -427,6 +427,7 @@ const PROVIDER_LABELS: Record<string, { label: string; hint: string }> = {
   openai: { label: "OpenAI", hint: "Embeddings (semantic search). Required for full hybrid retrieval." },
   anthropic: { label: "Anthropic", hint: "Claude generation + query rewrite / contextual / faithfulness." },
   cohere: { label: "Cohere", hint: "Reranking (optional). Improves top-k ordering." },
+  exa: { label: "Exa", hint: "Link capture (optional). Reads YouTube transcripts from the server, social posts and blocked pages." },
 };
 
 function ProvidersCard() {
@@ -519,7 +520,7 @@ function ProvidersCard() {
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium">{meta.label}</span>
+                        <span id={`provider-${r.provider}-label`} className="text-sm font-medium">{meta.label}</span>
                         {r.configured ? (
                           <span className="rounded-full bg-success/15 px-2 py-0.5 text-xs font-medium text-success">
                             {r.source === "db" ? "set" : "from env"}
@@ -531,7 +532,7 @@ function ProvidersCard() {
                           </span>
                         )}
                       </div>
-                      <p className="text-xs text-muted-foreground">{meta.hint}</p>
+                      <p id={`provider-${r.provider}-hint`} className="text-xs text-muted-foreground">{meta.hint}</p>
                     </div>
                     {r.source === "db" && (
                       <Button
@@ -539,6 +540,7 @@ function ProvidersCard() {
                         size="sm"
                         onClick={() => clearKey(r.provider)}
                         disabled={busy === r.provider}
+                        aria-label={`Clear ${meta.label} key`}
                       >
                         Clear
                       </Button>
@@ -546,8 +548,11 @@ function ProvidersCard() {
                   </div>
                   <div className="flex items-center gap-2">
                     <Input
+                      id={`provider-${r.provider}-key`}
                       type="password"
                       autoComplete="off"
+                      aria-label={`${meta.label} API key`}
+                      aria-describedby={meta.hint ? `provider-${r.provider}-hint` : undefined}
                       placeholder={r.configured ? "Enter a new key to rotate…" : "Paste API key…"}
                       value={drafts[r.provider] ?? ""}
                       onChange={(e) => setDrafts((d) => ({ ...d, [r.provider]: e.target.value }))}
@@ -555,6 +560,7 @@ function ProvidersCard() {
                     <Button
                       onClick={() => save(r.provider)}
                       disabled={busy === r.provider || !(drafts[r.provider] ?? "").trim()}
+                      aria-label={`Save ${meta.label} key`}
                     >
                       {busy === r.provider ? (
                         <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />

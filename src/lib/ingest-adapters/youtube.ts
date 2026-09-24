@@ -1,17 +1,26 @@
-// YouTube video → transcript text. No API key.
+// YouTube video → transcript text. Two paths:
 //
-// The caption tracks come from YouTube's own player endpoint (innertube, the
-// ANDROID client): the web watch page also lists them, but since 2025 the web
-// client's timedtext URLs answer an empty 200 to anything without a browser
-// "pot" token, while the Android client's URLs still serve the captions. The
-// watch page stays as the fallback for the details and tracks. We fetch the
-// English (or auto) track as json3 (srv3/XML fallback), join it into readable
-// paragraphs and put the title/author (oEmbed) on top. Without captions we
-// return the title + description so the Brain still gets something, flagged.
+// NATIVE (free, no key): the caption tracks come from YouTube's own player
+// endpoint (innertube, the ANDROID → IOS → TVHTML5 clients): the web watch page
+// also lists them, but since 2025 the web client's timedtext URLs answer an
+// empty 200 to anything without a browser "pot" token, while the app clients'
+// URLs still serve the captions. The watch page stays as the fallback for the
+// details and tracks. We fetch the English (or auto) track as json3 (srv3/XML
+// fallback), join it into readable paragraphs and put the title/author (oEmbed)
+// on top. Without captions we return the title + description, flagged.
+//
+// EXA (paid, ~$0.001, key via getProviderKey("exa") — see ./exa): YouTube
+// bot-walls datacenter IPs ("sign in to confirm you're not a bot"), so on
+// Vercel the native chain fails. Measured from a residential IP: native
+// 0.65–0.85 s, Exa 0.4–1.4 s. So: on Vercel Exa goes FIRST (native is the
+// fallback); elsewhere native goes first (free, faster) and Exa takes over
+// when it throws (bot wall, no captions/description, network) or finds no
+// captions. Without an Exa key the native chain is the only path, as before.
 
 import { guardedFetch, BROWSER_UA } from "./fetch";
 import { decodeEntities, collapseWhitespace } from "./url";
 import { parseYouTubeId } from "./pure";
+import { tryExaContents } from "./exa";
 import { ExtractError, type Extracted } from "./types";
 
 // ---- pure helpers (unit-tested; no network) --------------------------------
@@ -203,6 +212,50 @@ export function segmentsToParagraphs(segs: CaptionSegment[]): string {
   return paras.join("\n\n");
 }
 
+/**
+ * Break a transcript that arrives as one unbroken block (Exa's shape) into the
+ * native path's paragraphs: a break once a paragraph passes `target` characters
+ * and ends a sentence, or at twice `target` for unpunctuated auto-captions.
+ * Text that already has blank-line paragraphs is returned as is.
+ */
+export function blockToParagraphs(text: string, target = 600): string {
+  const t = text.replace(/\r\n?/g, "\n").trim();
+  if (/\n[ \t]*\n/.test(t)) return t;
+  const paras: string[] = [];
+  let cur = "";
+  for (const w of t.split(/\s+/)) {
+    if (!w) continue;
+    cur = cur ? `${cur} ${w}` : w;
+    if ((cur.length >= target && /[.!?]["')\]]?$/.test(w)) || cur.length >= target * 2) {
+      paras.push(cur);
+      cur = "";
+    }
+  }
+  if (cur) paras.push(cur);
+  return paras.join("\n\n");
+}
+
+// A short line of YouTube's own page chrome in an Exa read: the "<title> - YouTube"
+// line, the footer ("About Press Copyright …"), the bot-wall prompt. A stale Exa
+// cache entry of a watch page can hold only these (seen live: 211 chars, no transcript).
+const YT_CHROME_LINE = /\s-\sYouTube$|About Press Copyright|Privacy Policy & Safety|How YouTube works|sign in to confirm|not a bot/i;
+const YT_CHROME_MAX_LINE = 300;
+
+/** The spoken text of Exa's read of a watch page: short YouTube chrome lines dropped (a transcript arrives as one long line). */
+export function exaYouTubeTranscript(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .filter((l) => !(l.trim().length < YT_CHROME_MAX_LINE && YT_CHROME_LINE.test(l.trim())))
+    .join("\n")
+    .trim();
+}
+
+/** Vercel functions run on datacenter IPs that YouTube bot-walls, so Exa goes first there. */
+export function youTubeExaFirst(): boolean {
+  return Boolean(process.env.VERCEL || process.env.VERCEL_REGION);
+}
+
 function fmtDuration(s: number): string {
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
@@ -353,11 +406,87 @@ function isBotReason(reason: string): boolean {
   return /sign in|not a bot|not a robot|confirm you|unusual traffic/i.test(reason);
 }
 
+/** Less spoken text than this from Exa is not a transcript (a stale cache entry holds only page chrome). */
+const MIN_EXA_TRANSCRIPT_CHARS = 100;
+
+/** Leading characters compared to tell Exa's text apart from the description we already have. */
+const OVERLAP_PROBE = 160;
+
+/** YouTube caps a video description at 5,000 characters: a longer Exa read cannot be the description alone. */
+const YT_DESCRIPTION_MAX_CHARS = 5000;
+
+const EXA_TRANSCRIPT_HEADER = "Transcript (via Exa):";
+const EXA_UNVERIFIED_HEADER = "Text from the video page (via Exa; may be the description, not a transcript):";
+
+/** True when Exa's (whitespace-flattened) text is just the video description we already have. */
+function isJustDescription(flat: string, description: string): boolean {
+  const d = collapseWhitespace(description).replace(/\s+/g, " ");
+  return !!d && (d.includes(flat.slice(0, OVERLAP_PROBE)) || flat.startsWith(d.slice(0, OVERLAP_PROBE)));
+}
+
+/**
+ * The video through Exa, shaped like the native result (title / byline /
+ * "Transcript …" header, paragraphs). null when Exa has no key, fails, reads
+ * only page chrome, or returns nothing better than `description` (which the
+ * caller already has). livecrawl "preferred": Exa's cache can hold a stale
+ * chrome-only copy of a watch page (seen live) while a fresh crawl carries the
+ * transcript, so crawl fresh and use the cache only if that crawl fails.
+ * Without a description to compare against, a caption-less video's Exa read
+ * may BE the description, so it is only labelled a transcript when it is longer
+ * than any description can be; otherwise the header says what it might be.
+ */
+async function extractViaExa(id: string, watchUrl: string, description = ""): Promise<Extracted | null> {
+  const page = await tryExaContents(watchUrl, "youtube", { livecrawl: "preferred" });
+  if (!page) return null;
+  const speech = exaYouTubeTranscript(page.text);
+  const flat = speech.replace(/\s+/g, " ");
+  if (flat.length < MIN_EXA_TRANSCRIPT_CHARS) return null;
+  const descriptionKnown = collapseWhitespace(description) !== "";
+  if (descriptionKnown && isJustDescription(flat, description)) return null;
+
+  const title = (page.title ?? "").replace(/\s+-\s+YouTube$/i, "").trim() || `YouTube video ${id}`;
+  const author = (page.author ?? "").trim();
+  const byline = [author ? `by ${author}` : "", "YouTube"].filter(Boolean).join(" · ");
+  const meta: Extracted["meta"] = { source_type: "video", source_platform: "youtube", source_url: watchUrl };
+  const header = descriptionKnown || flat.length > YT_DESCRIPTION_MAX_CHARS ? EXA_TRANSCRIPT_HEADER : EXA_UNVERIFIED_HEADER;
+  return { text: `# ${title}\n${byline}\n${header}\n\n${blockToParagraphs(speech)}`, title, meta };
+}
+
 export async function extractFromYouTube(url: string): Promise<Extracted> {
   const id = parseYouTubeId(url);
   if (!id) throw new ExtractError("That doesn't look like a YouTube video link (watch?v=…, youtu.be/… or /shorts/…).", 400);
   const watchUrl = `https://www.youtube.com/watch?v=${id}`;
 
+  if (youTubeExaFirst()) {
+    const viaExa = await extractViaExa(id, watchUrl);
+    if (viaExa) return viaExa;
+    return (await extractNative(id, watchUrl)).result;
+  }
+
+  let native: NativeOutcome;
+  try {
+    native = await extractNative(id, watchUrl);
+  } catch (e) {
+    // Bot wall, nothing to read, a refused video, a network failure: Exa reads
+    // it from its own crawler. If it can't either, the native message stands.
+    const viaExa = await extractViaExa(id, watchUrl);
+    if (viaExa) return viaExa;
+    throw e;
+  }
+  if (native.captioned) return native.result;
+  // Description only — Exa may still have the transcript (tracks hidden from us).
+  return (await extractViaExa(id, watchUrl, native.description)) ?? native.result;
+}
+
+interface NativeOutcome {
+  result: Extracted;
+  /** false = no captions were readable, `result` is the title + description only. */
+  captioned: boolean;
+  description: string;
+}
+
+/** The free caption chain (innertube clients → watch page). Throws the honest 422s. */
+async function extractNative(id: string, watchUrl: string): Promise<NativeOutcome> {
   // Try each innertube client, then the watch page, keeping the best details we
   // see and stopping at the first source whose captions actually serve a body.
   let details: VideoDetails = {};
@@ -420,7 +549,11 @@ export async function extractFromYouTube(url: string): Promise<Extracted> {
     const description = collapseWhitespace(details.description ?? "");
     // No captions, but we did read the video — hand back the description, flagged.
     if (description) {
-      return { text: `# ${title}\n${byline}\n(no captions available — description only)\n\n${description}`, title, meta };
+      return {
+        result: { text: `# ${title}\n${byline}\n(no captions available — description only)\n\n${description}`, title, meta },
+        captioned: false,
+        description,
+      };
     }
     // We know the video but there is nothing to read.
     if (details.title) throw new ExtractError("This video has no captions and no description to read. Paste the transcript instead.", 422);
@@ -429,5 +562,5 @@ export async function extractFromYouTube(url: string): Promise<Extracted> {
   }
 
   const kind = usedTrack?.kind === "asr" ? "auto-generated captions" : `captions${usedTrack?.languageCode ? ` (${usedTrack.languageCode})` : ""}`;
-  return { text: `# ${title}\n${byline}\nTranscript from ${kind}:\n\n${transcript}`, title, meta };
+  return { result: { text: `# ${title}\n${byline}\nTranscript from ${kind}:\n\n${transcript}`, title, meta }, captioned: true, description: "" };
 }

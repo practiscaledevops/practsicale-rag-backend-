@@ -14,7 +14,15 @@ import { isDemo } from "@/lib/demo/mode";
 export interface ChatTurn {
   role: string;
   content: string;
+  /** When the turn was sent (ISO timestamp), if the caller supplied it. Anchors relative dates in call-review continuity. */
+  createdAt?: string;
 }
+
+// Per-turn / question clip for the rewriter prompt. The history the chat route
+// hands over is not size-capped (call-review continuity reads the wide window),
+// so a few long pasted turns must not become a ~240k-char prompt on every message.
+const MAX_REWRITE_TURN_CHARS = 2000;
+const MAX_REWRITE_QUERY_CHARS = 4000;
 
 /**
  * Rewrite `query` into a standalone retrieval query using recent conversation.
@@ -33,8 +41,9 @@ export async function rewriteQuery(
   const recent = history
     .filter((m) => m.role === "user" || m.role === "assistant")
     .slice(-6)
-    .map((m) => `${m.role}: ${m.content}`)
+    .map((m) => `${m.role}: ${m.content.slice(0, MAX_REWRITE_TURN_CHARS)}`)
     .join("\n");
+  const question = query.slice(0, MAX_REWRITE_QUERY_CHARS);
 
   try {
     const m = await getModel(tier);
@@ -42,8 +51,8 @@ export async function rewriteQuery(
       model: m,
       system: systemPrompt,
       prompt: recent
-        ? `Conversation so far:\n${recent}\n\nLatest question: ${query}\n\nRewritten standalone search query:`
-        : `Question: ${query}\n\nRewritten standalone search query:`,
+        ? `Conversation so far:\n${recent}\n\nLatest question: ${question}\n\nRewritten standalone search query:`
+        : `Question: ${question}\n\nRewritten standalone search query:`,
       ...generationParams(m.modelId, { temperature: 0, maxTokens: 128 }),
     });
     const rewritten = text.trim();
@@ -75,8 +84,9 @@ export async function rewriteQueries(
   const recent = history
     .filter((m) => m.role === "user" || m.role === "assistant")
     .slice(-6)
-    .map((m) => `${m.role}: ${m.content}`)
+    .map((m) => `${m.role}: ${m.content.slice(0, MAX_REWRITE_TURN_CHARS)}`)
     .join("\n");
+  const question = query.slice(0, MAX_REWRITE_QUERY_CHARS);
 
   try {
     const m = await getModel(tier);
@@ -84,8 +94,8 @@ export async function rewriteQueries(
       model: m,
       system: systemPrompt,
       prompt: recent
-        ? `Conversation so far:\n${recent}\n\nLatest question: ${query}\n\nSearch queries:`
-        : `Question: ${query}\n\nSearch queries:`,
+        ? `Conversation so far:\n${recent}\n\nLatest question: ${question}\n\nSearch queries:`
+        : `Question: ${question}\n\nSearch queries:`,
       ...generationParams(m.modelId, { temperature: 0, maxTokens: 160 }),
     });
     const lines = text
