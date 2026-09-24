@@ -20,13 +20,17 @@
     "set:provider-key": "tsx scripts/set-provider-key.ts",
     "compile:knowledge": "tsx scripts/compile-knowledge.ts",
     "rebuild:call-metrics": "tsx scripts/rebuild-call-metrics.ts",
-    "backfill:transcripts": "tsx scripts/backfill-transcripts.ts"
+    "backfill:transcripts": "tsx scripts/backfill-transcripts.ts",
+    "trigger:login": "npx trigger.dev@3 login",
+    "trigger:dev": "npx trigger.dev@3 dev",
+    "trigger:deploy": "npx trigger.dev@3 deploy"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^1.0.0",
     "@ai-sdk/openai": "^1.0.0",
     "@supabase/ssr": "^0.5.1",
     "@supabase/supabase-js": "^2.45.0",
+    "@trigger.dev/sdk": "^3.3.17",
     "@vercel/functions": "^3.9.8",
     "ai": "^4.0.0",
     "clsx": "^2.1.1",

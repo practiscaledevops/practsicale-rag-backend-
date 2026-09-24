@@ -160,28 +160,36 @@ async function runClaimedTask(task: JobTask): Promise<void> {
       .from("job_tasks")
       .update({ status: "completed", result: result ?? null, attempts: task.attempts + 1, finished_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq("id", task.id);
-    await bumpAndMaybeFinalize(job.id, "completed");
+    await bumpAndMaybeFinalize(job.id);
   } catch (e) {
     const message = e instanceof Error ? e.message : "task failed";
     await db
       .from("job_tasks")
       .update({ status: "failed", error: message.slice(0, 2000), attempts: task.attempts + 1, finished_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq("id", task.id);
-    await bumpAndMaybeFinalize(job.id, "failed");
+    await bumpAndMaybeFinalize(job.id);
   }
 }
 
-async function bumpAndMaybeFinalize(jobId: string, outcome: "completed" | "failed"): Promise<void> {
+async function bumpAndMaybeFinalize(jobId: string): Promise<void> {
   const db = supabaseAdmin();
   const job = await getJobRow(jobId);
   if (!job) return;
-  const patch =
-    outcome === "completed"
-      ? { completed_tasks: job.completed_tasks + 1 }
-      : { failed_tasks: job.failed_tasks + 1 };
-  await db.from("jobs").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", jobId);
+  // Recompute counters from the task rows rather than incrementing, so parallel
+  // workers (Trigger.dev) finishing tasks at the same instant can never lose an
+  // update — COUNT is always exact. Also makes finalize fire reliably at 'done'.
+  const [completedRes, failedRes] = await Promise.all([
+    db.from("job_tasks").select("id", { count: "exact", head: true }).eq("job_id", jobId).eq("status", "completed"),
+    db.from("job_tasks").select("id", { count: "exact", head: true }).eq("job_id", jobId).eq("status", "failed"),
+  ]);
+  const completed = completedRes.count ?? 0;
+  const failed = failedRes.count ?? 0;
+  const done = completed + failed;
+  await db
+    .from("jobs")
+    .update({ completed_tasks: completed, failed_tasks: failed, updated_at: new Date().toISOString() })
+    .eq("id", jobId);
 
-  const done = (patch.completed_tasks ?? job.completed_tasks) + (job.failed_tasks + (outcome === "failed" ? 1 : 0));
   const total = job.total_tasks;
   if (total > 0 && done >= total && job.status === "running") {
     const { data: taskRows } = await db.from("job_tasks").select(TASK_COLUMNS).eq("job_id", jobId).order("idx");

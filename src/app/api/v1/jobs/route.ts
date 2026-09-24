@@ -3,10 +3,10 @@
 // screen). Org comes from the key; the key must be allowed to chat AND to see
 // transcripts (a deep audit reads them), else 403.
 
-import { after } from "next/server";
 import { resolveContext, AuthError } from "@/lib/auth/context";
 import { supabaseAdmin } from "@/lib/supabase";
-import { createJob, planJob, drainTasks } from "@/lib/jobs/engine";
+import { createJob, planJob } from "@/lib/jobs/engine";
+import { dispatchJob } from "@/lib/jobs/dispatch";
 import {
   parseCallReviewFilter,
   describeFilter,
@@ -66,7 +66,7 @@ export async function POST(req: Request) {
       deadlineMinutes: 180,
     });
     const count = await planJob(job);
-    after(() => drainTasks({ orgId: ctx.orgId, deadlineAt: Date.now() + KICK_BUDGET_MS }));
+    await dispatchJob(job, { budgetMs: KICK_BUDGET_MS });
     return Response.json(
       { job: { id: job.id, title: job.title, status: count > 0 ? "running" : "completed", total_tasks: count } },
       { status: 201 }

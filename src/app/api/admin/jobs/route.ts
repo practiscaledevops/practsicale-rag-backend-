@@ -6,12 +6,11 @@
 //   POST { type, title, params } — create a typed job directly.
 //   GET                        — list this org's recent jobs.
 
-import { after } from "next/server";
 import { requireAdmin, AdminAuthError } from "@/lib/auth/admin";
 import { supabaseAdmin } from "@/lib/supabase";
-import { createJob, planJob, drainTasks } from "@/lib/jobs/engine";
+import { createJob, planJob, listJobs } from "@/lib/jobs/engine";
 import { JOB_HANDLERS } from "@/lib/jobs/handlers";
-import { listJobs } from "@/lib/jobs/engine";
+import { dispatchJob } from "@/lib/jobs/dispatch";
 import {
   parseCallReviewFilter,
   describeFilter,
@@ -94,8 +93,9 @@ export async function POST(req: Request) {
       deadlineMinutes: 180,
     });
     const count = await planJob(job);
-    // Start draining in the request's background so progress appears at once.
-    after(() => drainTasks({ orgId: admin.orgId, deadlineAt: Date.now() + KICK_BUDGET_MS }));
+    // Route to Trigger.dev (parallel, hours-long) when configured, else drain
+    // in the request background + let the cron finish the rest.
+    await dispatchJob(job, { budgetMs: KICK_BUDGET_MS });
     return Response.json({ job: { ...job, total_tasks: count, status: count > 0 ? "running" : "completed" } }, { status: 201 });
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message : "Could not start the job." }, { status: 500 });
