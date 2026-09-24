@@ -40,6 +40,18 @@ export interface CallReviewFilter {
   isReview: boolean;
 }
 
+/** One row of the complete roster for a review (every matching call, cheap metadata). */
+export interface ScorecardRow {
+  date: string;
+  consultant: string;
+  prospect: string;
+  practice: string;
+  score: number | null;
+  band: string | null;
+  outcome: string | null;
+  duration: number | null;
+}
+
 /** The six known practice types (matched case-insensitively). */
 export const PRACTICE_TYPES = ["NEMT", "Home Care", "Home Health", "Assisted Living", "Phlebotomy", "Other"] as const;
 
@@ -76,6 +88,37 @@ function shiftISO(refISO: string, deltaDays: number): string {
   const t = new Date(Date.UTC(y, m - 1, d));
   t.setUTCDate(t.getUTCDate() + deltaDays);
   return `${t.getUTCFullYear()}-${pad2(t.getUTCMonth() + 1)}-${pad2(t.getUTCDate())}`;
+}
+
+// The scoring app shows each call's date in the OFFICE timezone (UTC+5,
+// Asia/Karachi), not UTC — a call created 2026-09-23T20:22Z shows as Sep 24.
+// Override with SCORING_TZ_OFFSET_MIN (e.g. 330 for +5:30) if the office differs.
+export const TZ_OFFSET_MIN = Number(process.env.SCORING_TZ_OFFSET_MIN) || 300;
+/** The business-local YYYY-MM-DD of an ISO timestamp (the date the scoring app shows), or null. */
+export function businessDay(ts: unknown): string | null {
+  const t = Date.parse(String(ts ?? ""));
+  if (Number.isNaN(t)) return null;
+  const d = new Date(t + TZ_OFFSET_MIN * 60000);
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+}
+/** UTC [start,end) instants bounding a business-local day — for filtering created_at. */
+function dayBoundsUTC(localDate: string): { start: string; end: string } {
+  const [y, m, dd] = localDate.split("-").map(Number);
+  const startMs = Date.UTC(y, m - 1, dd) - TZ_OFFSET_MIN * 60000;
+  return { start: new Date(startMs).toISOString(), end: new Date(startMs + 86400000).toISOString() };
+}
+/** A scorecard row from a transcript summary chunk's metadata (date = created_at, app-matching). */
+function toScorecardRow(m: Record<string, unknown>): ScorecardRow {
+  return {
+    date: businessDay(m.created_at) ?? (typeof m.call_date === "string" ? m.call_date : ""),
+    consultant: typeof m.consultant_name === "string" ? m.consultant_name : "Unknown",
+    prospect: typeof m.prospect_name === "string" ? m.prospect_name : "",
+    practice: typeof m.practice_type === "string" ? m.practice_type : (typeof m.category === "string" ? m.category : ""),
+    score: m.overall_score != null ? Number(m.overall_score) : null,
+    band: typeof m.performance_band === "string" ? m.performance_band : null,
+    outcome: typeof m.call_outcome === "string" ? m.call_outcome : null,
+    duration: m.call_duration_minutes != null ? Number(m.call_duration_minutes) : null,
+  };
 }
 
 /**
@@ -137,6 +180,23 @@ export function resolveDateRange(
 ): { from: string; to: string } | undefined {
   const ref = isISODate(referenceDate) ? referenceDate : new Date().toISOString().slice(0, 10);
   const q = (query ?? "").toLowerCase();
+  const ry = Number(ref.slice(0, 4));
+  const rm = Number(ref.slice(5, 7));
+  const firstOf = (y: number, mo: number) => `${y}-${pad2(mo)}-01`;
+  const lastOf = (y: number, mo: number) => {
+    const d = new Date(Date.UTC(y, mo, 0));
+    return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+  };
+  // Whole-month ranges. "this/current month" or "monthly" -> the present month
+  // up to today; "last month" -> the full previous month; "this year".
+  if (/\b(this|current)\s+month\b/.test(q) || /\bmonthly\b/.test(q) || /\bthis\s+month/.test(q))
+    return { from: firstOf(ry, rm), to: ref };
+  if (/\b(last|previous|prior|past)\s+month\b/.test(q)) {
+    const py = rm === 1 ? ry - 1 : ry;
+    const pm = rm === 1 ? 12 : rm - 1;
+    return { from: firstOf(py, pm), to: lastOf(py, pm) };
+  }
+  if (/\b(this|current)\s+year\b/.test(q)) return { from: `${ry}-01-01`, to: ref };
   const LAST = "(?:last|past|previous|recent)";
   let m = new RegExp(`\\b${LAST}\\s+(\\d{1,2})\\s+days?\\b`).exec(q);
   if (m) { const nn = Math.max(1, Math.min(90, Number(m[1]))); return { from: shiftISO(ref, -(nn - 1)), to: ref }; }
@@ -237,7 +297,13 @@ export function detectConsultants(query: string): string[] {
  * is present; otherwise `{ isReview: false }` (fall back to semantic retrieval).
  */
 export function parseCallReviewFilter(query: string, opts?: { referenceDate?: string }): CallReviewFilter {
-  const q = (query ?? "").trim();
+  // Normalize dashed / slashed word-dates ("24-sep-2026", "sep-24-2026") so the
+  // month-name parsers below see spaces; digit-digit dates (9/22, 2026-09-24) are
+  // left intact.
+  const q = (query ?? "")
+    .trim()
+    .replace(/(\d)[-/](?=[a-z])/gi, "$1 ")
+    .replace(/([a-z])[-/](?=\d)/gi, "$1 ");
   if (!q) return { isReview: false };
   const ref = isISODate(opts?.referenceDate) ? (opts!.referenceDate as string) : new Date().toISOString().slice(0, 10);
 
@@ -376,11 +442,20 @@ export async function fetchCallsByFilter(
   orgId: string,
   filter: CallReviewFilter,
   opts: { maxCalls: number; maxTokens: number }
-): Promise<{ chunks: RetrievedChunk[]; callCount: number; note: string | null }> {
-  const applyFilters = <T extends { eq: Function; ilike: Function; or: Function; gte: Function; lte: Function }>(q: T): T => {
+): Promise<{ chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number }> {
+  const applyFilters = <T extends { eq: Function; ilike: Function; or: Function; gte: Function; lte: Function; lt: Function }>(q: T): T => {
     let out = q.eq("org_id", orgId).eq("source_type", "transcript");
-    if (filter.date) out = out.eq("metadata->>call_date", filter.date);
-    else if (filter.dateFrom && filter.dateTo) out = out.gte("metadata->>call_date", filter.dateFrom).lte("metadata->>call_date", filter.dateTo);
+    // Filter by the UTC day of created_at (always clean, and what the scoring app
+    // shows) via a half-open range on the ISO timestamp — accurate regardless of
+    // the stored call_date. ISO timestamps compare lexicographically by day.
+    if (filter.date) {
+      const b = dayBoundsUTC(filter.date);
+      out = out.gte("metadata->>created_at", b.start).lt("metadata->>created_at", b.end);
+    } else if (filter.dateFrom && filter.dateTo) {
+      out = out
+        .gte("metadata->>created_at", dayBoundsUTC(filter.dateFrom).start)
+        .lt("metadata->>created_at", dayBoundsUTC(filter.dateTo).end);
+    }
     if (filter.practiceType) out = out.ilike("metadata->>practice_type", filter.practiceType);
     const cands = (filter.consultants ?? []).map(sanitizeConsultant).filter(Boolean);
     if (cands.length) out = out.or(cands.map((c) => `metadata->>consultant_name.ilike.%${c}%`).join(","));
@@ -388,22 +463,31 @@ export async function fetchCallsByFilter(
   };
 
   try {
-    // 1) Which calls match — document_ids only (never `select *`).
-    const idQuery = applyFilters(db.from("chunks").select("document_id"))
+    // 1) Which calls match — document_id + summary metadata (never `select *`).
+    //    Also builds the COMPLETE scorecard (every matching call), so a 50-call
+    //    day is fully enumerated even though we deep-read only a subset.
+    const idQuery = applyFilters(db.from("chunks").select("document_id, metadata, created_at"))
       .order("document_id", { ascending: true })
+      .order("created_at", { ascending: true })
       .limit(MAX_MATCH_ROWS);
     const { data: idRows, error: idErr } = await idQuery;
     if (idErr) {
       console.error("[call-review] match scan failed:", idErr.message);
-      return { chunks: [], callCount: 0, note: null };
+      return { chunks: [], callCount: 0, note: null, scorecard: [], totalMatched: 0 };
     }
     const orderedDocs: string[] = [];
-    for (const r of (idRows ?? []) as { document_id: string }[]) {
-      if (r.document_id && !orderedDocs.includes(r.document_id)) orderedDocs.push(r.document_id);
+    const cardByDoc = new Map<string, ScorecardRow>();
+    for (const r of (idRows ?? []) as { document_id: string; metadata: Record<string, unknown>; created_at?: string }[]) {
+      if (!r.document_id) continue;
+      if (!orderedDocs.includes(r.document_id)) orderedDocs.push(r.document_id);
+      if (!cardByDoc.has(r.document_id)) cardByDoc.set(r.document_id, toScorecardRow(r.metadata ?? {}));
     }
+    const scorecard = [...cardByDoc.values()].sort(
+      (a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.consultant.localeCompare(b.consultant))
+    );
     const totalMatched = orderedDocs.length;
     if (totalMatched === 0) {
-      return { chunks: [], callCount: 0, note: `No calls found for ${describeFilter(filter)} in the Brain.` };
+      return { chunks: [], callCount: 0, note: `No calls found for ${describeFilter(filter)} in the Brain.`, scorecard: [], totalMatched: 0 };
     }
 
     // 2) Full chunks for the chosen calls only, in reading order (created_at ASC
@@ -420,7 +504,7 @@ export async function fetchCallsByFilter(
       .order("created_at", { ascending: true });
     if (error || !rows) {
       console.error("[call-review] chunk fetch failed:", error?.message ?? "no data");
-      return { chunks: [], callCount: 0, note: null };
+      return { chunks: [], callCount: 0, note: null, scorecard, totalMatched };
     }
 
     const rowsByDoc = new Map<string, RetrievedChunk[]>();
@@ -443,9 +527,9 @@ export async function fetchCallsByFilter(
       totalMatched > assembled.callCount
         ? `Showing ${assembled.callCount} of ${totalMatched} matching calls (the largest set that fits); ask for a specific consultant or a narrower window for the rest.`
         : null;
-    return { chunks: assembled.chunks, callCount: assembled.callCount, note };
+    return { chunks: assembled.chunks, callCount: assembled.callCount, note, scorecard, totalMatched };
   } catch (e) {
     console.error("[call-review] fetch error:", e instanceof Error ? e.message : e);
-    return { chunks: [], callCount: 0, note: null };
+    return { chunks: [], callCount: 0, note: null, scorecard: [], totalMatched: 0 };
   }
 }

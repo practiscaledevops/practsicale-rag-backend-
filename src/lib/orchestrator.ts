@@ -20,7 +20,7 @@ import { z } from "zod";
 import { supabaseAdmin } from "@/lib/supabase";
 import { embed } from "@/lib/embeddings";
 import { hybridSearchLane, expandParents, expandTranscripts, LANE_RPC_MISSING, type LaneChunk, type RetrievedChunk } from "@/lib/retrieval";
-import { parseCallReviewFilter, fetchCallsByFilter, describeFilter, type CallReviewFilter } from "@/lib/call-review";
+import { parseCallReviewFilter, fetchCallsByFilter, describeFilter, businessDay, TZ_OFFSET_MIN, type CallReviewFilter, type ScorecardRow } from "@/lib/call-review";
 import { rerank } from "@/lib/rerank";
 import { rewriteQueries, type ChatTurn } from "@/lib/query-transform";
 import { getActivePrompts } from "@/lib/prompts-db";
@@ -378,16 +378,21 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   const st = scope.sourceTypes;
   const transcriptsInScope =
     (st.length === 0 || st.includes("transcript")) && scope.dataSourceIds.length === 0 && scope.collectionIds.length === 0;
+  // Current date/time so the model can resolve "today"/"yesterday"/"this month"
+  // and never guess. UTC to match how calls are dated in the data.
+  const todayISO = businessDay(new Date().toISOString()) ?? new Date().toISOString().slice(0, 10);
+  const weekday = new Date(Date.now() + TZ_OFFSET_MIN * 60000).toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
+  const dateNote = `CURRENT DATE: ${todayISO} (${weekday}), UTC. Resolve "today", "yesterday", "this week", "this month" against this exact date.`;
+
   const reviewProbe = parseCallReviewFilter(query);
-  const reviewPromise: Promise<{ filter: CallReviewFilter; chunks: RetrievedChunk[]; callCount: number; note: string | null } | null> =
+  const reviewPromise: Promise<{ filter: CallReviewFilter; chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number } | null> =
     reviewProbe.isReview && transcriptsInScope
       ? (async () => {
           // Anchor "yesterday" / "last 3 days" / an omitted year to the real
           // calendar so consultant audits are date-accurate. The 20-minute sync
           // keeps the call data current, and dates are stored to match the
           // scoring app (created_at, in UTC).
-          const ref = new Date().toISOString().slice(0, 10);
-          const filter = parseCallReviewFilter(query, { referenceDate: ref });
+          const filter = parseCallReviewFilter(query, { referenceDate: todayISO });
           if (!filter.isReview) return null;
           emit({ stage: "searching", label: `Pulling every call from ${describeFilter(filter)}` });
           const res = await fetchCallsByFilter(db, orgId, filter, { maxCalls: 25, maxTokens: 140_000 });
@@ -649,8 +654,12 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   // Business Reality lane where the transcripts sit.
   const callReview = review ? { count: review.callCount, note: review.note, filter: review.filter } : undefined;
   const structuredNote =
-    review && review.chunks.length
-      ? `STRUCTURED CALL SET: these are ALL ${review.callCount} call transcript${review.callCount === 1 ? "" : "s"} matching ${describeFilter(review.filter)} (not a sample). Review every one.${review.note ? ` ${review.note}` : ""}`
+    review && review.scorecard.length
+      ? [
+          `STRUCTURED CALL SET — ${review.totalMatched} call${review.totalMatched === 1 ? "" : "s"} match ${describeFilter(review.filter)}. This roster is COMPLETE and authoritative (NOT a sample): report these exact counts and per-call scores. Full transcripts for ${review.callCount} of them are included below for deep review${review.totalMatched > review.callCount ? "; for any not deep-read, use the scorecard row and offer to pull that consultant's transcripts" : ""}.`,
+          `SCORECARD — every matching call (date | consultant → prospect | practice | score | band | outcome | duration):`,
+          ...review.scorecard.map((r, i) => `${i + 1}. ${r.date || "?"} | ${r.consultant} → ${r.prospect || "?"} | ${r.practice || "-"} | ${r.score ?? "?"}/100 | ${r.band || "-"} | ${r.outcome || "-"} | ${r.duration ?? "?"} min`),
+        ].join("\n")
       : "";
   return {
     chunks: final,
@@ -662,7 +671,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     mode,
     auto,
     lanes,
-    contextBlock: [structuredNote, buildLaneContext(final), disagreements].filter(Boolean).join("\n\n\n"),
+    contextBlock: [dateNote, structuredNote, buildLaneContext(final), disagreements].filter(Boolean).join("\n\n\n"),
     performanceBlock,
     performanceMetrics,
     conflicts,
