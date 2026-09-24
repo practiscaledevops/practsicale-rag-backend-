@@ -163,8 +163,8 @@ export function resolveDate(query: string, referenceDate: string): string | unde
   }
 
   // 5) Relative — anchored to the data's newest call_date, not the wall clock.
-  if (/\byesterday\b/i.test(q)) return shiftISO(ref, -1);
-  if (/\btoday\b/i.test(q)) return ref;
+  if (/\byesterdays?\b/i.test(q)) return shiftISO(ref, -1);
+  if (/\btodays?\b/i.test(q)) return ref;
 
   return undefined;
 }
