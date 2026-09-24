@@ -10,12 +10,17 @@ is drained by either runner:
 
 | Runner | When | Limits |
 | --- | --- | --- |
-| **Vercel cron** (`/api/cron/jobs`, every 2 min) + an in-request kick | Always on. The floor. | ~300 s per run, sequential. Fine for tens of calls. |
-| **Trigger.dev** | When `TRIGGER_SECRET_KEY` is set. | Dedicated machines, up to 3 h, **parallel agents**. For hundreds/thousands of calls. |
+| **Vercel cron** (`/api/cron/jobs`, every 2 min) + an in-request kick | Always on. The default. | ~300 s per run, but `JOB_CONCURRENCY` batches run **in parallel** (default 5). A ~500-call audit finishes within a cycle or two. |
+| **Trigger.dev** | When `TRIGGER_SECRET_KEY` is set. | Dedicated machines, up to 3 h, parallel agents. Only needed at true 1000s-of-calls scale. |
 
-Both are safe to run at once — tasks are claimed atomically, so a task never runs
-twice, and job counters are recomputed from the task rows (no lost updates under
-parallelism). If Trigger.dev is unreachable, dispatch falls back to the cron path.
+For the current volumes the **cron alone is enough** — Trigger.dev is an optional
+upgrade you can turn on later without code changes. Both drain the same queue and
+are safe to run at once: tasks are claimed atomically (never run twice) and job
+counters are recomputed from the task rows (no lost updates under parallelism). If
+Trigger.dev is unreachable, dispatch falls back to the cron path.
+
+Speed/cost knobs: `JOB_CONCURRENCY` (parallel batches per drainer) and
+`AUDIT_MODEL_TIER` (`max` Opus / `recommended` Sonnet / `fast`).
 
 ## How a job flows
 

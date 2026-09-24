@@ -121,24 +121,29 @@ export async function planJob(job: Job): Promise<number> {
   return planned.length;
 }
 
-/** Optimistically claim one queued task (org-scoped if given), or null. */
+/** Optimistically claim one queued task (org-scoped if given), or null when the
+ *  queue is empty. Fetches a small window and tries each so parallel workers
+ *  don't give up early just because a peer grabbed the first candidate. */
 async function claimNextTask(orgId?: string): Promise<JobTask | null> {
   const db = supabaseAdmin();
-  for (let attempt = 0; attempt < 5; attempt++) {
-    let q = db.from("job_tasks").select("id").eq("status", "queued").order("idx", { ascending: true }).limit(1);
+  for (let attempt = 0; attempt < 6; attempt++) {
+    let q = db.from("job_tasks").select("id").eq("status", "queued").order("idx", { ascending: true }).limit(10);
     if (orgId) q = q.eq("org_id", orgId);
     const { data: candidates } = await q;
-    const id = (candidates?.[0] as { id?: string } | undefined)?.id;
-    if (!id) return null;
-    // Claim it only if still queued (loser of a race gets 0 rows → retry).
-    const { data: claimed } = await db
-      .from("job_tasks")
-      .update({ status: "running", started_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-      .eq("id", id)
-      .eq("status", "queued")
-      .select(TASK_COLUMNS)
-      .maybeSingle();
-    if (claimed) return claimed as JobTask;
+    const ids = (candidates ?? []).map((c) => (c as { id: string }).id);
+    if (ids.length === 0) return null; // queue genuinely empty
+    for (const id of ids) {
+      // Claim only if still queued (loser of a race gets 0 rows → try the next).
+      const { data: claimed } = await db
+        .from("job_tasks")
+        .update({ status: "running", started_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq("id", id)
+        .eq("status", "queued")
+        .select(TASK_COLUMNS)
+        .maybeSingle();
+      if (claimed) return claimed as JobTask;
+    }
+    // Every candidate was taken between select and update — fetch a fresh window.
   }
   return null;
 }
@@ -214,19 +219,29 @@ async function bumpAndMaybeFinalize(jobId: string): Promise<void> {
 
 /**
  * Drain queued tasks until there are none, the count/deadline is hit, or a job
- * deadline passes. Used by both the cron (short budget) and Trigger.dev (hours).
+ * deadline passes. Runs up to `concurrency` tasks at once (default JOB_CONCURRENCY
+ * or 5) — this is what lets a big audit finish in minutes instead of running one
+ * batch at a time. Used by the request kick, the Vercel cron, and Trigger.dev.
  * Returns how many tasks it ran.
  */
-export async function drainTasks(opts: { orgId?: string; maxTasks?: number; deadlineAt?: number } = {}): Promise<number> {
+export async function drainTasks(
+  opts: { orgId?: string; maxTasks?: number; deadlineAt?: number; concurrency?: number } = {}
+): Promise<number> {
   const maxTasks = opts.maxTasks ?? 100;
+  const concurrency = Math.max(1, opts.concurrency ?? (Number(process.env.JOB_CONCURRENCY) || 5));
   let ran = 0;
-  while (ran < maxTasks) {
-    if (opts.deadlineAt && Date.now() > opts.deadlineAt) break;
-    const task = await claimNextTask(opts.orgId);
-    if (!task) break;
-    await runClaimedTask(task);
-    ran++;
+  let done = false;
+  async function worker(): Promise<void> {
+    while (!done) {
+      if (ran >= maxTasks) { done = true; break; }
+      if (opts.deadlineAt && Date.now() > opts.deadlineAt) { done = true; break; }
+      const task = await claimNextTask(opts.orgId);
+      if (!task) { done = true; break; } // queue drained
+      ran++;
+      await runClaimedTask(task);
+    }
   }
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
   return ran;
 }
 

@@ -20,6 +20,14 @@ import type { Job, JobTask, JobHandler, JobStatus, PlannedTask } from "@/lib/job
 const BATCH_SIZE = 8;
 const MAX_TRANSCRIPT_CHARS = 14_000; // per call, keeps each task's context bounded
 
+// Model tier for the per-batch audit extraction. Defaults to "max" (Opus) to keep
+// current quality; set AUDIT_MODEL_TIER=recommended for the ~4-5x cheaper + faster
+// Sonnet, which is usually plenty for this structured, transcript-grounded pass.
+function auditModelTier(): "fast" | "recommended" | "max" {
+  const t = (process.env.AUDIT_MODEL_TIER ?? "").toLowerCase();
+  return t === "fast" || t === "recommended" || t === "max" ? t : "max";
+}
+
 function paramsToFilter(params: Record<string, unknown>): CallReviewFilter {
   return {
     isReview: true,
@@ -92,7 +100,7 @@ export const deepCallAuditHandler: JobHandler = {
         `=== CALL: ${m.consultant_name ?? "?"} -> ${m.prospect_name ?? "?"} | ${m.practice_type ?? "?"} | score ${m.overall_score ?? "?"}/100 | ${m.call_duration_minutes ?? "?"} min ===\n${t.text || "(transcript body not available)"}`
       );
     }
-    const model = await getModel("max");
+    const model = await getModel(auditModelTier());
     const { object } = await generateObject({
       model,
       schema: batchResult,
