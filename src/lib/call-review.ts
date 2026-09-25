@@ -18,9 +18,15 @@
 //
 // The parse helpers are PURE (no DB) and unit-tested; the DB fetch is edge-safe
 // (no matches / DB error → empty, never throws) and org-scoped on every query.
+//
+// Dates are the ASKING USER's calendar days: "today", "yesterday", "this week",
+// "Sep 24" resolve in the caller's IANA time zone (`timeZone`, lib/timezone;
+// default = the business zone, Asia/Karachi), and a day filter matches calls
+// whose created_at falls inside that zone's day (DST-exact UTC bounds).
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { RetrievedChunk } from "@/lib/retrieval";
+import { DEFAULT_TIME_ZONE, localDate, localDateTime, resolveTimeZone, zonedDayBoundsUTC } from "@/lib/timezone";
 
 // ---------------------------------------------------------------------------
 // The filter a review request resolves to
@@ -42,7 +48,10 @@ export interface CallReviewFilter {
 
 /** One row of the complete roster for a review (every matching call, cheap metadata). */
 export interface ScorecardRow {
+  /** The call's local date ("YYYY-MM-DD") in the review's zone; the stored call_date when created_at is unusable. */
   date: string;
+  /** The call's local clock time ("HH:mm") in the review's zone; null when created_at is unusable. */
+  time: string | null;
   consultant: string;
   prospect: string;
   practice: string;
@@ -104,27 +113,42 @@ function shiftISO(refISO: string, deltaDays: number): string {
   return `${t.getUTCFullYear()}-${pad2(t.getUTCMonth() + 1)}-${pad2(t.getUTCDate())}`;
 }
 
-// The scoring app shows each call's date in the OFFICE timezone (UTC+5,
-// Asia/Karachi), not UTC — a call created 2026-09-23T20:22Z shows as Sep 24.
-// Override with SCORING_TZ_OFFSET_MIN (e.g. 330 for +5:30) if the office differs.
-export const TZ_OFFSET_MIN = Number(process.env.SCORING_TZ_OFFSET_MIN) || 300;
-/** The business-local YYYY-MM-DD of an ISO timestamp (the date the scoring app shows), or null. */
-export function businessDay(ts: unknown): string | null {
+/** Today's date in `timeZone` — the fallback anchor when no valid referenceDate is given. */
+function todayISO(timeZone: string | undefined): string {
+  return localDate(Date.now(), timeZone ?? DEFAULT_TIME_ZONE);
+}
+
+// The scoring app shows each call's date in the OFFICE zone (Asia/Karachi) — a
+// call created 2026-09-23T20:22Z shows as Sep 24 there — but the person asking
+// may be elsewhere (the CEO asks from the USA). A call's day is read in the
+// asker's zone; with no zone it is the business zone (lib/timezone
+// DEFAULT_TIME_ZONE: SCORING_TIME_ZONE, legacy SCORING_TZ_OFFSET_MIN, Asia/Karachi).
+/** The local YYYY-MM-DD of an ISO timestamp in `timeZone` (default: the business zone), or null. */
+export function businessDay(ts: unknown, timeZone: string = DEFAULT_TIME_ZONE): string | null {
   const t = Date.parse(String(ts ?? ""));
   if (Number.isNaN(t)) return null;
-  const d = new Date(t + TZ_OFFSET_MIN * 60000);
-  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+  return localDate(t, timeZone);
 }
-/** UTC [start,end) instants bounding a business-local day — for filtering created_at. */
-function dayBoundsUTC(localDate: string): { start: string; end: string } {
-  const [y, m, dd] = localDate.split("-").map(Number);
-  const startMs = Date.UTC(y, m - 1, dd) - TZ_OFFSET_MIN * 60000;
-  return { start: new Date(startMs).toISOString(), end: new Date(startMs + 86400000).toISOString() };
+/** UTC [start,end) instants bounding a local day in `timeZone` (DST-exact) — for filtering created_at. */
+function dayBoundsUTC(localDateISO: string, timeZone: string): { start: string; end: string } {
+  const b = zonedDayBoundsUTC(localDateISO, timeZone);
+  return { start: b.startISO, end: b.endISO };
 }
-/** A scorecard row from a transcript summary chunk's metadata (date = created_at, app-matching). */
-function toScorecardRow(m: Record<string, unknown>): ScorecardRow {
+/**
+ * The local "YYYY-MM-DD HH:mm" of an ISO timestamp in `timeZone`, or null when it
+ * is absent / unparseable (a legacy created_at PII-mangled to "[PHONE]" — never
+ * throws, localDateTime would).
+ */
+function localStamp(ts: unknown, timeZone: string): string | null {
+  const t = Date.parse(String(ts ?? ""));
+  return Number.isNaN(t) ? null : localDateTime(t, timeZone);
+}
+/** A scorecard row from a transcript summary chunk's metadata (date + time = created_at in `timeZone`). */
+function toScorecardRow(m: Record<string, unknown>, timeZone: string): ScorecardRow {
+  const local = localStamp(m.created_at, timeZone);
   return {
-    date: businessDay(m.created_at) ?? (typeof m.call_date === "string" ? m.call_date : ""),
+    date: local ? local.slice(0, 10) : (typeof m.call_date === "string" ? m.call_date : ""),
+    time: local ? local.slice(11) : null,
     consultant: typeof m.consultant_name === "string" ? m.consultant_name : "Unknown",
     prospect: typeof m.prospect_name === "string" ? m.prospect_name : "",
     practice: typeof m.practice_type === "string" ? m.practice_type : (typeof m.category === "string" ? m.category : ""),
@@ -140,10 +164,11 @@ function toScorecardRow(m: Record<string, unknown>): ScorecardRow {
  * Formats: ISO (2026-09-22), "September 22"/"Sept 22"/"22 September"/"22 Sept"
  * (± year, ± ordinal), numeric "9/22" (± year), and relative "today"/"yesterday".
  * An omitted year is taken from `referenceDate`'s year; "today"/"yesterday" are
- * anchored to `referenceDate` (the data's newest call_date, NOT the wall clock).
+ * anchored to `referenceDate` (the caller passes the user's today in their zone).
+ * Without a valid `referenceDate`, today in `timeZone` (default: business zone).
  */
-export function resolveDate(query: string, referenceDate: string): string | undefined {
-  const ref = isISODate(referenceDate) ? referenceDate : new Date().toISOString().slice(0, 10);
+export function resolveDate(query: string, referenceDate: string, timeZone?: string): string | undefined {
+  const ref = isISODate(referenceDate) ? referenceDate : todayISO(timeZone);
   const refYear = Number(ref.slice(0, 4));
   const q = query;
 
@@ -185,14 +210,16 @@ export function resolveDate(query: string, referenceDate: string): string | unde
 
 /**
  * A relative date RANGE the request names ("last 3 days", "past week", "this
- * week"), inclusive, anchored to `referenceDate` (the caller passes the real
- * current date). Returns { from, to } ISO or undefined.
+ * week"), inclusive, anchored to `referenceDate` (the caller passes the user's
+ * current date in their zone; without one, today in `timeZone`). Returns
+ * { from, to } ISO or undefined.
  */
 export function resolveDateRange(
   query: string,
-  referenceDate: string
+  referenceDate: string,
+  timeZone?: string
 ): { from: string; to: string } | undefined {
-  const ref = isISODate(referenceDate) ? referenceDate : new Date().toISOString().slice(0, 10);
+  const ref = isISODate(referenceDate) ? referenceDate : todayISO(timeZone);
   const q = (query ?? "").toLowerCase();
   const ry = Number(ref.slice(0, 4));
   const rm = Number(ref.slice(5, 7));
@@ -314,13 +341,17 @@ export function detectConsultants(query: string): string[] {
 
 /**
  * Parse a request into a structured call-review filter. PURE + unit-tested.
- * `opts.referenceDate` (ISO) anchors "today"/"yesterday" and an omitted year to
- * the data's newest call_date; it defaults to the wall-clock date so the helper
- * is usable/testable on its own. `isReview` is true only when the request reads
+ * `opts.referenceDate` (ISO) anchors "today"/"yesterday" and an omitted year —
+ * the caller passes the user's today in their zone; it defaults to today in
+ * `opts.timeZone` (default: the business zone) so the helper is usable/testable
+ * on its own. `isReview` is true only when the request reads
  * as a review/analysis/list of calls AND at least one of date/consultant/practice
  * is present; otherwise `{ isReview: false }` (fall back to semantic retrieval).
  */
-export function parseCallReviewFilter(query: string, opts?: { referenceDate?: string; knownConsultants?: string[] }): CallReviewFilter {
+export function parseCallReviewFilter(
+  query: string,
+  opts?: { referenceDate?: string; knownConsultants?: string[]; timeZone?: string }
+): CallReviewFilter {
   // Normalize dashed / slashed word-dates ("24-sep-2026", "sep-24-2026") so the
   // month-name parsers below see spaces; digit-digit dates (9/22, 2026-09-24) are
   // left intact.
@@ -329,7 +360,7 @@ export function parseCallReviewFilter(query: string, opts?: { referenceDate?: st
     .replace(/(\d)[-/](?=[a-z])/gi, "$1 ")
     .replace(/([a-z])[-/](?=\d)/gi, "$1 ");
   if (!q) return { isReview: false };
-  const ref = isISODate(opts?.referenceDate) ? (opts!.referenceDate as string) : new Date().toISOString().slice(0, 10);
+  const ref = isISODate(opts?.referenceDate) ? (opts!.referenceDate as string) : todayISO(opts?.timeZone);
 
   const range = resolveDateRange(q, ref);
   const date = range ? undefined : resolveDate(q, ref);
@@ -384,8 +415,9 @@ export interface ReviewHistoryTurn {
   content: string;
   /**
    * When the turn was sent (ISO timestamp), if the caller supplied it. Relative
-   * dates in that turn ("yesterday", "last week") are resolved against ITS
-   * business day, not today's, so a chat continued the next day keeps the same calls.
+   * dates in that turn ("yesterday", "last week") are resolved against the day
+   * it was sent in the user's time zone, not today's, so a chat continued the
+   * next day keeps the same calls.
    */
   createdAt?: string;
 }
@@ -513,7 +545,7 @@ function mergeFilters(own: CallReviewFilter, prior: CallReviewFilter, query: str
   return out;
 }
 
-type ParseOpts = { referenceDate: string; knownConsultants: string[] };
+type ParseOpts = { referenceDate: string; knownConsultants: string[]; timeZone?: string };
 
 /** Resolve one turn against the conversation's active filter (null = none yet). */
 function resolveTurn(query: string, active: CallReviewFilter | null, prevWasReview: boolean, opts: ParseOpts): CallReviewFilter {
@@ -608,18 +640,25 @@ function filterFromSummary(text: string, opts: ParseOpts): CallReviewFilter | nu
  * review-thread signal uses this instead of keyword-testing the summary, whose
  * "[Conversation summary]" marker alone reads as review intent.
  */
-export function summaryCarriesCallFilter(text: string, opts: { referenceDate: string; knownConsultants?: string[] }): boolean {
-  return !!filterFromSummary(text, { referenceDate: opts.referenceDate, knownConsultants: opts.knownConsultants ?? [] });
+export function summaryCarriesCallFilter(
+  text: string,
+  opts: { referenceDate: string; knownConsultants?: string[]; timeZone?: string }
+): boolean {
+  return !!filterFromSummary(text, { referenceDate: opts.referenceDate, knownConsultants: opts.knownConsultants ?? [], timeZone: opts.timeZone });
 }
 
-/** The business day a history turn was sent (its ISO `createdAt`), never later than `today`; else `today`. */
-function turnReferenceDate(createdAt: unknown, today: string): string {
+/**
+ * The day a history turn was sent (its ISO `createdAt`, read in the user's
+ * `timeZone`), never later than `today`; else `today`. A bare "YYYY-MM-DD" is
+ * already a local date and is kept as is.
+ */
+function turnReferenceDate(createdAt: unknown, today: string, timeZone?: string): string {
   if (typeof createdAt !== "string") return today;
   const ts = createdAt.trim();
   // ISO only ("2026-09-24", "2026-09-24T10:00:00Z", "… +00:00"): Date.parse is
   // lenient enough to read "1" as a year, which must not move the anchor.
   if (!/^\d{4}-\d{2}-\d{2}(?:$|[T ]\d{2}:\d{2})/.test(ts)) return today;
-  const day = isISODate(ts) ? (Number.isNaN(Date.parse(ts)) ? null : ts) : businessDay(ts);
+  const day = isISODate(ts) ? (Number.isNaN(Date.parse(ts)) ? null : ts) : businessDay(ts, timeZone ?? DEFAULT_TIME_ZONE);
   return day && day <= today ? day : today;
 }
 
@@ -648,17 +687,19 @@ function turnReferenceDate(createdAt: unknown, today: string): string {
  *     back. Content-creation asks ("write me a LinkedIn post") and thanks are
  *     never follow-ups, and a content-creation turn expires the active filter.
  *
- * A history turn's relative dates resolve against the business day in its
- * `createdAt` (when supplied and not in the future), else `referenceDate`. The
- * chat API's history ends with the current message; that trailing copy is
- * ignored. Returns the standalone parse when nothing is inherited.
+ * `opts.referenceDate` is the user's today in `opts.timeZone` (the asking
+ * user's IANA zone; default: the business zone). A history turn's relative dates
+ * resolve against the day of its `createdAt` in that zone (when supplied and not
+ * in the future), else `referenceDate`. The chat API's history ends with the
+ * current message; that trailing copy is ignored. Returns the standalone parse
+ * when nothing is inherited.
  */
 export function resolveReviewFilterWithHistory(
   query: string,
   history: ReviewHistoryTurn[],
-  opts: { referenceDate: string; knownConsultants: string[] }
+  opts: { referenceDate: string; knownConsultants: string[]; timeZone?: string }
 ): CallReviewFilter {
-  const parseOpts: ParseOpts = { referenceDate: opts.referenceDate, knownConsultants: opts.knownConsultants ?? [] };
+  const parseOpts: ParseOpts = { referenceDate: opts.referenceDate, knownConsultants: opts.knownConsultants ?? [], timeZone: opts.timeZone };
   const q = (query ?? "").trim();
   const turns = (Array.isArray(history) ? history : []).filter(
     (t): t is ReviewHistoryTurn => !!t && typeof t.role === "string" && typeof t.content === "string"
@@ -673,7 +714,7 @@ export function resolveReviewFilterWithHistory(
     // Relative dates in an earlier turn mean the day THAT turn was sent ("list
     // yesterday's calls" asked on the 24th is the 23rd, even when the chat is
     // continued on the 25th). `active` then holds absolute ISO dates.
-    const turnOpts: ParseOpts = { ...parseOpts, referenceDate: turnReferenceDate(t.createdAt, parseOpts.referenceDate) };
+    const turnOpts: ParseOpts = { ...parseOpts, referenceDate: turnReferenceDate(t.createdAt, parseOpts.referenceDate, parseOpts.timeZone) };
     if (t.role === "user") {
       const text = t.content.slice(0, MAX_PARSE_CHARS);
       const r = resolveTurn(text, active, prevWasReview, turnOpts);
@@ -779,21 +820,24 @@ const MAX_MATCH_ROWS = 5000;
  * "yesterday" and an omitted year to the data, not the wall clock. Best-effort.
  */
 /** Every matching call's document_id + a complete scorecard, no transcript fetch
- *  (used to PLAN a background audit job). Filters by created_at business day. */
+ *  (used to PLAN a background audit job). Filters by created_at's day in
+ *  `opts.timeZone` (the requester's zone; default: the business zone). */
 export async function matchingCallDocs(
   db: SupabaseClient,
   orgId: string,
-  filter: CallReviewFilter
+  filter: CallReviewFilter,
+  opts?: { timeZone?: string }
 ): Promise<{ docIds: string[]; scorecard: ScorecardRow[] }> {
+  const timeZone = resolveTimeZone(opts?.timeZone);
   const apply = <T extends { eq: Function; ilike: Function; or: Function; gte: Function; lt: Function }>(q: T): T => {
     let out = q.eq("org_id", orgId).eq("source_type", "transcript");
     if (filter.date) {
-      const b = dayBoundsUTC(filter.date);
+      const b = dayBoundsUTC(filter.date, timeZone);
       out = out.gte("metadata->>created_at", b.start).lt("metadata->>created_at", b.end);
     } else if (filter.dateFrom && filter.dateTo) {
       out = out
-        .gte("metadata->>created_at", dayBoundsUTC(filter.dateFrom).start)
-        .lt("metadata->>created_at", dayBoundsUTC(filter.dateTo).end);
+        .gte("metadata->>created_at", dayBoundsUTC(filter.dateFrom, timeZone).start)
+        .lt("metadata->>created_at", dayBoundsUTC(filter.dateTo, timeZone).end);
     }
     if (filter.practiceType) out = out.ilike("metadata->>practice_type", filter.practiceType);
     const cands = (filter.consultants ?? []).map(sanitizeConsultant).filter(Boolean);
@@ -810,7 +854,7 @@ export async function matchingCallDocs(
     for (const r of (data ?? []) as { document_id: string; metadata: Record<string, unknown> }[]) {
       if (!r.document_id) continue;
       if (!docIds.includes(r.document_id)) docIds.push(r.document_id);
-      if (!cardByDoc.has(r.document_id)) cardByDoc.set(r.document_id, toScorecardRow(r.metadata ?? {}));
+      if (!cardByDoc.has(r.document_id)) cardByDoc.set(r.document_id, toScorecardRow(r.metadata ?? {}, timeZone));
     }
     return { docIds, scorecard: [...cardByDoc.values()] };
   } catch {
@@ -864,26 +908,31 @@ export async function newestCallDate(db: SupabaseClient, orgId: string): Promise
  * match and pick the first `maxCalls`; (2) the full chunks of only those calls,
  * in reading order. Grouping/budget is delegated to `assembleCallSet`. Chunks
  * are shaped like `RetrievedChunk` (parent_id null, source_type "transcript").
+ * Day filters, scorecard dates/times and the "Call date/time (<zone>)" line that
+ * leads each call's first chunk use `opts.timeZone` (the asking user's IANA zone;
+ * default: the business zone).
  * No matches → a "No calls found" note; a DB error → empty + log (never throws).
  */
 export async function fetchCallsByFilter(
   db: SupabaseClient,
   orgId: string,
   filter: CallReviewFilter,
-  opts: { maxCalls: number; maxTokens: number }
+  opts: { maxCalls: number; maxTokens: number; timeZone?: string }
 ): Promise<{ chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number }> {
+  const timeZone = resolveTimeZone(opts.timeZone);
   const applyFilters = <T extends { eq: Function; ilike: Function; or: Function; gte: Function; lte: Function; lt: Function }>(q: T): T => {
     let out = q.eq("org_id", orgId).eq("source_type", "transcript");
-    // Filter by the UTC day of created_at (always clean, and what the scoring app
-    // shows) via a half-open range on the ISO timestamp — accurate regardless of
-    // the stored call_date. ISO timestamps compare lexicographically by day.
+    // Filter by created_at's day in the user's zone (always clean — the stored
+    // call_date is not) via a half-open range on the ISO timestamp, whose bounds
+    // come from that zone's real offsets (a DST day is 23 or 25 hours). ISO UTC
+    // timestamps compare lexicographically.
     if (filter.date) {
-      const b = dayBoundsUTC(filter.date);
+      const b = dayBoundsUTC(filter.date, timeZone);
       out = out.gte("metadata->>created_at", b.start).lt("metadata->>created_at", b.end);
     } else if (filter.dateFrom && filter.dateTo) {
       out = out
-        .gte("metadata->>created_at", dayBoundsUTC(filter.dateFrom).start)
-        .lt("metadata->>created_at", dayBoundsUTC(filter.dateTo).end);
+        .gte("metadata->>created_at", dayBoundsUTC(filter.dateFrom, timeZone).start)
+        .lt("metadata->>created_at", dayBoundsUTC(filter.dateTo, timeZone).end);
     }
     if (filter.practiceType) out = out.ilike("metadata->>practice_type", filter.practiceType);
     const cands = (filter.consultants ?? []).map(sanitizeConsultant).filter(Boolean);
@@ -909,7 +958,7 @@ export async function fetchCallsByFilter(
     for (const r of (idRows ?? []) as { document_id: string; metadata: Record<string, unknown>; created_at?: string }[]) {
       if (!r.document_id) continue;
       if (!orderedDocs.includes(r.document_id)) orderedDocs.push(r.document_id);
-      if (!cardByDoc.has(r.document_id)) cardByDoc.set(r.document_id, toScorecardRow(r.metadata ?? {}));
+      if (!cardByDoc.has(r.document_id)) cardByDoc.set(r.document_id, toScorecardRow(r.metadata ?? {}, timeZone));
     }
     const scorecard = [...cardByDoc.values()].sort(
       (a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.consultant.localeCompare(b.consultant))
@@ -938,10 +987,16 @@ export async function fetchCallsByFilter(
 
     const rowsByDoc = new Map<string, RetrievedChunk[]>();
     for (const r of rows as (RetrievedChunk & { created_at?: string })[]) {
+      const md = (r.metadata as Record<string, unknown>) ?? {};
+      // Lead each call's first chunk (its summary) with the call's date + time in
+      // the user's zone: the stored "Call date:" line is the source's UTC /
+      // reported value and can be a day off from the scorecard (a 01:10Z call is
+      // the previous evening in New York). Existing chunk text is never rewritten.
+      const local = rowsByDoc.has(r.document_id) ? null : localStamp(md.created_at, timeZone);
       const shaped: RetrievedChunk = {
         id: r.id,
-        content: r.content,
-        metadata: (r.metadata as Record<string, unknown>) ?? {},
+        content: local ? `Call date/time (${timeZone}): ${local}\n${r.content}` : r.content,
+        metadata: md,
         document_id: r.document_id,
         parent_id: null,
         source_type: "transcript",

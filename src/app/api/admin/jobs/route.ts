@@ -8,6 +8,11 @@
 //                               follow-up ("audit them") inherit the earlier
 //                               turns' filter.
 //   POST { type, title, params } — create a typed job directly.
+//   Either POST may carry `timeZone` (the requester's IANA zone): "today" /
+//   "Sep 24" are THEIR calendar day and the zone is stored in the job params
+//   (params.timeZone), so the worker keeps it. Absent / invalid → the business
+//   zone; a valid explicit params.timeZone on a typed job is kept (normalised),
+//   an invalid one is replaced by the request zone.
 //   GET                        — list this org's recent jobs.
 
 import { z } from "zod";
@@ -20,8 +25,8 @@ import {
   resolveReviewFilterWithHistory,
   describeFilter,
   knownConsultants,
-  businessDay,
 } from "@/lib/call-review";
+import { resolveTimeZone, todayIn } from "@/lib/timezone";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
@@ -68,11 +73,14 @@ export async function POST(req: Request) {
     type?: string;
     title?: string;
     params?: Record<string, unknown>;
+    timeZone?: unknown;
   };
 
   let type = body.type;
   let title = body.title;
   let params = body.params ?? {};
+  // The requester's zone (invalid / absent → the business zone).
+  const timeZone = resolveTimeZone(body.timeZone);
 
   // Natural-language path: "deep audit of all this month's James calls" -> a
   // deep_call_audit job whose params are the resolved call filter. A follow-up
@@ -92,8 +100,8 @@ export async function POST(req: Request) {
       history = parsed.data;
     }
     const known = await knownConsultants(supabaseAdmin(), admin.orgId);
-    const today = businessDay(new Date().toISOString()) ?? new Date().toISOString().slice(0, 10);
-    const filter = resolveReviewFilterWithHistory(String(body.query), history, { referenceDate: today, knownConsultants: known });
+    const today = todayIn(timeZone);
+    const filter = resolveReviewFilterWithHistory(String(body.query), history, { referenceDate: today, knownConsultants: known, timeZone });
     if (!filter.isReview || (!filter.date && !filter.dateFrom && !filter.consultants?.length && !filter.practiceType)) {
       return Response.json(
         { error: "Not an audit request — name a date, date range, consultant, or practice type (e.g. 'deep audit of this month's calls')." },
@@ -108,7 +116,14 @@ export async function POST(req: Request) {
       dateTo: filter.dateTo,
       consultants: filter.consultants,
       practiceType: filter.practiceType,
+      // The worker resolves day bounds and labels in the requester's zone.
+      timeZone,
     };
+  } else if (body.timeZone !== undefined && params && typeof params === "object" && !Array.isArray(params)) {
+    // A typed job created with a request-level zone: a valid explicit
+    // params.timeZone wins (trimmed + normalised); a missing / invalid one takes
+    // the requester's zone.
+    params = { ...params, timeZone: resolveTimeZone(params.timeZone, timeZone) };
   }
 
   if (!type || !JOB_HANDLERS[type]) {

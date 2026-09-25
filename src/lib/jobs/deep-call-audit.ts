@@ -7,7 +7,10 @@
 //   finalize -> aggregate every task's findings into a deterministic report
 //
 // Params (job.params) mirror a CallReviewFilter: { date?, dateFrom?, dateTo?,
-// consultants?, practiceType? }. Accurate at scale (bounded per-task context, no
+// consultants?, practiceType? } plus the requester's IANA `timeZone` (stored at
+// creation): the dates are that user's calendar days, so day bounds and the
+// scorecard dates use it however long the audit runs. A job without one (older
+// rows) uses the business zone. Accurate at scale (bounded per-task context, no
 // hallucination — the report is computed from stored structured results).
 
 import { z } from "zod";
@@ -15,6 +18,7 @@ import { generateObject } from "ai";
 import { supabaseAdmin } from "@/lib/supabase";
 import { getModel } from "@/lib/llm";
 import { matchingCallDocs, type CallReviewFilter, type ScorecardRow } from "@/lib/call-review";
+import { resolveTimeZone } from "@/lib/timezone";
 import type { Job, JobTask, JobHandler, JobStatus, PlannedTask } from "@/lib/jobs/engine";
 
 const BATCH_SIZE = 8;
@@ -37,6 +41,11 @@ function paramsToFilter(params: Record<string, unknown>): CallReviewFilter {
     consultants: Array.isArray(params.consultants) ? (params.consultants as string[]) : undefined,
     practiceType: typeof params.practiceType === "string" ? params.practiceType : undefined,
   };
+}
+
+/** The requester's zone stored on the job (validated; missing / invalid → the business zone). */
+export function paramsTimeZone(params: Record<string, unknown> | null | undefined): string {
+  return resolveTimeZone(params?.timeZone);
 }
 
 /** Load full transcript text for a set of call document_ids, in reading order. */
@@ -73,7 +82,9 @@ const batchResult = z.object({ calls: z.array(callFinding) });
 export const deepCallAuditHandler: JobHandler = {
   async plan(job: Job): Promise<PlannedTask[]> {
     const db = supabaseAdmin();
-    const { docIds, scorecard } = await matchingCallDocs(db, job.org_id, paramsToFilter(job.params));
+    const { docIds, scorecard } = await matchingCallDocs(db, job.org_id, paramsToFilter(job.params), {
+      timeZone: paramsTimeZone(job.params),
+    });
     const cardByDoc = new Map<string, ScorecardRow>();
     docIds.forEach((id, i) => cardByDoc.set(id, scorecard[i]));
     const tasks: PlannedTask[] = [];
@@ -139,6 +150,8 @@ export const deepCallAuditHandler: JobHandler = {
     const failed = tasks.filter((t) => t.status === "failed").length;
     const result = {
       generatedAt: new Date().toISOString(),
+      // The zone the audit's dates are in (the requester's), for "Dates in …" labels.
+      timeZone: paramsTimeZone(job.params),
       totalCalls: calls.length,
       consultants,
       calls, // full per-call findings

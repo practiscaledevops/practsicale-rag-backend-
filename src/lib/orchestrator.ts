@@ -24,7 +24,8 @@ import { z } from "zod";
 import { supabaseAdmin } from "@/lib/supabase";
 import { embed } from "@/lib/embeddings";
 import { hybridSearchLane, expandParents, expandTranscripts, LANE_RPC_MISSING, type LaneChunk, type RetrievedChunk } from "@/lib/retrieval";
-import { resolveReviewFilterWithHistory, isReviewFollowUp, isConversationSummary, summaryCarriesCallFilter, fetchCallsByFilter, describeFilter, businessDay, knownConsultants, looksLikeReview, TZ_OFFSET_MIN, type CallReviewFilter, type ScorecardRow } from "@/lib/call-review";
+import { resolveReviewFilterWithHistory, isReviewFollowUp, isConversationSummary, summaryCarriesCallFilter, fetchCallsByFilter, describeFilter, knownConsultants, looksLikeReview, type CallReviewFilter, type ScorecardRow } from "@/lib/call-review";
+import { currentDateLine, resolveTimeZone, todayIn } from "@/lib/timezone";
 import { rerank } from "@/lib/rerank";
 import { rewriteQueries, type ChatTurn } from "@/lib/query-transform";
 import { getActivePrompts } from "@/lib/prompts-db";
@@ -338,8 +339,9 @@ export interface OrchestrationOutput extends RetrievalOutput {
    * Set when the structured "call review" path ran: EVERY call matching a named
    * date / consultant / practice type was pulled in full (not a semantic sample),
    * so the answer can say "Reviewing all N calls from …". Undefined otherwise.
+   * `timeZone` is the IANA zone the filter's dates (and the scorecard) are in.
    */
-  callReview?: { count: number; note: string | null; filter: CallReviewFilter };
+  callReview?: { count: number; note: string | null; filter: CallReviewFilter; timeZone: string };
 }
 
 export interface OrchestrateOptions {
@@ -372,7 +374,34 @@ export interface OrchestrateOptions {
    * "knowledge.performance" the Performance Memory block. Never widens the scope.
    */
   capabilities?: readonly string[] | null;
+  /**
+   * The asking user's IANA time zone ("America/New_York"). "today", "yesterday",
+   * "this week", "Sep 24" and the CURRENT DATE note are that user's calendar;
+   * call-review day filters and scorecard dates use it too. Absent / invalid =
+   * the business zone (lib/timezone DEFAULT_TIME_ZONE).
+   */
+  timeZone?: string | null;
+  /**
+   * true when `timeZone` is the caller's own zone (sent and valid); false /
+   * absent when it was defaulted to the business zone — the CURRENT DATE note
+   * then never calls it the user's local time.
+   */
+  timeZoneFromUser?: boolean;
   onStatus?: (s: RetrievalStatus & { mode?: string; lanes?: string[] }) => void;
+}
+
+/**
+ * The CURRENT DATE note that leads the context:
+ * `CURRENT DATE: 2026-09-24 (Thursday), America/New_York, UTC−04:00. This is
+ * the user's time zone: resolve "today", … against this exact date, …`.
+ * With `fromUser` false (the zone was defaulted, not sent by the caller) it says
+ * the dates are in the business zone and never calls them the user's local time.
+ */
+export function buildDateNote(timeZone: string, now: number = Date.now(), fromUser: boolean = true): string {
+  if (!fromUser) {
+    return `${currentDateLine(timeZone, now)}. The user's own time zone was not provided; these dates are in the business time zone ${timeZone}. Resolve "today", "yesterday", "this week", "this month" against this date, label dates and times as ${timeZone}, and never call them the user's local time.`;
+  }
+  return `${currentDateLine(timeZone, now)}. This is the user's time zone: resolve "today", "yesterday", "this week", "this month" against this exact date, and give dates and times in this zone.`;
 }
 
 function objectMeta(o: KnowledgeObjectRow): ObjectMeta {
@@ -471,11 +500,15 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   //     And only when the spoke's user may run call reviews ("chat.call_review");
   //     without it a review-shaped ask takes the semantic path like any other.
   const transcriptsInScope = callReviewInScope(scope);
-  // Current date/time so the model can resolve "today"/"yesterday"/"this month"
-  // and never guess. UTC to match how calls are dated in the data.
-  const todayISO = businessDay(new Date().toISOString()) ?? new Date().toISOString().slice(0, 10);
-  const weekday = new Date(Date.now() + TZ_OFFSET_MIN * 60000).toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
-  const dateNote = `CURRENT DATE: ${todayISO} (${weekday}), UTC. Resolve "today", "yesterday", "this week", "this month" against this exact date.`;
+  // Current date so the model can resolve "today"/"yesterday"/"this month" and
+  // never guess — in the ASKING USER's zone (the CEO asks from the USA while the
+  // office is in Karachi), so their "today" is their calendar day. One instant
+  // anchors both the note and the call-review filter.
+  const timeZone = resolveTimeZone(opts.timeZone);
+  const now = Date.now();
+  const todayISO = todayIn(timeZone, now);
+  // Only a zone the caller actually sent is "the user's" (absent flag = defaulted).
+  const dateNote = buildDateNote(timeZone, now, opts.timeZoneFromUser ?? false);
 
   // The filter is resolved against the CONVERSATION, not only this message:
   // "audit them" / "analyse all calls do audit" / "and David's?" after "list
@@ -486,7 +519,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   // on this message, and a short turn inside a thread that already reviewed calls
   // (a lowercase first name, "and david?", only resolves against the roster).
   // The full resolve inside decides; a false gate costs one roster read.
-  const reviewProbe = resolveReviewFilterWithHistory(query, history, { referenceDate: todayISO, knownConsultants: [] });
+  const reviewProbe = resolveReviewFilterWithHistory(query, history, { referenceDate: todayISO, knownConsultants: [], timeZone });
   // A summary turn counts only when it carries a call filter: its "[Conversation
   // summary]" marker alone reads as review intent to looksLikeReview.
   const reviewThread =
@@ -497,7 +530,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
         (t.role === "user"
           ? looksLikeReview(t.content.slice(0, 4000))
           : isConversationSummary(t)
-            ? summaryCarriesCallFilter(t.content, { referenceDate: todayISO, knownConsultants: [] })
+            ? summaryCarriesCallFilter(t.content, { referenceDate: todayISO, knownConsultants: [], timeZone })
             : false)
     );
   const reviewGate = reviewProbe.isReview || looksLikeReview(query) || isReviewFollowUp(query) || reviewThread;
@@ -508,18 +541,18 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   const reviewPromise: Promise<{ filter: CallReviewFilter; chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number } | null> =
     reviewAllowed && transcriptsInScope
       ? (async () => {
-          // Anchor "yesterday" / "last 3 days" / an omitted year to the real
-          // calendar so consultant audits are date-accurate. The 20-minute sync
-          // keeps the call data current, and dates are stored to match the
-          // scoring app (created_at, in UTC). Inheriting the conversation's
-          // filter (e.g. "audit james calls" right after "today's calls") makes
-          // the deep audit read that day's calls in FULL rather than a diluted
-          // history-wide sample.
+          // Anchor "yesterday" / "last 3 days" / an omitted year to the user's
+          // real calendar (their zone) so consultant audits are date-accurate.
+          // The 20-minute sync keeps the call data current; a day matches the
+          // calls whose created_at falls inside it in the user's zone. Inheriting
+          // the conversation's filter (e.g. "audit james calls" right after
+          // "today's calls") makes the deep audit read that day's calls in FULL
+          // rather than a diluted history-wide sample.
           const known = await knownConsultants(db, orgId);
-          const filter = resolveReviewFilterWithHistory(query, history, { referenceDate: todayISO, knownConsultants: known });
+          const filter = resolveReviewFilterWithHistory(query, history, { referenceDate: todayISO, knownConsultants: known, timeZone });
           if (!filter.isReview) return null;
           emit({ stage: "searching", label: `Pulling every call from ${describeFilter(filter)}` });
-          const res = await fetchCallsByFilter(db, orgId, filter, { maxCalls: 25, maxTokens: 140_000 });
+          const res = await fetchCallsByFilter(db, orgId, filter, { maxCalls: 25, maxTokens: 140_000, timeZone });
           return { filter, ...res };
         })().catch((e) => {
           console.error("[orchestrator] call-review path failed:", e instanceof Error ? e.message : e);
@@ -575,7 +608,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     if (e instanceof Error && e.message === LANE_RPC_MISSING) {
       // Pre-migration: classic pipeline, same output shape.
       const legacy = await runRetrieval({ orgId, query, history, scope, settings, onStatus: opts.onStatus });
-      return wrapLegacy(legacy, intent, mode, auto);
+      return wrapLegacy(legacy, intent, mode, auto, dateNote);
     }
     throw e;
   }
@@ -784,13 +817,13 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   // (all N calls, not a sample) so the answer reviews every one, and surface the
   // count/note/filter on the output. The note leads the context, before the
   // Business Reality lane where the transcripts sit.
-  const callReview = review ? { count: review.callCount, note: review.note, filter: review.filter } : undefined;
+  const callReview = review ? { count: review.callCount, note: review.note, filter: review.filter, timeZone } : undefined;
   const structuredNote =
     review && review.scorecard.length
       ? [
           `STRUCTURED CALL SET — ${review.totalMatched} call${review.totalMatched === 1 ? "" : "s"} match ${describeFilter(review.filter)}. This roster is COMPLETE and authoritative (NOT a sample): report these exact counts and per-call scores. Full transcripts for ${review.callCount} of them are included below for deep review${review.totalMatched > review.callCount ? "; for any not deep-read, use the scorecard row and offer to pull that consultant's transcripts" : ""}.`,
-          `SCORECARD — every matching call (date | consultant → prospect | practice | score | band | outcome | duration):`,
-          ...review.scorecard.map((r, i) => `${i + 1}. ${r.date || "?"} | ${r.consultant} → ${r.prospect || "?"} | ${r.practice || "-"} | ${r.score ?? "?"}/100 | ${r.band || "-"} | ${r.outcome || "-"} | ${r.duration ?? "?"} min`),
+          `SCORECARD — every matching call (date time | consultant → prospect | practice | score | band | outcome | duration). Dates and times are ${timeZone} local and AUTHORITATIVE. A "Call date:" line or the date in a transcript [locator] is the source's UTC/reported value and can be a day off; always report the scorecard's date and time:`,
+          ...review.scorecard.map((r, i) => `${i + 1}. ${r.date || "?"}${r.time ? ` ${r.time}` : ""} | ${r.consultant} → ${r.prospect || "?"} | ${r.practice || "-"} | ${r.score ?? "?"}/100 | ${r.band || "-"} | ${r.outcome || "-"} | ${r.duration ?? "?"} min`),
         ].join("\n")
       : "";
   return {
@@ -930,7 +963,8 @@ function confidenceFrom(chunks: RetrievedChunk[]): number | null {
   return Math.max(0, Math.min(1, top.reduce((a, b) => a + b, 0) / top.length));
 }
 
-function wrapLegacy(legacy: RetrievalOutput, intent: Intent, mode: WorkMode, auto: boolean): OrchestrationOutput {
+/** The classic pipeline's output in the orchestrator's shape; `dateNote` still leads the context. */
+function wrapLegacy(legacy: RetrievalOutput, intent: Intent, mode: WorkMode, auto: boolean, dateNote: string): OrchestrationOutput {
   const annotated: OrchestratedChunk[] = legacy.chunks.map((c, i) => ({
     ...c,
     object_id: null,
@@ -950,7 +984,7 @@ function wrapLegacy(legacy: RetrievalOutput, intent: Intent, mode: WorkMode, aut
     mode,
     auto,
     lanes: [{ lane: "reality", label: LANE_LABEL.reality, weight: 1, candidates: legacy.chunks.length, selected: legacy.chunks.length }],
-    contextBlock: buildLaneContext(annotated),
+    contextBlock: [dateNote, buildLaneContext(annotated)].filter(Boolean).join("\n\n\n"),
     performanceBlock: "",
     performanceMetrics: [],
     conflicts: [],

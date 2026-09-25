@@ -3,12 +3,15 @@
 // screen). Org comes from the key; the key must be allowed to chat AND to see
 // transcripts (a deep audit reads them), else 403.
 //
-// Body: { query: string, history?: [{ role: "user"|"assistant"|"system", content, createdAt? }] }
+// Body: { query: string, history?: [{ role: "user"|"assistant"|"system", content, createdAt? }], timeZone?: string }
 //   `history` (≤12 turns, ≤4000 chars each) lets a follow-up such as "analyse all
 //   calls do audit" after "list yesterday consultants calls" resolve to
 //   yesterday's calls (a leading "[Conversation summary] …" system turn is the
 //   last-resort source). A turn's optional `createdAt` (ISO) anchors its relative
 //   dates to the day it was sent. 400 when no usable filter results.
+//   `timeZone` (the requester's IANA zone) resolves "today" / "Sep 24" to THEIR
+//   calendar day and is stored in the job params, so the worker keeps the
+//   requester's day for the whole audit. Absent / invalid → the business zone.
 
 import { z } from "zod";
 import { resolveContext, AuthError } from "@/lib/auth/context";
@@ -19,8 +22,8 @@ import {
   resolveReviewFilterWithHistory,
   describeFilter,
   knownConsultants,
-  businessDay,
 } from "@/lib/call-review";
+import { resolveTimeZone, todayIn } from "@/lib/timezone";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
@@ -40,6 +43,8 @@ const JobBodySchema = z.object({
     )
     .max(12)
     .optional(),
+  // The requester's IANA time zone; an invalid value is ignored (business zone).
+  timeZone: z.unknown().optional(),
 });
 
 function canSeeTranscripts(sourceTypes: string[] | null | undefined): boolean {
@@ -76,8 +81,9 @@ export async function POST(req: Request) {
   const body = parsed.data;
 
   const known = await knownConsultants(supabaseAdmin(), ctx.orgId);
-  const today = businessDay(new Date().toISOString()) ?? new Date().toISOString().slice(0, 10);
-  const filter = resolveReviewFilterWithHistory(body.query, body.history ?? [], { referenceDate: today, knownConsultants: known });
+  const timeZone = resolveTimeZone(body.timeZone);
+  const today = todayIn(timeZone);
+  const filter = resolveReviewFilterWithHistory(body.query, body.history ?? [], { referenceDate: today, knownConsultants: known, timeZone });
   if (!filter.isReview || (!filter.date && !filter.dateFrom && !filter.consultants?.length && !filter.practiceType)) {
     return Response.json(
       { error: "Not an audit request — name a date, range, consultant, or practice type." },
@@ -96,6 +102,8 @@ export async function POST(req: Request) {
         dateTo: filter.dateTo,
         consultants: filter.consultants,
         practiceType: filter.practiceType,
+        // The worker resolves day bounds and labels in the requester's zone.
+        timeZone,
       },
       deadlineMinutes: 180,
     });

@@ -46,7 +46,7 @@ const NO_REDACT_KEY = /(^|_)(id|date|at|slug|url|links|status|band|outcome|type|
 // `call_date` we store is the DATE PART of created_at, falling back to a reported
 // call_date. Returns "YYYY-MM-DD" or null.
 function isoDatePart(v: unknown): string | null {
-  const m = String(v ?? "").trim().match(/^(d{4}-d{2}-d{2})/);
+  const m = String(v ?? "").trim().match(/^(\d{4}-\d{2}-\d{2})/);
   return m ? m[1] : null;
 }
 /** The date to group/filter a call by: created_at's date (app-matching), else call_date. */
@@ -139,7 +139,12 @@ async function ingestTranscript(
   const consultant = str(rec.consultant_name) || str(rec.consultant) || "Unknown consultant";
   const prospect = str(rec.prospect_name) || "Unknown prospect";
   const practice = str(rec.practice_type);
-  const callDate = effectiveCallDate(rec) || str(rec.call_date) || str(rec.created_at);
+  // The source's own date string, verbatim (the reported call_date, else the ISO
+  // UTC created_at) — deliberately NOT effectiveCallDate(): this header is part of
+  // the hashed body, so normalising it would change the content hash of every
+  // transcript already stored and a backfill would re-ingest (duplicate) them all.
+  // The normalised date rides in metadata.call_date (recordMetadata).
+  const callDate = str(rec.call_date) || str(rec.created_at);
   const score = str(rec.overall_score);
   const band = str(rec.performance_band);
   const recording = firstRecording(rec);

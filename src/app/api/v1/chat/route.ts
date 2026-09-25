@@ -6,7 +6,7 @@
 //          mode?: "<work mode | alias | auto>", outputType?, sourceTypes?, collectionIds?,
 //          knowledgeScope?: "auto"|"all"|"reality"|"playbook"|"learning"|"calls" (default "auto";
 //            the catalogue is lib/knowledge-scopes, advertised by GET /api/v1/collections),
-//          directives?, attachments?: [{name, text}], capabilities?: string[] }
+//          directives?, attachments?: [{name, text}], capabilities?: string[], timeZone?: string }
 //        `knowledgeScope` picks which intelligence lanes are searched ("Search in");
 //        a scope with its own source types ("calls" = call_score + transcript) is
 //        intersected with the key scope and `sourceTypes` — it can only narrow.
@@ -26,6 +26,12 @@
 //        and feeds call-review continuity; every other system turn is dropped.
 //        A turn's optional `createdAt` (ISO timestamp) anchors its relative dates
 //        ("yesterday's calls") for call-review continuity; it never reaches the model.
+//        `timeZone` is the user's IANA zone ("America/New_York"): "today", "yesterday",
+//        "this week", "Sep 24", the CURRENT DATE note, call-review day filters and
+//        scorecard dates follow the USER's calendar (DST-aware). Absent or invalid →
+//        the business zone (SCORING_TIME_ZONE, default Asia/Karachi); never a 400 —
+//        and the CURRENT DATE note then labels the dates as the business zone,
+//        never as the user's local time.
 //
 // Response: an AI SDK data stream that interleaves what a rich client can render live:
 //   • status events   2:[{type:"status",stage,label,count,mode?,lanes?}]
@@ -61,7 +67,7 @@ import { REASONING_ORDER_INSTRUCTION, MODE_LABELS, normalizeMode, modeDef } from
 import { getActivePrompt } from "@/lib/prompts-db";
 import { loadSettings } from "@/lib/settings";
 import { runRetrieval } from "@/lib/pipeline";
-import { runOrchestratedRetrieval, capabilityGates, performanceAllowed, type OrchestrationOutput } from "@/lib/orchestrator";
+import { runOrchestratedRetrieval, capabilityGates, performanceAllowed, buildDateNote, type OrchestrationOutput } from "@/lib/orchestrator";
 import { metricEventRows } from "@/lib/performance-memory";
 import { detectLearning, looksLikeLearning } from "@/lib/learning-detect";
 import { validateCitations, checkFaithfulness } from "@/lib/faithfulness";
@@ -77,6 +83,7 @@ import { supabaseAdmin } from "@/lib/supabase";
 import { isDemo } from "@/lib/demo/mode";
 import { demoChatStreamResponse } from "@/lib/demo/stream";
 import { CONVERSATION_SUMMARY_PREFIX, isConversationSummary } from "@/lib/call-review";
+import { callerTimeZone, DEFAULT_TIME_ZONE } from "@/lib/timezone";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
@@ -204,6 +211,13 @@ export async function POST(req: Request) {
   // The spoke user's resolved capabilities: they can only switch features OFF
   // for this request (absent = every feature, for older clients).
   const gates = capabilityGates(body.capabilities);
+  // The asking user's IANA time zone: their "today" is their calendar day (the
+  // CEO asks from the USA; the office is in Karachi). Invalid / absent → the
+  // business zone — a bad zone never fails the chat, but it is then never called
+  // the user's own zone (`timeZoneFromUser`).
+  const callerZone = callerTimeZone(body.timeZone);
+  const timeZone = callerZone ?? DEFAULT_TIME_ZONE;
+  const timeZoneFromUser = callerZone !== null;
   // Performance Memory is call-score data: only when the effective scope reaches
   // call_score and the caller may see it. The orchestrator already skips the
   // fetch; the route enforces it again for the event, the prompt and the refusal.
@@ -305,7 +319,7 @@ export async function POST(req: Request) {
       if (settings.features.orchestrator) {
         out = await runOrchestratedRetrieval({
           orgId: ctx.orgId, query, history: retrievalHistory, scope, settings, requestedMode, allowedModes,
-          knowledgeScope: knowledgeScope.id, capabilities: body.capabilities, onStatus,
+          knowledgeScope: knowledgeScope.id, capabilities: body.capabilities, timeZone, timeZoneFromUser, onStatus,
         });
       } else {
         // The classic pipeline has no lanes: a lane scope is ignored here, and a
@@ -318,7 +332,8 @@ export async function POST(req: Request) {
           mode: mode === "auto" ? "general" : mode,
           auto: mode === "auto",
           lanes: [],
-          contextBlock: buildContext(legacy.chunks),
+          // The CURRENT DATE note leads here too, so "today" has the same anchor.
+          contextBlock: [buildDateNote(timeZone, Date.now(), timeZoneFromUser), buildContext(legacy.chunks)].join("\n\n\n"),
           performanceBlock: "",
           performanceMetrics: [],
           conflicts: [],
@@ -393,6 +408,8 @@ export async function POST(req: Request) {
             consultants: f.consultants ?? null,
             practiceType: f.practiceType ?? null,
           },
+          // The zone the filter's dates are in (the user's; "Dates in …").
+          timeZone: out.callReview.timeZone ?? timeZone,
         });
       }
 
@@ -668,6 +685,9 @@ const ChatBodySchema = z
     attachments: z.array(z.object({ name: z.string().max(200), text: z.string().max(60_000) })).max(5).optional(),
     // The spoke user's resolved capability ids (narrow-only; see the header).
     capabilities: z.array(z.string().regex(CAPABILITY_ID_RE)).max(300).optional(),
+    // The user's IANA time zone. Deliberately unvalidated here: callerTimeZone
+    // ignores an invalid value (business-zone default) instead of a 400.
+    timeZone: z.unknown().optional(),
   })
   .passthrough();
 
