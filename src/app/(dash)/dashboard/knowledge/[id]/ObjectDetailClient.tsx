@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Check, ExternalLink, FileText, Link2, RefreshCw, Save, Trash2, X } from "lucide-react";
+import { Check, ExternalLink, FileText, Link2, Loader2, RefreshCw, Save, Trash2, X } from "lucide-react";
 import {
   DOMAINS,
   REALITY_BUCKETS,
@@ -26,30 +26,42 @@ import {
 import {
   Alert,
   Badge,
+  BulkActionBar,
   Button,
   buttonClass,
   ClassBadge,
   EmptyState,
   Field,
   IconButton,
+  InlineError,
   Input,
   Label,
   Menu,
   Notice,
   PageHeader,
+  RowCheckbox,
   SectionCard,
   Select,
+  SelectAllCheckbox,
   Spinner,
   TabPanel,
   Tabs,
   Textarea,
+  SELECTED_ROW_CLASS,
+  focusAfterRemoval,
+  refocusRow,
+  useBulkRun,
   useConfirm,
+  usePendingIds,
+  useSelection,
   type BadgeTone,
   type TabItem,
 } from "@/components/ui";
 import { api } from "@/components/ui/brain-ui";
+import { bulkErrorMessage, requestJson, type BulkFailure, type BulkVerbs } from "@/lib/bulk";
 import { fmtDate, fmtDateTime, fmtDuration, humanize } from "@/lib/format";
 import { statusTone } from "@/lib/ui-labels";
+import { cn } from "@/lib/utils";
 
 interface Detail {
   object: Record<string, unknown> & {
@@ -131,25 +143,69 @@ const ORIGIN_LABEL: Record<string, string> = {
 };
 const originLabel = (v: string) => ORIGIN_LABEL[v] ?? humanize(v);
 
+const RELATIONSHIPS_API = "/api/admin/knowledge/relationships";
+
+type Review = "confirm" | "reject";
+
+/** Quiet reload shortly after local changes, coalescing a burst of row actions into one request. */
+const REFRESH_DELAY_MS = 400;
+
 export function ObjectDetailClient({ id }: { id: string }) {
   const router = useRouter();
   const [data, setData] = React.useState<Detail | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [tab, setTab] = React.useState<Tab>("overview");
+  // Governance / markdown / delete only. Relationship rows have their own
+  // per-row pending state, so reviewing a link never freezes this page.
   const [busy, setBusy] = React.useState(false);
   const [notice, setNotice] = React.useState<string | null>(null);
   const { confirm, dialog } = useConfirm();
 
+  // Only the newest load may land. A local change bumps this too, so a load
+  // that started before the change can never put the old rows back.
+  const loadSeq = React.useRef(0);
   const load = React.useCallback(async () => {
+    const seq = ++loadSeq.current;
     try {
       const d = await api<Detail>(`/api/admin/knowledge/objects/${id}`);
+      if (seq !== loadSeq.current) return;
       setData(d);
       setError(null);
     } catch (e) {
+      if (seq !== loadSeq.current) return;
       setError(e instanceof Error ? e.message : "Failed to load");
     }
   }, [id]);
   React.useEffect(() => { void load(); }, [load]);
+
+  const refreshTimer = React.useRef<number | undefined>(undefined);
+  const refreshSoon = React.useCallback(() => {
+    loadSeq.current++;
+    window.clearTimeout(refreshTimer.current);
+    refreshTimer.current = window.setTimeout(() => void load(), REFRESH_DELAY_MS);
+  }, [load]);
+  React.useEffect(() => () => window.clearTimeout(refreshTimer.current), []);
+
+  /** Reviewed links take their new status (and type) locally, then one quiet reload. */
+  const applyReviewed = React.useCallback(
+    (ids: readonly string[], action: Review, type?: string) => {
+      if (ids.length === 0) return;
+      const status = action === "confirm" ? "confirmed" : "rejected";
+      const done = new Set(ids);
+      setData((d) =>
+        d
+          ? {
+              ...d,
+              relationships: d.relationships.map((r) =>
+                done.has(r.id) ? { ...r, status, ...(type ? { relationship_type: type } : {}) } : r
+              ),
+            }
+          : d
+      );
+      refreshSoon();
+    },
+    [refreshSoon]
+  );
 
   async function patch(body: Record<string, unknown>, okMsg = "Saved") {
     setBusy(true);
@@ -486,7 +542,7 @@ export function ObjectDetailClient({ id }: { id: string }) {
       </TabPanel>
 
       <TabPanel idPrefix={TABS_ID} id="relationships" active={tab === "relationships"} keepMounted>
-        <RelationshipsTab data={data} busy={busy} setBusy={setBusy} reload={load} setError={setError} />
+        <RelationshipsTab data={data} onReviewed={applyReviewed} reload={load} />
       </TabPanel>
 
       <TabPanel idPrefix={TABS_ID} id="entities" active={tab === "entities"}>
@@ -831,75 +887,248 @@ function GovernanceEditor({ o, busy, onSave }: { o: Detail["object"]; busy: bool
 // Relationships
 // ---------------------------------------------------------------------------
 
-function RelationshipsTab({ data, busy, setBusy, reload, setError }: { data: Detail; busy: boolean; setBusy: (b: boolean) => void; reload: () => Promise<void>; setError: (e: string | null) => void }) {
+/** `rec` without `ids` (the same object when none of them are in it). */
+function omit<T>(rec: Record<string, T>, ids: readonly string[]): Record<string, T> {
+  if (!ids.some((id) => id in rec)) return rec;
+  const next = { ...rec };
+  for (const id of ids) delete next[id];
+  return next;
+}
+
+const TYPE_OPTIONS = RELATIONSHIP_TYPES.map((t) => ({ value: t.id, label: t.label }));
+
+/** What a link row is doing right now: drives its spinner and the type select's shown value. */
+interface RowWork { action: Review; type?: string }
+
+function RelationshipsTab({
+  data,
+  onReviewed,
+  reload,
+}: {
+  data: Detail;
+  /** Apply a review locally (new status / type) and schedule one quiet reload. */
+  onReviewed: (ids: readonly string[], action: Review, type?: string) => void;
+  reload: () => Promise<void>;
+}) {
   const [ref, setRef] = React.useState("");
   const [type, setType] = React.useState("related_to");
   const [note, setNote] = React.useState("");
-  async function act(body: Record<string, unknown>, method: "POST" | "PATCH") {
-    setBusy(true);
-    try {
-      await api("/api/admin/knowledge/relationships", { method, body: JSON.stringify(body) });
-      await reload();
-      if (method === "POST") { setRef(""); setNote(""); }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
-    } finally {
-      setBusy(false);
-    }
-  }
+  const [adding, setAdding] = React.useState(false);
+  const [addError, setAddError] = React.useState<string | null>(null);
+  const [work, setWork] = React.useState<Record<string, RowWork>>({});
+  const [rowErrors, setRowErrors] = React.useState<Record<string, string>>({});
+  /** Rows whose error came from a bulk run: shown, not announced (the bar announces the run). */
+  const [quietIds, setQuietIds] = React.useState<ReadonlySet<string>>(() => new Set());
+  /** A type picked in a row's "Confirm as" select, not saved yet: the row's Confirm saves it. */
+  const [picked, setPicked] = React.useState<Record<string, string>>({});
+  const pending = usePendingIds();
+  const bulk = useBulkRun();
+
   const suggested = data.relationships.filter((r) => r.status === "suggested");
   const confirmed = data.relationships.filter((r) => r.status === "confirmed");
+  const sel = useSelection(suggested.map((r) => r.id));
+
+  /** One link: only its row is busy; the rest of the page stays usable. */
+  async function review(id: string, action: Review, newType?: string) {
+    let failed = false as boolean; // (a cast: TS does not see the assignment in the callback)
+    await pending.run(id, async () => {
+      setWork((w) => ({ ...w, [id]: { action, type: newType } }));
+      setRowErrors((prev) => omit(prev, [id]));
+      setQuietIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      try {
+        await requestJson(RELATIONSHIPS_API, {
+          method: "PATCH",
+          json: newType ? { id, action, type: newType } : { id, action },
+        });
+        // Before the row leaves its list: focus moves on to the next row.
+        focusAfterRemoval(id, action);
+        onReviewed([id], action, newType);
+        setPicked((prev) => omit(prev, [id]));
+      } catch (e) {
+        failed = true;
+        setRowErrors((prev) => ({ ...prev, [id]: bulkErrorMessage(e) }));
+      } finally {
+        setWork((w) => omit(w, [id]));
+      }
+    });
+    // The row stays after an error: give focus back to the button that was pressed.
+    if (failed) refocusRow(id, action);
+  }
+
+  /** Many links through the bulk PATCH (≤200 ids per request). */
+  function reviewMany(ids: readonly string[], action: Review) {
+    const verbs: BulkVerbs =
+      action === "confirm" ? { running: "Confirming", done: "confirmed" } : { running: "Ignoring", done: "ignored" };
+    return bulk.runChunks(
+      ids,
+      async (batch, signal) => {
+        const r = await requestJson<{ ids?: string[]; failed?: BulkFailure[] }>(RELATIONSHIPS_API, {
+          method: "PATCH",
+          json: { ids: batch, action },
+          signal,
+        });
+        return { ok: r?.ids ?? [], failed: r?.failed ?? [] };
+      },
+      {
+        verbs,
+        onSettled: (res) => {
+          onReviewed(res.ok, action);
+          setPicked((prev) => omit(prev, res.ok));
+          setRowErrors((prev) => {
+            const next = omit(prev, res.ok);
+            if (res.failed.length === 0) return next;
+            const withFailures = { ...next };
+            for (const f of res.failed) withFailures[f.id] = f.error;
+            return withFailures;
+          });
+          if (res.failed.length > 0) setQuietIds((prev) => new Set([...prev, ...res.failed.map((f) => f.id)]));
+          sel.settle(res);
+        },
+      }
+    );
+  }
+
+  async function addLink() {
+    if (!ref || adding) return;
+    setAdding(true);
+    setAddError(null);
+    try {
+      await requestJson(RELATIONSHIPS_API, { method: "POST", json: { sourceId: data.object.id, targetRef: ref, type, note } });
+      setRef("");
+      setNote("");
+      await reload();
+    } catch (e) {
+      setAddError(bulkErrorMessage(e));
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  // Rows already being confirmed / ignored one by one are left to that request.
+  const allSuggestedIds = suggested.map((r) => r.id).filter((rid) => !pending.isPending(rid));
+
   return (
     <div className="grid gap-4 lg:grid-cols-3">
-      <div className="space-y-4 lg:col-span-2">
+      <div className="min-w-0 space-y-4 lg:col-span-2">
         {suggested.length > 0 && (
           <SectionCard
             title={`Suggested by the Brain (${suggested.length})`}
             description="Confirm, change or ignore. Only confirmed links are followed during retrieval."
           >
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <label className="mr-auto inline-flex cursor-pointer items-center gap-2 pl-[13px] text-xs font-medium text-muted-foreground">
+                <SelectAllCheckbox {...sel.selectAllProps} label="Select all suggested links" />
+                Select all
+              </label>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={bulk.running}
+                onClick={() => void reviewMany(allSuggestedIds, "confirm")}
+              >
+                <Check size={14} aria-hidden />
+                Confirm all
+              </Button>
+              <Button variant="ghost" size="sm" disabled={bulk.running} onClick={() => void reviewMany(allSuggestedIds, "reject")}>
+                <X size={14} aria-hidden />
+                Ignore all
+              </Button>
+            </div>
             <ul className="space-y-2">
-              {suggested.map((r) => (
-                <li key={r.id} className="rounded-xl border border-border px-3 py-2.5 text-[13px] text-foreground">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <span className="text-muted-foreground">
-                      {r.direction === "out" ? "" : "← "}
-                      {relationshipLabel(r.relationship_type)}
-                    </span>
-                    {r.other && (
-                      <Link href={`/dashboard/knowledge/${r.other.id}`} className={REF_LINK}>
-                        {r.other.ref}
-                      </Link>
+              {suggested.map((r) => {
+                const w = work[r.id];
+                const rowBusy = pending.isPending(r.id) || bulk.isActive(r.id);
+                const target = r.other?.ref ?? "unknown object";
+                const pickedType = picked[r.id] && picked[r.id] !== r.relationship_type ? picked[r.id] : undefined;
+                return (
+                  <li
+                    key={r.id}
+                    data-row-id={r.id}
+                    aria-busy={rowBusy || undefined}
+                    className={cn(
+                      "flex items-start gap-3 rounded-xl border border-border px-3 py-2.5 text-[13px] text-foreground",
+                      sel.isSelected(r.id) && SELECTED_ROW_CLASS
                     )}
-                    <span>{r.other?.name}</span>
-                    {typeof r.confidence === "number" && (
-                      <Badge tone="neutral" className="tabular-nums">
-                        {Math.round(r.confidence * 100)}%
-                      </Badge>
-                    )}
-                  </div>
-                  {r.note && <p className="mt-0.5 text-xs text-muted-foreground">{r.note}</p>}
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <Label htmlFor={`confirm-as-${r.id}`}>Confirm as</Label>
-                    <Select
-                      id={`confirm-as-${r.id}`}
-                      density="compact"
-                      className="w-44"
-                      value={r.relationship_type}
-                      disabled={busy}
-                      onChange={(e) => act({ id: r.id, action: "confirm", type: e.target.value }, "PATCH")}
-                      options={RELATIONSHIP_TYPES.map((t) => ({ value: t.id, label: t.label }))}
-                    />
-                    <Button size="sm" disabled={busy} onClick={() => act({ id: r.id, action: "confirm" }, "PATCH")}>
-                      <Check size={14} aria-hidden />
-                      Confirm
-                    </Button>
-                    <Button variant="ghost" size="sm" disabled={busy} onClick={() => act({ id: r.id, action: "reject" }, "PATCH")}>
-                      <X size={14} aria-hidden />
-                      Ignore
-                    </Button>
-                  </div>
-                </li>
-              ))}
+                  >
+                    <label className="-m-1 flex shrink-0 cursor-pointer items-center p-1">
+                      <RowCheckbox
+                        {...sel.rowProps(r.id)}
+                        label={`Select ${relationshipLabel(r.relationship_type)} ${target}`}
+                      />
+                    </label>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <span className="text-muted-foreground">
+                          {r.direction === "out" ? "" : "← "}
+                          {relationshipLabel(r.relationship_type)}
+                        </span>
+                        {r.other && (
+                          <Link href={`/dashboard/knowledge/${r.other.id}`} className={REF_LINK}>
+                            {r.other.ref}
+                          </Link>
+                        )}
+                        <span>{r.other?.name}</span>
+                        {typeof r.confidence === "number" && (
+                          <Badge tone="neutral" className="tabular-nums">
+                            {Math.round(r.confidence * 100)}%
+                          </Badge>
+                        )}
+                      </div>
+                      {r.note && <p className="mt-0.5 text-xs text-muted-foreground">{r.note}</p>}
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <Label htmlFor={`confirm-as-${r.id}`}>Confirm as</Label>
+                        <Select
+                          id={`confirm-as-${r.id}`}
+                          density="compact"
+                          className="w-44"
+                          value={w?.type ?? picked[r.id] ?? r.relationship_type}
+                          disabled={rowBusy}
+                          onChange={(e) => {
+                            // Only stages the type: arrow keys fire `change` on a closed
+                            // select, so saving here would confirm links by accident.
+                            const v = e.target.value;
+                            setPicked((p) => ({ ...p, [r.id]: v }));
+                          }}
+                          options={TYPE_OPTIONS}
+                        />
+                        <Button
+                          size="sm"
+                          data-focus="confirm"
+                          disabled={rowBusy}
+                          loading={w?.action === "confirm"}
+                          aria-label={
+                            pickedType
+                              ? `Confirm link to ${target} as ${relationshipLabel(pickedType)}`
+                              : `Confirm link to ${target}`
+                          }
+                          onClick={() => void review(r.id, "confirm", pickedType)}
+                        >
+                          {w?.action !== "confirm" && <Check size={14} aria-hidden />}
+                          {pickedType ? `Confirm as ${relationshipLabel(pickedType)}` : "Confirm"}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          data-focus="reject"
+                          disabled={rowBusy}
+                          loading={w?.action === "reject"}
+                          aria-label={`Ignore link to ${target}`}
+                          onClick={() => void review(r.id, "reject")}
+                        >
+                          {w?.action !== "reject" && <X size={14} aria-hidden />}
+                          Ignore
+                        </Button>
+                      </div>
+                      <InlineError message={rowErrors[r.id]} live={!quietIds.has(r.id)} className="mt-1.5" />
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           </SectionCard>
         )}
@@ -908,40 +1137,71 @@ function RelationshipsTab({ data, busy, setBusy, reload, setError }: { data: Det
             <p className="text-[13px] text-muted-foreground">No confirmed relationships yet.</p>
           ) : (
             <ul className="-my-1.5 divide-y divide-border">
-              {confirmed.map((r) => (
-                <li key={r.id} className="flex flex-wrap items-center gap-2 py-1.5 text-[13px] text-foreground">
-                  <Link2 size={14} aria-hidden className="shrink-0 text-muted-foreground" />
-                  <span className="text-muted-foreground">
-                    {r.direction === "out" ? "" : "← "}
-                    {relationshipLabel(r.relationship_type)}
-                  </span>
-                  {r.other && (
-                    <Link href={`/dashboard/knowledge/${r.other.id}`} className={REF_LINK}>
-                      {r.other.ref}
-                    </Link>
-                  )}
-                  <span className="min-w-0">{r.other?.name}</span>
-                  <Badge tone="neutral">{originLabel(r.origin)}</Badge>
-                  <IconButton
-                    size="sm"
-                    className="ml-auto"
-                    aria-label={`Remove relationship to ${r.other?.ref ?? "unknown object"}`}
-                    title="Remove"
-                    disabled={busy}
-                    onClick={() => act({ id: r.id, action: "reject" }, "PATCH")}
-                  >
-                    <X size={14} aria-hidden />
-                  </IconButton>
-                </li>
-              ))}
+              {confirmed.map((r) => {
+                const removing = work[r.id]?.action === "reject";
+                return (
+                  <li key={r.id} data-row-id={r.id} className="py-1.5 text-[13px] text-foreground">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Link2 size={14} aria-hidden className="shrink-0 text-muted-foreground" />
+                      <span className="text-muted-foreground">
+                        {r.direction === "out" ? "" : "← "}
+                        {relationshipLabel(r.relationship_type)}
+                      </span>
+                      {r.other && (
+                        <Link href={`/dashboard/knowledge/${r.other.id}`} className={REF_LINK}>
+                          {r.other.ref}
+                        </Link>
+                      )}
+                      <span className="min-w-0">{r.other?.name}</span>
+                      <Badge tone="neutral">{originLabel(r.origin)}</Badge>
+                      <IconButton
+                        size="sm"
+                        className="ml-auto"
+                        aria-label={`Remove relationship to ${r.other?.ref ?? "unknown object"}`}
+                        title="Remove"
+                        data-focus="reject"
+                        disabled={pending.isPending(r.id) || bulk.isActive(r.id)}
+                        aria-busy={removing || undefined}
+                        onClick={() => void review(r.id, "reject")}
+                      >
+                        {removing ? <Loader2 size={14} className="animate-spin" aria-hidden /> : <X size={14} aria-hidden />}
+                      </IconButton>
+                    </div>
+                    <InlineError message={rowErrors[r.id]} className="mt-1" />
+                  </li>
+                );
+              })}
             </ul>
           )}
         </SectionCard>
+        <BulkActionBar
+          count={sel.count}
+          onClear={sel.clear}
+          run={bulk}
+          noun={["suggestion", "suggestions"]}
+          label="Bulk actions for suggested links"
+          actions={[
+            {
+              key: "confirm",
+              label: "Confirm",
+              icon: Check,
+              tone: "primary",
+              onClick: () => void reviewMany(sel.selectedIds, "confirm"),
+            },
+            { key: "ignore", label: "Ignore", icon: X, onClick: () => void reviewMany(sel.selectedIds, "reject") },
+          ]}
+        />
       </div>
-      <SectionCard title="Connect to another object" className="self-start">
-        <div className="space-y-3">
+      <SectionCard title="Connect to another object" className="min-w-0 self-start">
+        <form
+          className="space-y-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void addLink();
+          }}
+        >
           <Field label="Relationship">
-            <Select value={type} onChange={(e) => setType(e.target.value)} options={RELATIONSHIP_TYPES.map((t) => ({ value: t.id, label: t.label }))} />
+            <Select value={type} onChange={(e) => setType(e.target.value)} options={TYPE_OPTIONS} />
           </Field>
           <Field label="Target ref" hint="The other object's ref, as shown on Knowledge objects (e.g. MG-002).">
             <Input value={ref} onChange={(e) => setRef(e.target.value.toUpperCase())} placeholder="MG-002" className="font-mono" />
@@ -949,11 +1209,12 @@ function RelationshipsTab({ data, busy, setBusy, reload, setError }: { data: Det
           <Field label="Note">
             <Input value={note} onChange={(e) => setNote(e.target.value)} />
           </Field>
-          <Button disabled={!ref || busy} onClick={() => act({ sourceId: data.object.id, targetRef: ref, type, note }, "POST")}>
-            <Link2 size={16} aria-hidden />
+          <InlineError message={addError} />
+          <Button type="submit" disabled={!ref} loading={adding}>
+            {!adding && <Link2 size={16} aria-hidden />}
             Add relationship
           </Button>
-        </div>
+        </form>
       </SectionCard>
     </div>
   );

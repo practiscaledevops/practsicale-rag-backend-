@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
 export default async function LearningLabPage() {
   await requireAdmin();
   return (
-    <div>
+    <div className="min-w-0">
       <PageHeader
         title="Learning Lab"
         description="Decisions, experiments and lessons the team records, and what they prove."

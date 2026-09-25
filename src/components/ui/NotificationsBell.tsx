@@ -80,17 +80,20 @@ export function NotificationsBell() {
     function onDown(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     }
+    // Capture phase + preventDefault: this Escape is handled here, so a page's
+    // BulkActionBar (which skips handled Escapes) does not also clear its selection.
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
+        e.preventDefault();
         setOpen(false);
         triggerRef.current?.focus();
       }
     }
     document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
+    document.addEventListener("keydown", onKey, true);
     return () => {
       document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("keydown", onKey, true);
     };
   }, [open]);
 

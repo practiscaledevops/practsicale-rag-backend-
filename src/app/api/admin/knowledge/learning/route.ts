@@ -3,13 +3,19 @@
 //           follow-up queue (new evidence the Brain thinks belongs to an open record)
 //   POST  → record a learning / experiment / decision manually (compiled like any object)
 //           or a follow-up action: { action: "attach_evidence" | "compute_result" | "ignore", edgeId }
+//           or a bulk follow-up action: { action: "attach_evidence" | "ignore", edgeIds: uuid[] (≤100) }
+//             → { ok, done: edgeId[], failed: { edgeId, error, status }[], remaining: edgeId[] }
+//             (one edge at a time, within a time budget; resend `remaining`)
 //   PATCH → { id, lifecycleStatus?, department?, owner?, confidence?, metricsBefore?,
 //             metricsAfter?, evidenceDocumentIds?, missingEvidence?, parentRecordId?,
 //             action?: "promote_standard" (playbookRefs?) | "validate" | "reject" }
+//           or bulk: { ids: uuid[] (≤200), action: "validate" | "reject" } | { ids, lifecycleStatus }
+//             → { ok, updated, ids: updated ids, lifecycleStatus, missing: ids not found in this org }
+//           (promote_standard stays one record at a time: it rewrites several playbooks)
 
 import { supabaseAdmin } from "@/lib/supabase";
 import { compileKnowledge } from "@/lib/knowledge-compiler";
-import { getObjectByRef, upsertRelationship, logDecision, OBJECT_COLUMNS } from "@/lib/knowledge-store";
+import { getObjectByRef, upsertRelationship, logDecision, isMissingRelation, OBJECT_COLUMNS } from "@/lib/knowledge-store";
 import { LEARNING_RECORD_TYPES, LEARNING_STATUSES } from "@/lib/intelligence-taxonomy";
 import { loadSettings } from "@/lib/settings";
 import {
@@ -22,11 +28,36 @@ import {
   metricsAfterObject,
 } from "@/lib/learning-followup";
 import type { AdminSession } from "@/lib/auth/session";
-import { guard, dbError, objectStubs, str, strOrNull, strList } from "../_shared";
+import { bulkErrorMessage } from "@/lib/bulk";
+import { guard, dbError, objectStubs, str, strOrNull, strList, uuid } from "../_shared";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
 export const maxDuration = 120;
+
+/** Records per bulk PATCH (one set-based update each, so cheap). */
+const BULK_MAX_RECORDS = 200;
+/** Follow-ups per bulk POST: each is several reads + writes, done one after another. */
+const BULK_MAX_FOLLOWUPS = 100;
+/** Stop starting new follow-ups after this long; the client resends `remaining`. */
+const FOLLOWUP_BUDGET_MS = 50_000;
+
+/**
+ * A bulk id list: 1..max uuids, deduped (ids are interpolated into PostgREST
+ * `in (…)` filters, so free text is refused rather than dropped).
+ */
+function bulkIds(v: unknown, max: number, field: string): { ids: string[] } | { error: string } {
+  if (!Array.isArray(v)) return { error: `${field} must be an array of ids` };
+  const ids = new Set<string>();
+  for (const x of v) {
+    const id = uuid(x);
+    if (!id) return { error: `${field} must contain only ids (uuid)` };
+    ids.add(id);
+  }
+  if (ids.size === 0) return { error: `${field} must not be empty` };
+  if (ids.size > max) return { error: `At most ${max} ${field} per request` };
+  return { ids: Array.from(ids) };
+}
 
 export async function GET(req: Request) {
   const g = await guard();
@@ -77,6 +108,7 @@ export async function POST(req: Request) {
   const { admin } = g;
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
   const followupAction = str(body.action, 30);
+  if (followupAction && body.edgeIds !== undefined) return followupMany(admin, followupAction, body.edgeIds);
   if (followupAction) return followup(admin, followupAction, str(body.edgeId, 64));
   const kind = LEARNING_RECORD_TYPES.includes(str(body.kind, 40)) ? str(body.kind, 40) : "learning";
   const title = str(body.title, 200);
@@ -233,11 +265,126 @@ async function followup(admin: AdminSession, action: string, edgeId: string): Pr
   }
 }
 
+/**
+ * Attach / ignore many follow-ups in one request. Strictly one edge after
+ * another: attachEvidence read-modify-writes the record's evidence list, and
+ * several edges can point at the same record. Each edge is checked exactly as
+ * the single form checks it; its own 404 / 409 / error is reported in
+ * `failed` and never stops the rest. Past the time budget the unstarted edges
+ * come back in `remaining` (at least one edge is always processed, so a resend
+ * always makes progress). compute_result (a model call per edge) stays single:
+ * the client runs those one at a time.
+ */
+async function followupMany(admin: AdminSession, action: string, rawIds: unknown): Promise<Response> {
+  if (action === "compute_result") {
+    return Response.json({ error: "compute_result runs one follow-up at a time — send { action, edgeId }." }, { status: 400 });
+  }
+  if (action !== "attach_evidence" && action !== "ignore") return Response.json({ error: "Unknown action" }, { status: 400 });
+  const parsed = bulkIds(rawIds, BULK_MAX_FOLLOWUPS, "edgeIds");
+  if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+  const { ids } = parsed;
+  const db = supabaseAdmin();
+  const started = Date.now();
+  const done: string[] = [];
+  const failed: { edgeId: string; error: string; status: number }[] = [];
+  let remaining: string[] = [];
+  try {
+    for (let i = 0; i < ids.length; i++) {
+      if (i > 0 && Date.now() - started > FOLLOWUP_BUDGET_MS) {
+        remaining = ids.slice(i);
+        break;
+      }
+      const edgeId = ids[i];
+      try {
+        const ctx = await loadFollowupContext(db, admin.orgId, edgeId);
+        if (!ctx) {
+          failed.push({ edgeId, error: "Not found", status: 404 });
+          continue;
+        }
+        if (action === "ignore") {
+          if (ctx.edge.status !== "suggested") {
+            failed.push({ edgeId, error: "This suggestion was already reviewed.", status: 409 });
+            continue;
+          }
+          await ignoreFollowup(db, admin.orgId, ctx, admin.email);
+        } else {
+          if (ctx.edge.status === "rejected") {
+            failed.push({ edgeId, error: "This suggestion was ignored earlier.", status: 409 });
+            continue;
+          }
+          await attachEvidence(db, admin.orgId, ctx, admin.email);
+        }
+        done.push(edgeId);
+      } catch (e) {
+        // A missing table fails every edge the same way: answer like the single form.
+        if (isMissingRelation(e as { code?: string; message?: string })) throw e;
+        failed.push({ edgeId, error: bulkErrorMessage(e, "Action failed"), status: 500 });
+      }
+    }
+    return Response.json({ ok: true, done, failed, remaining });
+  } catch (e) {
+    return dbError(e);
+  }
+}
+
+/**
+ * Validate / reject / set the lifecycle status of many records: two set-based
+ * updates, both org-scoped — the records, then (validate / reject) their
+ * knowledge objects' internal_validation, the same side effects as the single
+ * form. Ids that are not records of this org are returned in `missing`.
+ */
+async function patchMany(admin: AdminSession, body: Record<string, unknown>): Promise<Response> {
+  const parsed = bulkIds(body.ids, BULK_MAX_RECORDS, "ids");
+  if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+  const { ids } = parsed;
+  const action = str(body.action, 30);
+  const requested = str(body.lifecycleStatus, 20);
+  let lifecycleStatus: string;
+  let validation: "validated" | "rejected" | null = null;
+  if (action) {
+    if (action !== "validate" && action !== "reject") {
+      return Response.json({ error: "Bulk updates support validate, reject or a lifecycleStatus; promote one record at a time." }, { status: 400 });
+    }
+    lifecycleStatus = validation = action === "validate" ? "validated" : "rejected";
+  } else if (requested && LEARNING_STATUSES.some((s) => s.id === requested)) {
+    lifecycleStatus = requested;
+  } else {
+    return Response.json({ error: "action (validate | reject) or a valid lifecycleStatus is required" }, { status: 400 });
+  }
+  const db = supabaseAdmin();
+  try {
+    const { data: found, error: findError } = await db.from("learning_records").select("id, object_id").eq("org_id", admin.orgId).in("id", ids);
+    if (findError) throw findError;
+    const rows = (found ?? []) as { id: string; object_id: string | null }[];
+    if (rows.length === 0) return Response.json({ ok: true, updated: 0, ids: [], lifecycleStatus, missing: ids });
+    if (validation) {
+      const objectIds = Array.from(new Set(rows.map((r) => r.object_id).filter((x): x is string => !!x)));
+      if (objectIds.length) {
+        const { error } = await db.from("knowledge_objects").update({ internal_validation: validation }).eq("org_id", admin.orgId).in("id", objectIds);
+        if (error) throw error;
+      }
+    }
+    const { data: updated, error } = await db
+      .from("learning_records")
+      .update({ lifecycle_status: lifecycleStatus })
+      .eq("org_id", admin.orgId)
+      .in("id", rows.map((r) => r.id))
+      .select("id");
+    if (error) throw error;
+    const done = ((updated ?? []) as { id: string }[]).map((r) => r.id);
+    const doneSet = new Set(done);
+    return Response.json({ ok: true, updated: done.length, ids: done, lifecycleStatus, missing: ids.filter((id) => !doneSet.has(id)) });
+  } catch (e) {
+    return dbError(e);
+  }
+}
+
 export async function PATCH(req: Request) {
   const g = await guard("documents:write");
   if ("response" in g) return g.response;
   const { admin } = g;
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  if (body.ids !== undefined) return patchMany(admin, body);
   const id = str(body.id, 64);
   if (!id) return Response.json({ error: "id required" }, { status: 400 });
   const db = supabaseAdmin();

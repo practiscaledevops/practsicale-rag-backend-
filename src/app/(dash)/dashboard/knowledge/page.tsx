@@ -22,7 +22,8 @@ export const dynamic = "force-dynamic";
 export default async function KnowledgePage() {
   await requireAdmin();
   return (
-    <div>
+    // min-w-0: the table scrolls inside its own card; the page never widens the shell.
+    <div className="min-w-0">
       <PageHeader
         title="Knowledge objects"
         description="Everything the Brain knows, with its class, trust level and status."

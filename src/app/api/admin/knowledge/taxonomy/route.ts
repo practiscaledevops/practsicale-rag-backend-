@@ -2,8 +2,11 @@
 //   GET   → predefined values (code) + org extensions/proposals (DB) + usage
 //   POST  → create an approved value { kind, value, domain?, objectType?, label? }
 //   PATCH → { id, action: "approve" | "reject" | "rename", value?, label? }
+//   PATCH → { ids: uuid[] (1..200), action: "approve" | "reject" }   (bulk; rename
+//           stays one value at a time) → { ok, updated, ids }
 
 import { supabaseAdmin } from "@/lib/supabase";
+import { BULK_MAX_IDS } from "@/lib/bulk";
 import { ensureTaxonomyValue, listTaxonomyValues } from "@/lib/knowledge-store";
 import {
   INTELLIGENCE_CLASSES,
@@ -33,10 +36,25 @@ import {
   slugify,
   suggestedSubtypes,
 } from "@/lib/intelligence-taxonomy";
-import { guard, dbError, str } from "../_shared";
+import { guard, dbError, str, uuid } from "../_shared";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
+// Bulk approve / reject is one set update: bounded DB work, far below this.
+export const maxDuration = 60;
+
+/** `ids` of a bulk request: 1..BULK_MAX_IDS uuids (deduped), or why not. */
+function parseIds(v: unknown): { ids: string[] } | { error: string } {
+  if (!Array.isArray(v) || v.length === 0) return { error: "ids must be a non-empty array of ids" };
+  const ids = new Set<string>();
+  for (const x of v) {
+    const id = uuid(x);
+    if (!id) return { error: "ids must be uuids" };
+    ids.add(id);
+  }
+  if (ids.size > BULK_MAX_IDS) return { error: `At most ${BULK_MAX_IDS} ids per request` };
+  return { ids: Array.from(ids) };
+}
 
 export async function GET() {
   const g = await guard();
@@ -122,8 +140,30 @@ export async function PATCH(req: Request) {
   if ("response" in g) return g.response;
   const { admin } = g;
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
-  const id = str(body.id, 64);
   const action = str(body.action, 20);
+
+  if (body.ids !== undefined) {
+    if (!["approve", "reject"].includes(action)) {
+      return Response.json({ error: "ids and action (approve|reject) required; rename one value at a time" }, { status: 400 });
+    }
+    const parsed = parseIds(body.ids);
+    if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+    try {
+      const { data, error } = await supabaseAdmin()
+        .from("taxonomy_values")
+        .update({ status: action === "approve" ? "approved" : "rejected" })
+        .in("id", parsed.ids)
+        .eq("org_id", admin.orgId)
+        .select("id");
+      if (error) throw error;
+      const ids = ((data ?? []) as { id: string }[]).map((r) => r.id);
+      return Response.json({ ok: true, updated: ids.length, ids });
+    } catch (e) {
+      return dbError(e);
+    }
+  }
+
+  const id = uuid(body.id);
   if (!id || !["approve", "reject", "rename"].includes(action)) return Response.json({ error: "id and action (approve|reject|rename) required" }, { status: 400 });
   const db = supabaseAdmin();
   try {

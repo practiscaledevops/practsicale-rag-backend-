@@ -16,24 +16,18 @@ import {
   splitSections,
   objectContextLine,
   objectEmbeddingText,
-  logDecision,
-  OBJECT_COLUMNS,
   type KnowledgeObjectRow,
 } from "@/lib/knowledge-store";
-import {
-  defaultAuthority,
-  realityBucketOf,
-  isAuthority,
-  isDomain,
-  slugify,
-  FOUNDER_ENDORSEMENTS,
-  IMPLEMENTATION_STATUSES,
-  INTERNAL_VALIDATIONS,
-  PRIORITIES,
-  OBJECT_STATUSES,
-  EVIDENCE_LEVELS,
-} from "@/lib/intelligence-taxonomy";
+import { realityBucketOf, isAuthority, isDomain, slugify } from "@/lib/intelligence-taxonomy";
 import { guard, dbError, objectStubs, str, strOrNull, strList, uuid } from "../../_shared";
+import {
+  persistObjectPatch,
+  pickGovernanceEnums,
+  recomputeAuthority,
+  syncMetadataOnly,
+  touchesFrontmatter,
+  type ObjectPatch,
+} from "../_governance";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
@@ -101,15 +95,9 @@ export async function GET(_req: Request, ctx: Ctx) {
   }
 }
 
-const ENUMS = {
-  status: OBJECT_STATUSES.map((s) => s.id),
-  priority: PRIORITIES.map((p) => p.id),
-  founder_endorsement: FOUNDER_ENDORSEMENTS.map((e) => e.id),
-  implementation_status: IMPLEMENTATION_STATUSES.map((s) => s.id),
-  internal_validation: INTERNAL_VALIDATIONS.map((v) => v.id),
-  evidence_level: EVIDENCE_LEVELS.map((e) => e.id),
-};
-
+// Governance rules (enum whitelist, authority recompute, frontmatter sync, the
+// org-scoped update + decision log) live in ../_governance.ts, shared with the
+// bulk PATCH on /api/admin/knowledge/objects.
 export async function PATCH(req: Request, ctx: Ctx) {
   const g = await guard("documents:write");
   if ("response" in g) return g.response;
@@ -121,13 +109,8 @@ export async function PATCH(req: Request, ctx: Ctx) {
     const current = await getObject(db, admin.orgId, id, true);
     if (!current) return Response.json({ error: "Not found" }, { status: 404 });
 
-    const patch: Record<string, unknown> = {};
-    const pick = (k: keyof typeof ENUMS) => {
-      const v = str(body[k], 40);
-      if (v && (ENUMS[k] as readonly string[]).includes(v)) patch[k] = v;
-      else if (k === "founder_endorsement" && body[k] === null) patch[k] = null;
-    };
-    (["status", "priority", "founder_endorsement", "implementation_status", "internal_validation", "evidence_level"] as const).forEach(pick);
+    const patch: ObjectPatch = {};
+    pickGovernanceEnums(body, patch);
     if (str(body.name, 200)) patch.name = str(body.name, 200);
     if (typeof body.summary === "string") patch.summary = body.summary.trim().slice(0, 4000);
     if (str(body.domain, 40) && isDomain(str(body.domain, 40))) patch.domain = str(body.domain, 40);
@@ -148,10 +131,7 @@ export async function PATCH(req: Request, ctx: Ctx) {
     }
     if (body.verify_now === true) patch.last_verified_at = new Date().toISOString();
     if (str(body.authority, 4) && isAuthority(str(body.authority, 4))) patch.authority = str(body.authority, 4);
-    else if (Object.keys(patch).some((k) => ["status", "founder_endorsement", "internal_validation", "domain", "object_type"].includes(k))) {
-      const next = { ...current, ...patch } as KnowledgeObjectRow;
-      patch.authority = defaultAuthority({ ...next, bucket: next.intelligence_class === "business_reality" ? realityBucketOf(next) : null });
-    }
+    else recomputeAuthority(current, patch);
 
     // Markdown edit → rebuild frontmatter from (patched) metadata, re-chunk in place.
     let chunks: number | null = null;
@@ -180,20 +160,13 @@ export async function PATCH(req: Request, ctx: Ctx) {
         });
         chunks = r.chunks;
       }
-    } else if (patch.name || patch.domain || patch.object_type || patch.subtype || patch.authority || patch.founder_endorsement !== undefined || patch.status) {
+    } else if (touchesFrontmatter(patch)) {
       // Metadata-only change: keep the compiled markdown's frontmatter in sync (no re-chunk).
-      const parts = splitSections(current.compiled_markdown ?? "");
-      if (parts.sections.length) patch.compiled_markdown = assembleMarkdown(buildFrontmatter(nextMeta), parts.title || nextMeta.name, parts.sections);
-      if (current.document_id && patch.domain) {
-        await db.from("documents").update({ domain: patch.domain }).eq("id", current.document_id).then(() => {}, () => {});
-        await db.from("chunks").update({ domain: patch.domain }).eq("object_id", current.id).then(() => {}, () => {});
-      }
+      await syncMetadataOnly(db, admin.orgId, current, patch);
     }
 
     if (Object.keys(patch).length === 0) return Response.json({ object: current, chunks });
-    const { data, error } = await db.from("knowledge_objects").update(patch).eq("id", id).eq("org_id", admin.orgId).select(OBJECT_COLUMNS).single();
-    if (error) throw error;
-    await logDecision(db, admin.orgId, { objectId: id, stage: "persist", decision: md ? "markdown_edited" : "governance_edited", input: { fields: Object.keys(patch) }, output: { by: admin.email } });
+    const data = await persistObjectPatch(db, admin.orgId, id, patch, { decision: md ? "markdown_edited" : "governance_edited", by: admin.email });
     return Response.json({ object: data, chunks });
   } catch (e) {
     return dbError(e);

@@ -18,12 +18,17 @@ import {
   Layers,
   Loader2,
   RefreshCw,
+  RotateCcw,
 } from "lucide-react";
 import {
   Alert,
   Badge,
   Button,
+  BulkActionBar,
   EmptyState,
+  RowSelectCell,
+  SelectAllCell,
+  SELECTED_ROW_CLASS,
   StatGrid,
   StatTile,
   Switch,
@@ -35,8 +40,13 @@ import {
   THead,
   Tr,
   buttonClass,
+  useBulkRun,
+  useConfirm,
+  usePendingIds,
+  useSelection,
 } from "@/components/ui";
-import { fmtDateTime, fmtDuration, humanize, relTime } from "@/lib/format";
+import { BULK_CONCURRENCY, bulkErrorMessage, requestJson, type BulkVerbs } from "@/lib/bulk";
+import { fmtDateTime, fmtDuration, fmtInt as fmtCount, humanize, relTime } from "@/lib/format";
 import { statusTone, triggerLabel } from "@/lib/ui-labels";
 import { cn } from "@/lib/utils";
 
@@ -57,7 +67,17 @@ export interface RunRow {
 }
 
 const POLL_MS = 10_000;
-const COLS = 9; // table columns, for the expandable error row colSpan
+const COLS = 10; // table columns, for the expandable error row colSpan
+const SYNC_VERBS: BulkVerbs = { running: "Syncing", done: "synced" };
+
+/** A failed run of a pull source: the only rows that can be retried from here. */
+const isRetryable = (r: RunRow) => r.status === "error" && !!r.data_source_id;
+
+/** How one source's retry went, shown on its failed runs. */
+interface RetryMsg {
+  tone: "success" | "danger";
+  text: string;
+}
 
 
 const STATUS_LABELS: Record<string, string> = {
@@ -155,6 +175,92 @@ export function ProcessingClient({ initialRuns }: { initialRuns: RunRow[] }) {
     });
   }
 
+  // --- Bulk: select failed runs → re-sync their sources ----------------------
+  // Each sync can run for minutes, so the sources go one at a time over the
+  // single sync endpoint; the monitor keeps polling and stays usable meanwhile.
+  const { confirm, dialog } = useConfirm();
+  const retryRun = useBulkRun();
+  const syncing = usePendingIds(); // source ids whose sync request is in flight
+  const [retryMsg, setRetryMsg] = React.useState<Record<string, RetryMsg>>({});
+  const sel = useSelection(runs.filter(isRetryable).map((r) => r.id));
+  const hydrated = useHydrated();
+  const runsRef = React.useRef(runs);
+  React.useEffect(() => {
+    runsRef.current = runs;
+  }, [runs]);
+
+  // The distinct sources behind the selected runs (a source can fail many times).
+  const selected = sel.selected;
+  const selectedSources = React.useMemo(() => {
+    const ids = new Set<string>();
+    for (const r of runs) if (selected.has(r.id) && r.data_source_id) ids.add(r.data_source_id);
+    return Array.from(ids);
+  }, [runs, selected]);
+
+  async function syncSource(sourceId: string) {
+    setRetryMsg((prev) => {
+      if (!(sourceId in prev)) return prev;
+      const next = { ...prev };
+      delete next[sourceId];
+      return next;
+    });
+    try {
+      // No abort signal: the pull keeps running server-side, so an in-flight
+      // sync still reports its result after Cancel.
+      const r = await requestJson<{ status?: string; error?: string } | null>(
+        `/api/admin/sources/${encodeURIComponent(sourceId)}/sync`,
+        { method: "POST" }
+      );
+      if (r?.status === "error") throw new Error(r.error || "Sync failed");
+      setRetryMsg((prev) => ({ ...prev, [sourceId]: { tone: "success", text: "Re-synced" } }));
+    } catch (e) {
+      const text = e instanceof TypeError ? "Network error — please try again." : bulkErrorMessage(e, "Sync failed");
+      setRetryMsg((prev) => ({ ...prev, [sourceId]: { tone: "danger", text } }));
+      throw new Error(text);
+    }
+  }
+
+  async function retrySelected() {
+    const sources = selectedSources;
+    if (sources.length === 0) return;
+    if (sources.length > 1) {
+      const ok = await confirm({
+        title: `Sync ${fmtCount(sources.length)} sources again?`,
+        description:
+          "They sync one at a time, and each can take up to 5 minutes. Keep this page open until they finish; you can cancel between syncs.",
+        confirmLabel: `Sync ${fmtCount(sources.length)}`,
+      });
+      if (!ok) return;
+    }
+    await retryRun.run(
+      sources,
+      async (sourceId) => {
+        let ran = false;
+        await syncing.run(sourceId, () => {
+          ran = true;
+          return syncSource(sourceId);
+        });
+        if (!ran) throw new Error("Already syncing");
+      },
+      {
+        concurrency: BULK_CONCURRENCY.sync,
+        verbs: SYNC_VERBS,
+        onSettled: (res) => {
+          // Runs whose source re-synced are dealt with and leave the selection. The
+          // rest (failed again, or cancelled), and anything the admin (de)selected
+          // during the run, keep their current state: `select` applies to the live
+          // selection, not the one captured when the run started.
+          const ok = new Set(res.ok);
+          sel.select(
+            runsRef.current.filter((r) => r.data_source_id && ok.has(r.data_source_id)).map((r) => r.id),
+            false
+          );
+          void refresh(); // pick up the new runs now instead of at the next poll
+        },
+      }
+    );
+  }
+
   // Summary over the shown window.
   const summary = React.useMemo(() => {
     let docs = 0;
@@ -248,9 +354,11 @@ export function ProcessingClient({ initialRuns }: { initialRuns: RunRow[] }) {
             }
           />
         ) : (
-          <Table minWidth={960} caption="Processing runs">
+          // `relative`: the checkboxes' hidden parts stay inside the table's own scroller.
+          <Table minWidth={1000} caption="Processing runs" wrapperClassName="relative">
             <THead>
               <tr>
+                <SelectAllCell {...sel.selectAllProps} label="Select all failed source runs" />
                 <Th>When</Th>
                 <Th>Source</Th>
                 <Th>Trigger</Th>
@@ -266,9 +374,24 @@ export function ProcessingClient({ initialRuns }: { initialRuns: RunRow[] }) {
               {runs.map((r) => {
                 const isOpen = expanded.has(r.id);
                 const errorId = `run-${r.id}-error`;
+                const retryable = isRetryable(r);
+                const sourceId = r.data_source_id ?? "";
+                const inFlight = retryable && syncing.isPending(sourceId);
+                const queued = retryable && !inFlight && retryRun.isActive(sourceId);
+                const msg = retryable ? retryMsg[sourceId] : undefined;
                 return (
                   <React.Fragment key={r.id}>
-                    <Tr>
+                    <Tr className={cn(sel.isSelected(r.id) && SELECTED_ROW_CLASS)}>
+                      {retryable ? (
+                        <RowSelectCell
+                          {...sel.rowProps(r.id)}
+                          label={`Select failed run of ${r.source_name ?? "this source"} from ${
+                            hydrated ? fmtDateTime(r.started_at) : r.started_at
+                          }`}
+                        />
+                      ) : (
+                        <Td className="w-10 p-0" />
+                      )}
                       <Td className="whitespace-nowrap font-medium">
                         <TimeAgo iso={r.started_at} />
                       </Td>
@@ -277,7 +400,24 @@ export function ProcessingClient({ initialRuns }: { initialRuns: RunRow[] }) {
                         <Badge tone="neutral">{triggerLabel(r.trigger)}</Badge>
                       </Td>
                       <Td>
-                        <StatusPill status={r.status} />
+                        <div className="flex flex-wrap items-center gap-1">
+                          <StatusPill status={r.status} />
+                          {inFlight ? (
+                            <Badge tone="accent">
+                              <Loader2 size={12} className="animate-spin" aria-hidden="true" />
+                              Re-syncing
+                            </Badge>
+                          ) : queued ? (
+                            <Badge tone="neutral">Queued</Badge>
+                          ) : msg?.tone === "success" ? (
+                            <Badge tone="success">{msg.text}</Badge>
+                          ) : null}
+                        </div>
+                        {msg?.tone === "danger" && !inFlight && !queued && (
+                          <p className="mt-1 max-w-[32ch] break-words text-xs text-danger-ink">
+                            Retry failed: {msg.text}
+                          </p>
+                        )}
                       </Td>
                       <Td numeric>{fmtInt(r.documents_ingested)}</Td>
                       <Td numeric>{fmtInt(r.chunks_ingested)}</Td>
@@ -331,6 +471,28 @@ export function ProcessingClient({ initialRuns }: { initialRuns: RunRow[] }) {
           </Table>
         )}
       </TableCard>
+
+      <BulkActionBar
+        count={sel.count}
+        onClear={sel.clear}
+        run={retryRun}
+        noun={["failed run", "failed runs"]}
+        actions={[
+          {
+            key: "retry-sync",
+            label:
+              selectedSources.length === 1
+                ? "Retry sync"
+                : `Retry sync · ${fmtCount(selectedSources.length)} sources`,
+            icon: RotateCcw,
+            tone: "primary",
+            onClick: () => void retrySelected(),
+            disabled: selectedSources.length === 0,
+            title: "Runs a new sync for each selected run's source, one at a time",
+          },
+        ]}
+      />
+      {dialog}
     </div>
   );
 }

@@ -174,7 +174,19 @@ function activeGroupId(pathname: string): string | undefined {
 // Layout contract for pages (see revamp plan §4).
 const FULL_BLEED = new Set(["/dashboard/collections", "/dashboard/playground"]);
 const WIDE_EXACT = new Set(["/dashboard/documents", "/dashboard/knowledge", "/dashboard/sources"]);
-const WIDE_PREFIX = ["/dashboard/learning", "/dashboard/processing", "/dashboard/decisions", "/dashboard/uploads"];
+const WIDE_PREFIX = [
+  "/dashboard/learning",
+  "/dashboard/processing",
+  "/dashboard/decisions",
+  "/dashboard/uploads",
+  // Review queues and wide tables: their action columns need the room.
+  "/dashboard/relationships",
+  "/dashboard/taxonomy",
+  "/dashboard/entities",
+  "/dashboard/performance",
+  "/dashboard/quality-data",
+  "/dashboard/keys",
+];
 
 function contentWidth(pathname: string): "full" | "wide" | "normal" {
   if (FULL_BLEED.has(pathname)) return "full";
@@ -476,8 +488,11 @@ export function AppShell({ email, role, children }: AppShellProps) {
       {/* relative: the frame is the containing block for absolutely positioned
           descendants (sr-only labels, popovers). Without it they resolve against
           the page, and one deep in a long scrolled page makes the whole document
-          taller than the window — the page then scrolls, leaving a blank strip. */}
-      <div className="relative flex h-app overflow-hidden bg-sidebar">
+          taller than the window — the page then scrolls, leaving a blank strip.
+          overflow-clip, not overflow-hidden: a hidden box is still a scroll
+          container that focus() / scrollIntoView can scroll sideways (shifting
+          the rail and the workspace off screen); a clipped box cannot scroll. */}
+      <div className="relative flex h-app overflow-clip bg-sidebar">
         <a
           href="#main"
           className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-[70] focus:rounded-full focus:bg-surface focus:px-3 focus:py-1.5 focus:text-[13px] focus:shadow-soft-lg"
@@ -492,7 +507,7 @@ export function AppShell({ email, role, children }: AppShellProps) {
           className={cn(
             "hidden shrink-0 bg-sidebar text-sidebar-foreground lg:flex lg:flex-col",
             railReady && "transition-[width,opacity] duration-200 ease-out",
-            collapsed ? "lg:w-0 lg:overflow-hidden lg:opacity-0" : "lg:w-64"
+            collapsed ? "lg:w-0 lg:overflow-clip lg:opacity-0" : "lg:w-64"
           )}
         >
           <div className="flex h-full w-64 shrink-0 flex-col">
@@ -596,13 +611,19 @@ export function AppShell({ email, role, children }: AppShellProps) {
             </div>
           </header>
 
-          <main id="main" tabIndex={-1} className="relative min-h-0 flex-1 overflow-y-auto focus:outline-none">
+          {/* <main> scrolls vertically only. Its overflow-y:auto turns overflow-x
+              into auto as well, so the page wrapper below clips sideways overflow
+              (overflow-x-clip keeps overflow-y visible and position:sticky intact)
+              and is `relative`, so sr-only / absolute descendants — e.g. a wide
+              table's header labels — are contained and clipped by it instead of
+              widening <main>. Wide tables scroll inside their own Table scroller. */}
+          <main id="main" tabIndex={-1} className="relative min-h-0 min-w-0 flex-1 overflow-y-auto focus:outline-none">
             {width === "full" ? (
-              <div className="flex h-full min-h-0 flex-col">{children}</div>
+              <div className="relative flex h-full min-h-0 min-w-0 flex-col overflow-x-clip">{children}</div>
             ) : (
               <div
                 className={cn(
-                  "mx-auto w-full px-4 py-5 sm:px-6 sm:py-6",
+                  "relative mx-auto w-full min-w-0 overflow-x-clip px-4 py-5 sm:px-6 sm:py-6",
                   width === "wide" ? "max-w-7xl" : "max-w-6xl"
                 )}
               >

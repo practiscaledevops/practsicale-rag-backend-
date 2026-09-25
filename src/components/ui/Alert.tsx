@@ -89,11 +89,26 @@ export function Notice({
   );
 }
 
-/** Field-level error text; renders nothing when there is no message. */
-export function InlineError({ message, className }: { message?: string | null; className?: string }) {
+/**
+ * Field-level error text; renders nothing when there is no message. `live`
+ * (default true) announces it assertively. Pass `live={false}` for errors a
+ * bulk run wrote onto many rows at once: the bar's summary announces the run,
+ * and forty simultaneous alerts would drown it.
+ */
+export function InlineError({
+  message,
+  className,
+  live = true,
+  id,
+}: {
+  message?: string | null;
+  className?: string;
+  live?: boolean;
+  id?: string;
+}) {
   if (!message) return null;
   return (
-    <p role="alert" className={cn("text-xs text-danger", className)}>
+    <p id={id} role={live ? "alert" : undefined} className={cn("text-xs text-danger", className)}>
       {message}
     </p>
   );

@@ -12,13 +12,22 @@
 // document inspector lazy-loads chunks. Every document is shown with its
 // Operating Intelligence lane (class · domain) and, when it backs a compiled
 // knowledge object, that object's ref.
+// Documents in the middle pane can be selected (checkbox, shift-click range,
+// select-all for the shown rows) and acted on together from the bulk bar:
+// reprocess (a pool of 2 over the single reingest endpoint), add to / move to /
+// remove from a collection and delete (server bulk endpoints, ≤200 per request).
+// Every action marks only its own rows busy; the list updates locally and the
+// server list is refreshed once per action.
 
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   Folder,
+  FolderInput,
+  FolderMinus,
   FolderOpen,
+  FolderPlus,
   Library,
   FileText,
   Database,
@@ -30,6 +39,7 @@ import {
   Layers,
   FlaskConical,
   Loader2,
+  ChevronDown,
   ChevronRight,
   X,
   Pencil,
@@ -41,6 +51,16 @@ import { ACCESS_LEVELS } from "@/lib/knowledge-taxonomy";
 import { domainLabel, humanize } from "@/lib/intelligence-taxonomy";
 import { Alert, Notice } from "@/components/ui/Alert";
 import { Badge, StatusDot, Tag } from "@/components/ui/Badge";
+import {
+  BulkActionBar,
+  RowCheckbox,
+  SELECTED_ROW_CLASS,
+  SelectAllCheckbox,
+  useBulkRun,
+  usePendingIds,
+  useSelection,
+  type RowSelectBinding,
+} from "@/components/ui/Bulk";
 import { Button, buttonClass } from "@/components/ui/Button";
 import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { Dialog } from "@/components/ui/Dialog";
@@ -57,9 +77,25 @@ import { Select } from "@/components/ui/Select";
 import { CompactStat } from "@/components/ui/StatTile";
 import { Switch } from "@/components/ui/Switch";
 import { FilterTabs } from "@/components/ui/Tabs";
+import { BULK_CONCURRENCY, type BulkVerbs } from "@/lib/bulk";
 import { fmtDate, fmtDateTime, fmtInt, relTime } from "@/lib/format";
 import { ACCESS_LABELS, CLASS_LABEL, sourceTypeLabel, statusTone, triggerLabel } from "@/lib/ui-labels";
 import { cn } from "@/lib/utils";
+// Document actions shared with the Documents page (same endpoints, same copy).
+import {
+  CollectionPickerDialog,
+  DOCUMENT_DELETE_BATCH,
+  actionError,
+  changeMembership,
+  deleteDocument,
+  deleteDocuments,
+  mergeRowErrors,
+  reprocessDocument,
+  reprocessWorker,
+  useRefreshSoon,
+  type CollectionOption,
+  type MembershipChange,
+} from "@/app/(dash)/dashboard/documents/DocumentsClient";
 
 export interface WsSettings {
   owner?: string;
@@ -188,6 +224,28 @@ const INSPECTOR_CHUNKS_ID = "ws-inspector-chunks";
 
 type NoticeState = { tone: "success" | "danger"; text: string } | null;
 
+const NO_IDS: ReadonlySet<string> = new Set();
+
+/** A document's collections after a membership change into (or out of) `collectionId`. */
+function applyMembership(current: readonly string[], change: MembershipChange, collectionId: string): string[] {
+  switch (change.kind) {
+    case "add":
+      return current.includes(collectionId) ? [...current] : [...current, collectionId];
+    case "remove":
+      return current.filter((c) => c !== collectionId);
+    case "move":
+      return change.from
+        ? [...current.filter((c) => c !== change.from && c !== collectionId), collectionId]
+        : [collectionId];
+  }
+}
+
+function sameIds(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const set = new Set(a);
+  return b.every((x) => set.has(x));
+}
+
 export function KnowledgeWorkspace({
   collections,
   documents,
@@ -201,6 +259,7 @@ export function KnowledgeWorkspace({
   truncated?: boolean;
 }) {
   const router = useRouter();
+  const refreshSoon = useRefreshSoon();
   const { confirm, dialog } = useConfirm();
   const hydrated = useHydrated();
   const [selectedCol, setSelectedCol] = React.useState<string>(ALL);
@@ -208,17 +267,55 @@ export function KnowledgeWorkspace({
   const [colSearch, setColSearch] = React.useState("");
   const [filter, setFilter] = React.useState<FilterKey>("all");
   const [docSearch, setDocSearch] = React.useState("");
-  const [busyDoc, setBusyDoc] = React.useState<string | null>(null);
+  // Busy state per document (single actions) and one bulk run at a time:
+  // acting on a document never disables the others.
+  const pending = usePendingIds();
+  const bulk = useBulkRun();
   const [notice, setNotice] = React.useState<NoticeState>(null);
+  // Deleted here: hidden at once, without waiting for the server re-render.
+  const [removed, setRemoved] = React.useState<ReadonlySet<string>>(NO_IDS);
+  // Memberships changed here (doc id -> collection ids), until the refreshed list agrees.
+  const [membership, setMembership] = React.useState<Record<string, string[]>>({});
+  const [rowErrors, setRowErrors] = React.useState<Record<string, string>>({});
+  const [announcement, setAnnouncement] = React.useState("");
+  const [picker, setPicker] = React.useState<"add" | "move" | null>(null);
   // Which pane shows below xl (all three show from xl up; see the layout note below).
   const [pane, setPane] = React.useState<Pane>("collections");
   const docSearchRef = React.useRef<HTMLInputElement>(null);
   const workspaceRef = React.useRef<HTMLDivElement>(null);
 
+  // Drop membership overrides the refreshed server list now agrees with (or whose document is gone).
+  React.useEffect(() => {
+    setMembership((prev) => {
+      const keys = Object.keys(prev);
+      if (keys.length === 0) return prev;
+      const server = new Map(documents.map((d) => [d.id, d.collectionIds]));
+      const next = { ...prev };
+      for (const id of keys) {
+        const s = server.get(id);
+        if (!s || sameIds(s, prev[id])) delete next[id];
+      }
+      return Object.keys(next).length === keys.length ? prev : next;
+    });
+  }, [documents]);
+
+  // The server list with this session's deletes and membership changes applied.
+  const docs = React.useMemo(() => {
+    const changed = Object.keys(membership).length > 0;
+    if (removed.size === 0 && !changed) return documents;
+    const out: WsDocument[] = [];
+    for (const d of documents) {
+      if (removed.has(d.id)) continue;
+      const ids = membership[d.id];
+      out.push(ids ? { ...d, collectionIds: ids } : d);
+    }
+    return out;
+  }, [documents, removed, membership]);
+
   // Membership index: collectionId -> docs.
   const byCollection = React.useMemo(() => {
     const m = new Map<string, WsDocument[]>();
-    for (const d of documents) {
+    for (const d of docs) {
       if (d.collectionIds.length === 0) {
         const arr = m.get(UNFILED) ?? [];
         arr.push(d);
@@ -231,7 +328,7 @@ export function KnowledgeWorkspace({
       }
     }
     return m;
-  }, [documents]);
+  }, [docs]);
 
   // Enriched collection rows (chunk totals, freshness, health, attention).
   const enriched = React.useMemo(() => {
@@ -262,8 +359,8 @@ export function KnowledgeWorkspace({
   // Documents for the middle pane: the selected collection, then search, then the filter.
   const scopeDocs = React.useMemo(
     () =>
-      selectedCol === ALL ? documents : selectedCol === UNFILED ? byCollection.get(UNFILED) ?? [] : byCollection.get(selectedCol) ?? [],
-    [selectedCol, documents, byCollection]
+      selectedCol === ALL ? docs : selectedCol === UNFILED ? byCollection.get(UNFILED) ?? [] : byCollection.get(selectedCol) ?? [],
+    [selectedCol, docs, byCollection]
   );
 
   // Typing stays responsive over thousands of rows: filtering follows a deferred copy.
@@ -291,7 +388,19 @@ export function KnowledgeWorkspace({
   );
 
   const selectedCollection = collections.find((c) => c.id === selectedCol) ?? null;
-  const selectedDocument = documents.find((d) => d.id === selectedDoc) ?? null;
+  const selectedDocument = docs.find((d) => d.id === selectedDoc) ?? null;
+  // The real collection in scope (not All documents / Unfiled): Move leaves it, Remove acts on it.
+  const scopeCollection = selectedCol !== ALL && selectedCol !== UNFILED ? selectedCollection : null;
+  const collectionOptions = React.useMemo<CollectionOption[]>(
+    () => collections.map((c) => ({ id: c.id, name: c.name })),
+    [collections]
+  );
+
+  // Selection covers the documents in the middle pane; scope, search and filter changes prune it.
+  const paneIds = React.useMemo(() => paneDocs.map((d) => d.id), [paneDocs]);
+  const sel = useSelection(paneIds);
+
+  const isBusy = (id: string) => pending.isPending(id) || bulk.isActive(id);
 
   /**
    * Below xl, switching panes hides the one that held focus, so move focus to
@@ -310,6 +419,7 @@ export function KnowledgeWorkspace({
     setSelectedDoc(null);
     setFilter("all");
     setDocSearch("");
+    sel.clear();
     setPane("documents");
     focusPane("documents");
   }
@@ -320,41 +430,175 @@ export function KnowledgeWorkspace({
     focusPane("details");
   }
 
+  function setRowError(id: string, message: string | null) {
+    setRowErrors((prev) => {
+      if (message !== null) return { ...prev, [id]: message };
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }
+
+  function removeDocs(ids: readonly string[]) {
+    if (ids.length === 0) return;
+    setRemoved((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) next.add(id);
+      return next;
+    });
+    const gone = new Set(ids);
+    setSelectedDoc((cur) => (cur && gone.has(cur) ? null : cur));
+  }
+
+  // ---- single-document actions: only that row is busy ----------------------
   async function reprocess(id: string) {
-    setBusyDoc(id);
+    const name = docs.find((d) => d.id === id)?.title || "Untitled";
+    setRowError(id, null);
     setNotice(null);
     try {
-      const res = await fetch(`/api/admin/documents/${id}/reingest`, { method: "POST" });
-      setNotice(res.ok ? { tone: "success", text: "Reprocessing started." } : { tone: "danger", text: "Reprocess failed." });
-      if (res.ok) router.refresh();
-    } finally {
-      setBusyDoc(null);
+      const ran = await pending.run(id, async () => {
+        await reprocessDocument(id);
+        return true;
+      });
+      if (!ran) return;
+      setNotice({ tone: "success", text: `Reprocessed “${name}”.` });
+      refreshSoon();
+    } catch (e) {
+      const message = actionError(e);
+      setRowError(id, message);
+      setAnnouncement(`Couldn't reprocess “${name}”: ${message}`);
     }
   }
   async function del(id: string) {
+    const d = docs.find((x) => x.id === id);
     const ok = await confirm({
       title: "Delete this document and its chunks permanently?",
-      description: "This can't be undone.",
+      description: d?.objectId
+        ? "Its knowledge object keeps its record but loses this document. This can't be undone."
+        : "This can't be undone.",
       confirmLabel: "Delete",
       tone: "danger",
     });
     if (!ok) return;
-    setBusyDoc(id);
+    setRowError(id, null);
     try {
-      const res = await fetch(`/api/admin/documents?id=${encodeURIComponent(id)}`, { method: "DELETE" });
-      if (res.ok) {
-        if (selectedDoc === id) setSelectedDoc(null);
-        // The row (and its menu trigger) is about to go: keep focus on a stable heading.
-        focusPane("documents", true);
-        router.refresh();
-      } else setNotice({ tone: "danger", text: "Delete failed." });
-    } finally {
-      setBusyDoc(null);
+      const ran = await pending.run(id, async () => {
+        await deleteDocument(id);
+        return true;
+      });
+      if (!ran) return;
+      // The row (and its menu trigger) goes now: keep focus on a stable heading.
+      focusPane("documents", true);
+      removeDocs([id]);
+      refreshSoon();
+    } catch (e) {
+      const message = actionError(e);
+      setRowError(id, message);
+      setAnnouncement(`Couldn't delete “${d?.title || "Untitled"}”: ${message}`);
     }
   }
 
-  const totalDocs = documents.length;
-  const totalChunks = documents.reduce((n, d) => n + d.chunkCount, 0);
+  // ---- bulk actions on the selected documents ------------------------------
+  async function bulkReprocess() {
+    // Captured before the dialog, so the run uses the selection that was confirmed.
+    const ids = sel.selectedIds;
+    if (ids.length === 0) return;
+    if (ids.length > 1) {
+      const ok = await confirm({
+        title: `Reprocess ${fmtInt(ids.length)} documents?`,
+        description:
+          "Each is re-chunked and re-embedded, two at a time. Keep this page open until it finishes; you can cancel between documents.",
+        confirmLabel: `Reprocess ${fmtInt(ids.length)}`,
+      });
+      if (!ok) return;
+    }
+    void bulk.run(ids, reprocessWorker(pending), {
+      concurrency: BULK_CONCURRENCY.reingest,
+      verbs: { running: "Reprocessing", done: "reprocessed" },
+      onSettled: (r) => {
+        setRowErrors((prev) => mergeRowErrors(prev, r));
+        sel.settle(r);
+        if (r.ok.length > 0) refreshSoon();
+      },
+    });
+  }
+
+  async function bulkDelete() {
+    const ids = sel.selectedIds;
+    if (ids.length === 0) return;
+    const chosen = paneDocs.filter((d) => sel.selected.has(d.id));
+    const chunks = chosen.reduce((n, d) => n + d.chunkCount, 0);
+    const linked = chosen.filter((d) => d.objectId).length;
+    const n = ids.length;
+    const ok = await confirm({
+      title: `Delete ${fmtInt(n)} ${n === 1 ? "document" : "documents"} and ${n === 1 ? "its" : "their"} chunks permanently?`,
+      description:
+        `${fmtInt(chunks)} ${chunks === 1 ? "chunk leaves" : "chunks leave"} retrieval.` +
+        (linked > 0
+          ? ` ${fmtInt(linked)} ${linked === 1 ? "belongs" : "belong"} to a knowledge object, which keeps its record but loses ${linked === 1 ? "that document" : "those documents"}.`
+          : "") +
+        " This can't be undone.",
+      confirmLabel: `Delete ${fmtInt(n)}`,
+      tone: "danger",
+    });
+    if (!ok) return;
+    void bulk.runChunks(ids, (batch, signal) => deleteDocuments(batch, signal), {
+      size: DOCUMENT_DELETE_BATCH,
+      missingError: "Document not found",
+      verbs: { running: "Deleting", done: "deleted" },
+      onSettled: (r) => {
+        removeDocs(r.ok);
+        setRowErrors((prev) => mergeRowErrors(prev, r));
+        sel.settle(r);
+        if (r.ok.length > 0) refreshSoon();
+      },
+    });
+  }
+
+  /** Add / move / remove the selected documents, then mirror the change locally. */
+  function bulkMembership(change: MembershipChange, collection: CollectionOption, verbs: BulkVerbs) {
+    setPicker(null);
+    // Memberships as shown now, for documents the run changes.
+    const shown = new Map(docs.map((d) => [d.id, d.collectionIds]));
+    void bulk.runChunks(sel.selectedIds, (batch, signal) => changeMembership(collection.id, batch, change, signal), {
+      missingError: "Document not found",
+      verbs,
+      onSettled: (r) => {
+        if (r.ok.length > 0) {
+          setMembership((prev) => {
+            const next = { ...prev };
+            for (const id of r.ok) next[id] = applyMembership(prev[id] ?? shown.get(id) ?? [], change, collection.id);
+            return next;
+          });
+          refreshSoon();
+        }
+        setRowErrors((prev) => mergeRowErrors(prev, r));
+        sel.settle(r);
+      },
+    });
+  }
+
+  function pickTarget(mode: "add" | "move", to: CollectionOption) {
+    // "Adding 12 of 40…" → "38 added to “Brand” · 2 failed"
+    if (mode === "add") bulkMembership({ kind: "add" }, to, { running: "Adding", done: `added to “${to.name}”` });
+    else
+      bulkMembership({ kind: "move", from: scopeCollection?.id ?? null }, to, {
+        running: "Moving",
+        done: `moved to “${to.name}”`,
+      });
+  }
+
+  function bulkRemove() {
+    if (!scopeCollection) return;
+    bulkMembership({ kind: "remove" }, scopeCollection, {
+      running: "Removing",
+      done: `removed from “${scopeCollection.name}”`,
+    });
+  }
+
+  const totalDocs = docs.length;
+  const totalChunks = docs.reduce((n, d) => n + d.chunkCount, 0);
   const unfiled = byCollection.get(UNFILED) ?? [];
   const scopeName =
     selectedCol === ALL ? "All documents" : selectedCol === UNFILED ? "Unfiled" : selectedCollection?.name ?? "Documents";
@@ -379,6 +623,9 @@ export function KnowledgeWorkspace({
           />
         </div>
       )}
+      <span role="status" className="sr-only">
+        {announcement}
+      </span>
 
       <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)] xl:grid-cols-[280px_minmax(0,1fr)_320px]">
         {/* ============ LEFT: collections ============ */}
@@ -444,6 +691,8 @@ export function KnowledgeWorkspace({
         >
           <div className="shrink-0 space-y-2 border-b border-border p-3">
             <div className="flex min-w-0 items-center gap-2">
+              {/* Lines up with the row checkboxes below. */}
+              <SelectAllCheckbox {...sel.selectAllProps} label="Select all shown documents" className="ml-1.5" />
               <h2
                 tabIndex={-1}
                 className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground outline-none"
@@ -497,7 +746,9 @@ export function KnowledgeWorkspace({
                     key={d.id}
                     d={d}
                     active={selectedDoc === d.id}
-                    busy={busyDoc === d.id}
+                    selection={sel.rowProps(d.id)}
+                    busy={isBusy(d.id)}
+                    error={rowErrors[d.id]}
                     onSelect={() => pickDocument(d.id)}
                     onViewChunks={() => {
                       pickDocument(d.id);
@@ -508,13 +759,70 @@ export function KnowledgeWorkspace({
                         )
                       );
                     }}
-                    onReprocess={() => reprocess(d.id)}
-                    onDelete={() => del(d.id)}
+                    onReprocess={() => void reprocess(d.id)}
+                    onDelete={() => void del(d.id)}
                     onPlayground={() => router.push("/dashboard/playground")}
                   />
                 ))}
               </ul>
             )}
+            {/* Inside the pane's scroller so it sticks to the bottom of the list. */}
+            <BulkActionBar
+              count={sel.count}
+              onClear={sel.clear}
+              run={bulk}
+              noun={["document", "documents"]}
+              returnFocus={() => docSearchRef.current}
+              actions={[
+                {
+                  key: "reprocess",
+                  label: "Reprocess",
+                  icon: RefreshCw,
+                  onClick: () => void bulkReprocess(),
+                  title: "Rebuild chunks and embeddings, two documents at a time",
+                },
+                { key: "delete", label: "Delete", icon: Trash2, tone: "danger", onClick: () => void bulkDelete() },
+              ]}
+            >
+              {/* One menu for add / move / remove keeps the bar short in this narrow pane. */}
+              <Menu
+                label="Collection actions for the selected documents"
+                align="start"
+                width={260}
+                disabled={bulk.running}
+                triggerClassName={buttonClass({ variant: "secondary", size: "toolbar", className: "w-auto" })}
+                trigger={
+                  <>
+                    <Folder size={14} aria-hidden />
+                    Collection
+                    <ChevronDown size={14} aria-hidden className="text-muted-foreground" />
+                  </>
+                }
+                items={[
+                  {
+                    label: collectionOptions.length === 0 ? "Add to collection (create one first)" : "Add to collection…",
+                    icon: FolderPlus,
+                    onSelect: () => setPicker("add"),
+                    disabled: collectionOptions.length === 0,
+                  },
+                  {
+                    label: scopeCollection ? `Move out of “${scopeCollection.name}”…` : "Move to collection…",
+                    icon: FolderInput,
+                    onSelect: () => setPicker("move"),
+                    disabled: collectionOptions.length === 0,
+                  },
+                  ...(scopeCollection
+                    ? [
+                        {
+                          label: `Remove from “${scopeCollection.name}”`,
+                          icon: FolderMinus,
+                          onSelect: bulkRemove,
+                        } satisfies MenuItem,
+                      ]
+                    : []),
+                ]}
+              />
+            </BulkActionBar>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-0.5 border-t border-border px-3 py-2 text-xs text-muted-foreground">
             <span className="tabular-nums">{fmtInt(paneDocs.length)} shown</span>
@@ -536,13 +844,14 @@ export function KnowledgeWorkspace({
           {selectedDocument ? (
             <DocumentInspector
               d={selectedDocument}
-              busy={busyDoc === selectedDocument.id}
+              busy={isBusy(selectedDocument.id)}
+              error={rowErrors[selectedDocument.id]}
               onClose={() => {
                 setSelectedDoc(null);
                 setPane("documents");
                 focusPane("documents", true);
               }}
-              onReprocess={() => reprocess(selectedDocument.id)}
+              onReprocess={() => void reprocess(selectedDocument.id)}
             />
           ) : selectedCol !== ALL && selectedCol !== UNFILED && selectedCollection ? (
             <CollectionInspector
@@ -562,6 +871,16 @@ export function KnowledgeWorkspace({
         </aside>
       </div>
 
+      <CollectionPickerDialog
+        open={picker !== null}
+        mode={picker ?? "add"}
+        count={sel.count}
+        collections={collectionOptions}
+        excludeId={scopeCollection?.id ?? null}
+        sourceName={scopeCollection?.name ?? null}
+        onCancel={() => setPicker(null)}
+        onConfirm={(c) => pickTarget(picker ?? "add", c)}
+      />
       {dialog}
     </div>
   );
@@ -660,7 +979,9 @@ function RefChip({ d }: { d: WsDocument }) {
 function DocRow({
   d,
   active,
+  selection,
   busy,
+  error,
   onSelect,
   onViewChunks,
   onReprocess,
@@ -669,7 +990,11 @@ function DocRow({
 }: {
   d: WsDocument;
   active: boolean;
+  /** Bulk-selection checkbox binding (sel.rowProps). */
+  selection: RowSelectBinding;
   busy: boolean;
+  /** The last action on this document failed with this message. */
+  error?: string;
   onSelect: () => void;
   onViewChunks: () => void;
   onReprocess: () => void;
@@ -684,23 +1009,33 @@ function DocRow({
     { label: "View chunks", icon: Layers, onSelect: onViewChunks },
     { label: "Test retrieval", icon: FlaskConical, onSelect: onPlayground },
     { label: "Reprocess", icon: RefreshCw, onSelect: onReprocess, disabled: busy },
-    { label: "Delete permanently", icon: Trash2, danger: true, separatorBefore: true, onSelect: onDelete },
+    { label: "Delete permanently", icon: Trash2, danger: true, separatorBefore: true, onSelect: onDelete, disabled: busy },
   ];
 
-  // The row is a list item holding three siblings (select button, ref link,
-  // menu), so no control is nested in another and nothing fires twice.
+  // The row is a list item holding four siblings (checkbox, select button, ref
+  // link, menu), so no control is nested in another and nothing fires twice.
   return (
     <li
+      aria-busy={busy || undefined}
       className={cn(
         "flex items-center gap-1 rounded-lg pr-1 transition-colors",
-        active ? "bg-accent-soft" : "hover:bg-surface-muted"
+        // The open document keeps an inset bar, so it stays distinct from selected rows.
+        active
+          ? "bg-accent-soft shadow-[inset_3px_0_0_rgb(var(--accent))]"
+          : selection.checked
+            ? SELECTED_ROW_CLASS
+            : "hover:bg-surface-muted"
       )}
     >
+      {/* The label is the hit area; pt lines the box up with the title line. */}
+      <label className="flex shrink-0 cursor-pointer items-start self-stretch pl-2.5 pt-2.5">
+        <RowCheckbox {...selection} label={`Select “${name}”`} />
+      </label>
       <button
         type="button"
         onClick={onSelect}
         aria-current={active ? "true" : undefined}
-        className="flex min-w-0 flex-1 items-start gap-2.5 rounded-lg py-2 pl-3 pr-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        className="flex min-w-0 flex-1 items-start gap-2.5 rounded-lg py-2 pl-2 pr-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
         <FileText
           size={14}
@@ -736,6 +1071,11 @@ function DocRow({
             {/* Server-rendered row: RelTime keeps the SSR text time-zone independent. */}
             <RelTime iso={d.updatedAt} />
           </span>
+          {error && (
+            <span className="mt-0.5 block truncate text-xs text-danger" title={error}>
+              {error}
+            </span>
+          )}
         </span>
       </button>
       <RefChip d={d} />
@@ -1013,11 +1353,14 @@ interface InspectRun { status: string; trigger: string; chunks: number; error: s
 function DocumentInspector({
   d,
   busy,
+  error,
   onClose,
   onReprocess,
 }: {
   d: WsDocument;
   busy: boolean;
+  /** The last action on this document failed with this message. */
+  error?: string;
   onClose: () => void;
   onReprocess: () => void;
 }) {
@@ -1098,6 +1441,7 @@ function DocumentInspector({
             Open full page
           </Link>
         </div>
+        {error && <p className="mt-2 break-words text-xs text-danger">{error}</p>}
 
         <InspectorSection title="Metadata">
           <DefList>

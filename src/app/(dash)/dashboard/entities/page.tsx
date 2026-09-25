@@ -14,10 +14,11 @@ export const dynamic = "force-dynamic";
 export default async function EntitiesPage() {
   await requireAdmin();
   return (
-    <div>
+    // min-w-0: the table scrolls inside its own card; the page never widens the shell.
+    <div className="min-w-0">
       <PageHeader
         title="Entities"
-        description="The people, teams, clients, offers and frameworks mentioned inside your knowledge. Extracted automatically when knowledge is added."
+        description="The people, teams, clients, offers and frameworks mentioned inside your knowledge. Extracted automatically when knowledge is added; tick rows to merge duplicates or delete noise."
       />
       {/* The client reads the ?id= deep link with useSearchParams, which needs a Suspense boundary. */}
       <Suspense fallback={<Spinner label="Loading entities…" />}>

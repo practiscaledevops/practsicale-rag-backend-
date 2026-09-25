@@ -20,13 +20,18 @@ import {
   Alert,
   Badge,
   Button,
+  BulkActionBar,
   Field,
   IconButton,
   Input,
   Meter,
+  RowCheckbox,
   SectionCard,
   Select,
+  SelectAllCheckbox,
+  SELECTED_ROW_CLASS,
   TableCard,
+  useSelection,
 } from "@/components/ui";
 import { CATEGORIES, ACCESS_LEVELS, DEPARTMENTS } from "@/lib/knowledge-taxonomy";
 import { fmtBytes } from "@/lib/format";
@@ -87,6 +92,11 @@ const extOf = (name: string) => {
   return dot >= 0 ? name.slice(dot).toLowerCase() : "";
 };
 const isSupported = (name: string) => SUPPORTED.includes(extOf(name));
+
+/** Being sent or processed right now: can't be removed or retried. */
+const isInFlight = (e: FileEntry) => e.status === "uploading" || e.status === "processing";
+/** A failed upload of a supported file (an unsupported type would just fail again). */
+const isRetryable = (e: FileEntry) => e.status === "error" && isSupported(e.name);
 
 // Tolerant JSON parse for XHR response bodies (never throws).
 function parseJson(text: string): Record<string, unknown> {
@@ -297,15 +307,41 @@ export function UploadsClient({ collections = [] }: { collections?: CollectionOp
     e.target.value = ""; // allow re-selecting the same file
   }
 
+  /** Drop entries from the list (a queued one is skipped by the scheduler). Never an in-flight one. */
+  function removeMany(ids: Iterable<string>) {
+    const drop = new Set(ids);
+    for (const e of entries) if (drop.has(e.id) && !isInFlight(e)) removedRef.current.add(e.id);
+    // Re-checked against the latest state: an entry that started uploading meanwhile stays.
+    setEntries((prev) => prev.filter((e) => !drop.has(e.id) || isInFlight(e)));
+  }
+
   function removeEntry(id: string) {
-    removedRef.current.add(id);
-    setEntries((prev) => prev.filter((e) => e.id !== id));
+    removeMany([id]);
+  }
+
+  /** Put failed entries back on the same bounded queue (CONCURRENCY in flight). */
+  function retryMany(list: readonly FileEntry[]) {
+    const ids = new Set<string>();
+    for (const entry of list) {
+      if (!isRetryable(entry)) continue;
+      // A double click must not queue the same file twice.
+      if (queueRef.current.some((q) => q.id === entry.id)) continue;
+      removedRef.current.delete(entry.id);
+      queueRef.current.push(entry);
+      ids.add(entry.id);
+    }
+    if (ids.size === 0) return;
+    setEntries((prev) =>
+      prev.map((e) =>
+        ids.has(e.id) ? { ...e, status: "queued", progress: 0, error: undefined, result: undefined } : e
+      )
+    );
+    if (ids.size > 1) setLive(`Retrying ${ids.size} files`);
+    scheduleRef.current();
   }
 
   function retry(entry: FileEntry) {
-    patch(entry.id, { status: "queued", progress: 0, error: undefined, result: undefined });
-    queueRef.current.push(entry);
-    scheduleRef.current();
+    retryMany([entry]);
   }
 
   function clearFinished() {
@@ -319,10 +355,15 @@ export function UploadsClient({ collections = [] }: { collections?: CollectionOp
   ).length;
   const doneCount = entries.filter((e) => e.status === "done").length;
   const errorCount = entries.filter((e) => e.status === "error").length;
+  const retryable = entries.filter(isRetryable);
   const totalChunks = entries.reduce(
     (n, e) => n + (e.result && !e.result.skipped ? e.result.chunks : 0),
     0
   );
+
+  // Multi-select over the rows that can be removed or retried (not in flight).
+  const sel = useSelection(entries.filter((e) => !isInFlight(e)).map((e) => e.id));
+  const selectedRetryable = retryable.filter((e) => sel.isSelected(e.id));
 
   return (
     <div className="space-y-5">
@@ -452,14 +493,41 @@ export function UploadsClient({ collections = [] }: { collections?: CollectionOp
               : `${doneCount} done${errorCount ? `, ${errorCount} failed` : ""} · ${totalChunks} chunks added`
           }
           actions={
-            <Button variant="ghost" size="sm" onClick={clearFinished} disabled={doneCount + errorCount === 0}>
-              Clear finished
-            </Button>
+            <>
+              {retryable.length > 0 && (
+                <Button variant="secondary" size="sm" onClick={() => retryMany(retryable)}>
+                  <RotateCcw size={14} aria-hidden="true" />
+                  Retry all failed ({retryable.length})
+                </Button>
+              )}
+              <Button variant="ghost" size="sm" onClick={clearFinished} disabled={doneCount + errorCount === 0}>
+                Clear finished
+              </Button>
+            </>
           }
         >
+          <div className="flex items-center gap-3 border-b border-border px-4 py-2">
+            <label className="flex cursor-pointer items-center gap-3 text-xs text-muted-foreground">
+              <SelectAllCheckbox {...sel.selectAllProps} label="Select all files" />
+              {/* Always "Select all": it says what the box does (the bar shows the count). */}
+              Select all
+            </label>
+          </div>
           <ul>
             {entries.map((entry) => (
-              <li key={entry.id} className="flex items-start gap-3 border-t border-border px-4 py-2.5 first:border-t-0">
+              <li
+                key={entry.id}
+                className={cn(
+                  "flex items-start gap-3 border-t border-border px-4 py-2.5 first:border-t-0",
+                  sel.isSelected(entry.id) && SELECTED_ROW_CLASS
+                )}
+              >
+                {isInFlight(entry) ? (
+                  // Same footprint as the checkbox, so rows stay aligned while a file uploads.
+                  <span aria-hidden className="mt-0.5 h-4 w-4 shrink-0" />
+                ) : (
+                  <RowCheckbox {...sel.rowProps(entry.id)} label={`Select ${entry.name}`} className="mt-0.5" />
+                )}
                 <FileText size={16} className="mt-0.5 shrink-0 text-muted-foreground" aria-hidden="true" />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between gap-2">
@@ -519,6 +587,36 @@ export function UploadsClient({ collections = [] }: { collections?: CollectionOp
           )}
         </TableCard>
       )}
+
+      <BulkActionBar
+        count={sel.count}
+        onClear={sel.clear}
+        noun={["file", "files"]}
+        actions={[
+          {
+            key: "retry",
+            label: selectedRetryable.length < sel.count ? `Retry ${selectedRetryable.length}` : "Retry",
+            icon: RotateCcw,
+            tone: "primary",
+            onClick: () => {
+              retryMany(selectedRetryable);
+              sel.select(
+                selectedRetryable.map((e) => e.id),
+                false
+              );
+            },
+            hidden: selectedRetryable.length === 0,
+            title: selectedRetryable.length < sel.count ? "Retries the selected files that failed" : undefined,
+          },
+          {
+            key: "remove",
+            label: "Remove from list",
+            icon: X,
+            onClick: () => removeMany(sel.selectedIds),
+            title: "Removes the rows here. Files that already uploaded stay in Documents.",
+          },
+        ]}
+      />
     </div>
   );
 }

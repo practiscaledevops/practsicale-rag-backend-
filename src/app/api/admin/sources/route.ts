@@ -1,9 +1,10 @@
-// GET  /api/admin/sources — list this org's registered data sources.
-// POST /api/admin/sources — register a new PULL (pull_http) data source.
+// GET   /api/admin/sources — list this org's registered data sources.
+// POST  /api/admin/sources — register a new PULL (pull_http) data source.
+// PATCH /api/admin/sources — bulk pause / resume: { ids: uuid[] (1..200), is_active }.
 //
 // org_id is resolved SERVER-SIDE from the admin session (never from the request
-// body) and every query is filtered by it, so a request can only ever read or
-// create sources within the caller's own tenant.
+// body) and every query is filtered by it, so a request can only ever read,
+// create or change sources within the caller's own tenant.
 //
 // SECURITY: a source stores only a REFERENCE to where its secret lives
 // (auth_secret_ref = the NAME of a server env var), never the secret itself. The
@@ -13,9 +14,13 @@
 import { supabaseAdmin } from "@/lib/supabase";
 import { requireAdmin, AdminAuthError } from "@/lib/auth/admin";
 import { isAllowedSecretRef, SECRET_REF_RULE } from "@/lib/connectors/secret-ref";
+import { isDemo } from "@/lib/demo/mode";
+import { BULK_MAX_IDS } from "@/lib/bulk";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
+// PATCH is one set-based UPDATE; GET / POST are single queries.
+export const maxDuration = 60;
 
 // Mirrors the data_sources.source_type / auth_type / http_method CHECK constraints.
 const SOURCE_TYPES = ["transcript", "call_score", "coaching", "document"];
@@ -166,4 +171,86 @@ export async function POST(req: Request) {
   }
 
   return Response.json({ source: data }, { status: 201 });
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// The in-memory demo store uses short ids ("src-1"); only demo mode accepts them.
+const DEMO_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * A bulk id list from the request body: 1..BULK_MAX_IDS unique UUIDs. The ids
+ * go into a PostgREST `in` filter, so free text is rejected, not passed through.
+ */
+function parseIds(v: unknown): { ids: string[] } | { error: string } {
+  if (!Array.isArray(v) || v.length === 0) return { error: "ids must be a non-empty array of source ids" };
+  const re = isDemo() ? DEMO_ID_RE : UUID_RE;
+  if (!v.every((x): x is string => typeof x === "string" && re.test(x))) {
+    return { error: "ids must be UUIDs" };
+  }
+  // Dedupe case-insensitively, keeping the caller's first spelling.
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const id of v as string[]) {
+    const k = id.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    ids.push(id);
+  }
+  if (ids.length > BULK_MAX_IDS) return { error: `At most ${BULK_MAX_IDS} ids per request` };
+  return { ids };
+}
+
+// PATCH — pause or resume many sources at once (the list's bulk bar).
+//
+//   { ids: uuid[] (1..200), is_active: boolean }
+//
+// ONE UPDATE … WHERE id IN (…) AND org_id = <session org>, the same change the
+// single PATCH /api/admin/sources/[id] makes per row. Ids that are not in this
+// org (or do not exist) come back in `failed`; the rest in `ids`.
+export async function PATCH(req: Request) {
+  let admin;
+  try {
+    admin = await requireAdmin("data_sources:write");
+  } catch (e) {
+    const err = e as AdminAuthError;
+    return Response.json({ error: err.message }, { status: err.status ?? 401 });
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    const parsed: unknown = await req.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+    body = parsed as Record<string, unknown>;
+  } catch {
+    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const parsedIds = parseIds(body.ids);
+  if ("error" in parsedIds) return Response.json({ error: parsedIds.error }, { status: 400 });
+  if (typeof body.is_active !== "boolean") {
+    return Response.json({ error: "is_active must be true or false" }, { status: 400 });
+  }
+  const { ids } = parsedIds;
+  const isActive = body.is_active;
+
+  const db = supabaseAdmin();
+  const { data, error } = await db
+    .from("data_sources")
+    .update({ is_active: isActive, updated_at: new Date().toISOString() })
+    .in("id", ids)
+    .eq("org_id", admin.orgId) // tenant scope: never the body's org
+    .select("id, is_active");
+
+  if (error) return Response.json({ error: error.message }, { status: 500 });
+
+  // Postgres returns lower-case uuids: report back in the caller's spelling.
+  const done = new Set(((data ?? []) as { id: string }[]).map((r) => String(r.id).toLowerCase()));
+  const updated = ids.filter((id) => done.has(id.toLowerCase()));
+  const failed = ids
+    .filter((id) => !done.has(id.toLowerCase()))
+    .map((id) => ({ id, error: "Data source not found" }));
+
+  return Response.json({ ok: true, ids: updated, failed, is_active: isActive });
 }

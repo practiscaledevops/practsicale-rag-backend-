@@ -11,18 +11,28 @@
 // admin API (/api/admin/keys), which enforces the session + org server-side.
 
 import * as React from "react";
-import { Check, Copy, KeyRound, Plus, ShieldAlert } from "lucide-react";
+import { Ban, Check, Copy, KeyRound, Plus, ShieldAlert } from "lucide-react";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Field } from "@/components/ui/Field";
 import { Checkbox } from "@/components/ui/Checkbox";
 import { Badge } from "@/components/ui/Badge";
-import { Alert } from "@/components/ui/Alert";
+import { Alert, InlineError } from "@/components/ui/Alert";
 import { Dialog } from "@/components/ui/Dialog";
 import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Table, THead, TBody, Tr, Th, Td, TableCard, TableSkeletonRows } from "@/components/ui/Table";
+import {
+  BulkActionBar,
+  RowSelectCell,
+  SELECTED_ROW_CLASS,
+  SelectAllCell,
+  useBulkRun,
+  usePendingIds,
+  useSelection,
+} from "@/components/ui/Bulk";
+import { HttpError, bulkErrorMessage, requestJson, type BulkFailure } from "@/lib/bulk";
 import { fmtDate, fmtInt } from "@/lib/format";
 import { sourceTypeLabel } from "@/lib/ui-labels";
 
@@ -107,7 +117,7 @@ function CheckRow({
   return (
     <label
       htmlFor={id}
-      className="flex h-8 cursor-pointer items-center gap-2 rounded-lg px-2 text-[13px] text-foreground transition-colors hover:bg-surface-muted"
+      className="flex h-8 min-w-0 cursor-pointer items-center gap-2 rounded-lg px-2 text-[13px] text-foreground transition-colors hover:bg-surface-muted"
     >
       <Checkbox id={id} checked={checked} onChange={(e) => onChange(e.target.checked)} />
       <span className="min-w-0 truncate">{children}</span>
@@ -189,7 +199,43 @@ const CopyButton = React.forwardRef<HTMLButtonElement, { value: string; label: s
 // Page
 // ---------------------------------------------------------------------------
 
-const COLS = 8;
+const COLS = 9;
+
+interface KeysResponse {
+  keys?: ApiKey[];
+  dataSources?: DataSource[];
+  collections?: Collection[];
+}
+
+interface BulkRevokeResponse {
+  revoked?: string[];
+  failed?: BulkFailure[];
+  revoked_at?: string;
+}
+
+/** `record` without `ids` (returns the same object when nothing changes). */
+function omitIds(record: Record<string, string>, ids: readonly string[]): Record<string, string> {
+  if (!ids.some((id) => id in record)) return record;
+  const next = { ...record };
+  for (const id of ids) delete next[id];
+  return next;
+}
+
+/** Up to six names for a confirm dialog, then "+N more". */
+function NameList({ names }: { names: string[] }) {
+  const shown = names.slice(0, 6);
+  const rest = names.length - shown.length;
+  return (
+    <ul className="mt-2 list-disc space-y-0.5 pl-5 text-[13px] text-foreground">
+      {shown.map((n, i) => (
+        <li key={i} className="break-words">
+          {n}
+        </li>
+      ))}
+      {rest > 0 && <li className="list-none text-muted-foreground">+{fmtInt(rest)} more</li>}
+    </ul>
+  );
+}
 
 export default function KeysPage() {
   const [keys, setKeys] = React.useState<ApiKey[]>([]);
@@ -199,25 +245,33 @@ export default function KeysPage() {
   const [loadError, setLoadError] = React.useState<string | null>(null);
 
   const [dialogOpen, setDialogOpen] = React.useState(false);
-  const [revokingId, setRevokingId] = React.useState<string | null>(null);
-  const [revokeError, setRevokeError] = React.useState<string | null>(null);
+  /** A failed revoke, shown on its own row (key id → message). */
+  const [rowErrors, setRowErrors] = React.useState<Record<string, string>>({});
+  /** Rows whose error came from a bulk run: shown, not announced (the bar announces the run). */
+  const [quietIds, setQuietIds] = React.useState<ReadonlySet<string>>(() => new Set());
   const { confirm, dialog } = useConfirm();
   const newKeyRef = React.useRef<HTMLButtonElement>(null);
 
-  const load = React.useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
+  // Per-row busy state and one bulk run: revoking a key never disables the others.
+  const pending = usePendingIds();
+  const bulk = useBulkRun();
+
+  /** `silent` refreshes in the background: no skeleton, and a failure keeps the rows on screen. */
+  const load = React.useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
+    if (!silent) {
+      setLoading(true);
+      setLoadError(null);
+    }
     try {
-      const res = await fetch("/api/admin/keys");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Failed to load keys");
-      setKeys(data.keys ?? []);
-      setDataSources(data.dataSources ?? []);
-      setCollections(data.collections ?? []);
+      const data = await requestJson<KeysResponse>("/api/admin/keys");
+      setKeys(data?.keys ?? []);
+      setDataSources(data?.dataSources ?? []);
+      setCollections(data?.collections ?? []);
+      if (silent) setLoadError(null);
     } catch (e) {
-      setLoadError(e instanceof Error ? e.message : "Failed to load keys");
+      if (!silent) setLoadError(bulkErrorMessage(e, "Failed to load keys"));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
@@ -225,7 +279,28 @@ export default function KeysPage() {
     void load();
   }, [load]);
 
-  async function revoke(id: string) {
+  /** Reflect revocations locally (no reload) and clear those rows' errors. */
+  const markRevoked = React.useCallback((ids: readonly string[], at: string) => {
+    if (ids.length === 0) return;
+    const set = new Set(ids);
+    setKeys((prev) => prev.map((k) => (set.has(k.id) && !k.revoked_at ? { ...k, revoked_at: at } : k)));
+    setRowErrors((prev) => omitIds(prev, ids));
+  }, []);
+
+  /** The row's Revoke button is replaced by "—": if focus fell to <body>, land on a stable control. */
+  const refocusIfLost = React.useCallback(() => {
+    window.requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (!active || active === document.body) newKeyRef.current?.focus();
+    });
+  }, []);
+
+  // Keys that can still be revoked (active or expired), in display order.
+  const revocableIds = React.useMemo(() => keys.filter((k) => !k.revoked_at).map((k) => k.id), [keys]);
+  const sel = useSelection(revocableIds);
+
+  async function revoke(k: ApiKey) {
+    if (pending.isPending(k.id) || bulk.isActive(k.id)) return;
     const ok = await confirm({
       title: "Revoke this key?",
       description: "Apps using it will immediately lose access.",
@@ -233,25 +308,72 @@ export default function KeysPage() {
       confirmLabel: "Revoke key",
     });
     if (!ok) return;
-    setRevokeError(null);
-    setRevokingId(id);
+    setRowErrors((prev) => omitIds(prev, [k.id]));
+    setQuietIds((prev) => {
+      if (!prev.has(k.id)) return prev;
+      const next = new Set(prev);
+      next.delete(k.id);
+      return next;
+    });
     try {
-      const res = await fetch(`/api/admin/keys?id=${encodeURIComponent(id)}`, {
-        method: "DELETE",
+      await pending.run(k.id, async () => {
+        await requestJson(`/api/admin/keys?id=${encodeURIComponent(k.id)}`, { method: "DELETE" });
+        markRevoked([k.id], new Date().toISOString());
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Revoke failed");
-      // Reflect the new state without a full reload.
-      setKeys((prev) =>
-        prev.map((k) => (k.id === id ? { ...k, revoked_at: new Date().toISOString() } : k))
-      );
-      // The row's Revoke button is replaced by "—": move focus to a stable control.
-      newKeyRef.current?.focus();
+      refocusIfLost();
     } catch (e) {
-      setRevokeError(e instanceof Error ? e.message : "Revoke failed");
-    } finally {
-      setRevokingId(null);
+      setRowErrors((prev) => ({ ...prev, [k.id]: bulkErrorMessage(e, "Revoke failed") }));
+      // Revoked elsewhere (404): pick up the current state quietly.
+      if (e instanceof HttpError && e.status === 404) void load({ silent: true });
     }
+  }
+
+  async function revokeSelected() {
+    const ids = sel.selectedIds;
+    if (ids.length === 0 || bulk.running) return;
+    const n = ids.length;
+    const chosen = new Set(ids);
+    const names = keys.filter((k) => chosen.has(k.id)).map((k) => k.name ?? "Untitled");
+    const ok = await confirm({
+      title: n === 1 ? "Revoke 1 key?" : `Revoke ${fmtInt(n)} keys?`,
+      description: (
+        <>
+          Apps using {n === 1 ? "it" : "them"} will immediately lose access. This can&apos;t be undone.
+          <NameList names={names} />
+        </>
+      ),
+      tone: "danger",
+      confirmLabel: n === 1 ? "Revoke key" : `Revoke ${fmtInt(n)} keys`,
+    });
+    if (!ok) return;
+    setRowErrors((prev) => omitIds(prev, ids));
+    await bulk.runChunks(
+      ids,
+      async (batch, signal) => {
+        const r = await requestJson<BulkRevokeResponse>("/api/admin/keys", {
+          method: "DELETE",
+          json: { ids: batch },
+          signal,
+        });
+        const revoked = r?.revoked ?? [];
+        markRevoked(revoked, r?.revoked_at ?? new Date().toISOString());
+        return { ok: revoked, failed: r?.failed ?? [] };
+      },
+      {
+        verbs: { running: "Revoking", done: "revoked" },
+        missingError: "Key not found or already revoked",
+        onSettled: (result) => {
+          // Failed and cancelled keys stay selected (for Retry failed / Resume); failures show why on their row.
+          sel.settle(result);
+          if (result.failed.length > 0) {
+            setRowErrors((prev) => ({ ...prev, ...Object.fromEntries(result.failed.map((f) => [f.id, f.error])) }));
+            setQuietIds((prev) => new Set([...prev, ...result.failed.map((f) => f.id)]));
+          }
+          refocusIfLost();
+          void load({ silent: true });
+        },
+      }
+    );
   }
 
   const dsNames = React.useMemo(() => new Map(dataSources.map((d) => [d.id, d.name])), [dataSources]);
@@ -261,6 +383,7 @@ export default function KeysPage() {
   const head = (
     <THead>
       <tr>
+        <SelectAllCell {...sel.selectAllProps} label="Select all keys that can be revoked" />
         <Th>Name</Th>
         <Th>Capabilities</Th>
         <Th>Scope</Th>
@@ -276,7 +399,7 @@ export default function KeysPage() {
   );
 
   return (
-    <div>
+    <div className="min-w-0">
       <PageHeader
         title="API keys"
         description="Scoped keys that apps like the chatbot use to read the Brain."
@@ -294,15 +417,9 @@ export default function KeysPage() {
         </Alert>
       )}
 
-      {revokeError && (
-        <Alert tone="danger" className="mb-4" onDismiss={() => setRevokeError(null)}>
-          <span className="font-medium">Couldn&apos;t revoke the key.</span> {revokeError}
-        </Alert>
-      )}
-
       {loading ? (
         <TableCard>
-          <Table minWidth={960} caption="API keys" aria-busy="true">
+          <Table minWidth={1000} caption="API keys" aria-busy="true">
             {head}
             <TBody>
               <TableSkeletonRows rows={4} cols={COLS} />
@@ -328,15 +445,23 @@ export default function KeysPage() {
           title="Keys"
           meta={`${fmtInt(activeCount)} active · ${plural(keys.length, "key", "keys")} in total`}
         >
-          <Table minWidth={960} caption="API keys">
+          <Table minWidth={1000} caption="API keys">
             {head}
             <TBody>
               {keys.map((k) => {
                 const status = keyStatus(k);
                 const ds = scopeLimit(k.data_source_ids, dsNames, "data source", "data sources");
                 const cols = scopeLimit(k.collection_ids, colNames, "collection", "collections");
+                const busy = pending.isPending(k.id) || bulk.isActive(k.id);
+                const rowError = rowErrors[k.id];
+                const selected = sel.isSelected(k.id);
                 return (
-                  <Tr key={k.id}>
+                  <Tr key={k.id} className={selected ? SELECTED_ROW_CLASS : undefined}>
+                    {k.revoked_at ? (
+                      <Td className="w-10 p-0" />
+                    ) : (
+                      <RowSelectCell {...sel.rowProps(k.id)} label={`Select ${k.name ?? "untitled key"}`} disabled={busy} />
+                    )}
                     <Td>
                       <div className="font-medium">{k.name ?? "Untitled"}</div>
                       <code className="font-mono text-xs text-muted-foreground">{k.key_prefix ?? "—"}…</code>
@@ -387,12 +512,19 @@ export default function KeysPage() {
                         <Button
                           variant="danger-secondary"
                           size="sm"
-                          onClick={() => void revoke(k.id)}
-                          loading={revokingId === k.id}
+                          onClick={() => void revoke(k)}
+                          loading={busy}
                         >
-                          {revokingId === k.id ? "Revoking…" : "Revoke"}
+                          {busy ? "Revoking…" : "Revoke"}
                           <span className="sr-only"> {k.name ?? "key"}</span>
                         </Button>
+                      )}
+                      {rowError && (
+                        <InlineError
+                          message={`Couldn't revoke: ${rowError}`}
+                          live={!quietIds.has(k.id)}
+                          className="ml-auto mt-1 max-w-56 whitespace-normal text-right"
+                        />
                       )}
                     </Td>
                   </Tr>
@@ -402,6 +534,24 @@ export default function KeysPage() {
           </Table>
         </TableCard>
       )}
+
+      <BulkActionBar
+        count={sel.count}
+        onClear={sel.clear}
+        run={bulk}
+        noun={["key", "keys"]}
+        label="Bulk actions for API keys"
+        returnFocus={() => newKeyRef.current}
+        actions={[
+          {
+            key: "revoke",
+            label: "Revoke",
+            icon: Ban,
+            tone: "danger",
+            onClick: () => void revokeSelected(),
+          },
+        ]}
+      />
 
       {dialogOpen && (
         <CreateKeyDialog

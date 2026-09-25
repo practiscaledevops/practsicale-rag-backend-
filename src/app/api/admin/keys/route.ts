@@ -12,6 +12,8 @@
 import { supabaseAdmin } from "@/lib/supabase";
 import { requireAdmin, AdminAuthError } from "@/lib/auth/admin";
 import { generateApiKey } from "@/lib/auth/keys";
+import { isDemo } from "@/lib/demo/mode";
+import { BULK_MAX_IDS } from "@/lib/bulk";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
@@ -34,6 +36,24 @@ type Db = ReturnType<typeof supabaseAdmin>;
 function guard(e: unknown): Response {
   const err = e as AdminAuthError;
   return Response.json({ error: err.message }, { status: err.status ?? 401 });
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// The in-memory demo store uses short ids ("key-1"); only demo mode accepts them.
+const DEMO_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * A bulk id list from the request body: 1..max unique UUIDs. The ids go into a
+ * PostgREST `in` filter, so free text is rejected rather than passed through.
+ */
+function parseIds(v: unknown, field: string, max: number): { ids: string[] } | { error: string } {
+  if (!Array.isArray(v) || v.length === 0) return { error: `${field} must be a non-empty array of ids` };
+  if (v.length > max) return { error: `At most ${max} ${field} per request` };
+  const re = isDemo() ? DEMO_ID_RE : UUID_RE;
+  if (!v.every((x): x is string => typeof x === "string" && re.test(x))) {
+    return { error: `${field} must be UUIDs` };
+  }
+  return { ids: Array.from(new Set(v as string[])) };
 }
 
 /** Dedupe an unknown value into a string[] (non-strings dropped). */
@@ -186,6 +206,11 @@ export async function POST(req: Request) {
 }
 
 // DELETE — revoke a key (sets revoked_at). Idempotent-ish: a second revoke 404s.
+//
+//   ?id=<uuid>                  one key (the original contract, unchanged).
+//   JSON body { ids: uuid[] }   up to 200 keys in ONE set-based update. Keys not in
+//                               this org, or already revoked, come back in `failed`;
+//                               the rest in `revoked`.
 export async function DELETE(req: Request) {
   let admin;
   try {
@@ -194,12 +219,25 @@ export async function DELETE(req: Request) {
     return guard(e);
   }
 
+  const db = supabaseAdmin();
   const id = new URL(req.url).searchParams.get("id");
   if (!id) {
-    return Response.json({ error: "A key id is required" }, { status: 400 });
+    // No ?id=: the bulk form, when the body carries `ids`.
+    let body: Record<string, unknown> | null = null;
+    try {
+      const parsed: unknown = await req.json();
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        body = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // No body, or not JSON: the "id required" error below.
+    }
+    if (!body || body.ids === undefined) {
+      return Response.json({ error: "A key id is required" }, { status: 400 });
+    }
+    return revokeMany(db, admin.orgId, body.ids);
   }
 
-  const db = supabaseAdmin();
   const { data, error } = await db
     .from("api_keys")
     .update({ revoked_at: new Date().toISOString() })
@@ -220,4 +258,35 @@ export async function DELETE(req: Request) {
   }
 
   return Response.json({ id: data.id, revoked: true });
+}
+
+/** Bulk revoke: one UPDATE … WHERE id IN (…) AND org_id = <session org> AND revoked_at IS NULL. */
+async function revokeMany(db: Db, orgId: string, rawIds: unknown): Promise<Response> {
+  const parsed = parseIds(rawIds, "ids", BULK_MAX_IDS);
+  if ("error" in parsed) {
+    return Response.json({ error: parsed.error }, { status: 400 });
+  }
+  const { ids } = parsed;
+
+  const revokedAt = new Date().toISOString();
+  const { data, error } = await db
+    .from("api_keys")
+    .update({ revoked_at: revokedAt })
+    .in("id", ids)
+    .eq("org_id", orgId) // tenant scope
+    .is("revoked_at", null) // don't re-revoke
+    .select("id");
+
+  if (error) {
+    return Response.json({ error: error.message }, { status: 500 });
+  }
+
+  // Postgres returns lower-case uuids: report back in the caller's spelling.
+  const done = new Set(((data ?? []) as { id: string }[]).map((r) => r.id.toLowerCase()));
+  const revoked = ids.filter((k) => done.has(k.toLowerCase()));
+  const failed = ids
+    .filter((k) => !done.has(k.toLowerCase()))
+    .map((k) => ({ id: k, error: "Key not found or already revoked" }));
+
+  return Response.json({ revoked, failed, revoked_at: revokedAt });
 }
