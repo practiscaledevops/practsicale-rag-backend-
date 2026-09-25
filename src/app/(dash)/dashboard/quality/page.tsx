@@ -1,8 +1,10 @@
 import { requireAdmin } from "@/lib/auth/admin";
 import { getRagQuality } from "@/lib/rag-quality";
 import { getKnowledgeInsights } from "@/lib/knowledge-insights";
-import { PageHeader } from "@/components/ui/PageHeader";
 import { QualityClient } from "./QualityClient";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Query intelligence" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,7 +14,8 @@ const ALLOWED_DAYS = [7, 30, 90];
 /**
  * /dashboard/quality — Query intelligence: RAG answer-quality metrics (grounded
  * rate, refusals, fabricated citations, latency) computed from usage_events. Org
- * resolved server-side; the range comes from ?days (validated).
+ * resolved server-side; the range comes from ?days (validated). The client
+ * renders the page header so the range control can sit in its actions.
  */
 export default async function QualityPage({
   searchParams,
@@ -27,13 +30,5 @@ export default async function QualityPage({
     getKnowledgeInsights(admin.orgId, days),
   ]);
 
-  return (
-    <div>
-      <PageHeader
-        title="Query intelligence"
-        description="Answer quality signals from real chatbot usage: how often answers are grounded, refused, or cite something that wasn't retrieved — plus the most-used sources and the questions we can't answer yet."
-      />
-      <QualityClient data={data} insights={insights} />
-    </div>
-  );
+  return <QualityClient data={data} insights={insights} />;
 }

@@ -1,6 +1,9 @@
 import { requireAdmin } from "@/lib/auth/admin";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { AddKnowledgeWizard } from "./AddKnowledgeWizard";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Add knowledge" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,7 +20,7 @@ export default async function AddKnowledgePage() {
     <div>
       <PageHeader
         title="Add knowledge"
-        description="Paste text, upload a file (PDF, document, spreadsheet, screenshot or voice note) or paste a link (web page or YouTube). Choose what kind of knowledge it is; the Brain extracts, classifies, de-duplicates and files it."
+        description="Paste text, upload a file or add a link — the Brain classifies it and asks you to review before saving."
       />
       <AddKnowledgeWizard />
     </div>

@@ -16,14 +16,21 @@
 import * as React from "react";
 import Link from "next/link";
 import { UploadCloud, FileText, Loader2, CheckCircle2, XCircle, X, RotateCcw, Tags } from "lucide-react";
-import { Button } from "@/components/ui/Button";
-import { Badge } from "@/components/ui/Badge";
-import { Alert } from "@/components/ui/Alert";
-import { Input } from "@/components/ui/Input";
-import { Label } from "@/components/ui/Label";
-import { EmptyState } from "@/components/ui/EmptyState";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/Card";
+import {
+  Alert,
+  Badge,
+  Button,
+  Field,
+  IconButton,
+  Input,
+  Meter,
+  SectionCard,
+  Select,
+  TableCard,
+} from "@/components/ui";
 import { CATEGORIES, ACCESS_LEVELS, DEPARTMENTS } from "@/lib/knowledge-taxonomy";
+import { fmtBytes } from "@/lib/format";
+import { statusTone } from "@/lib/ui-labels";
 import { cn } from "@/lib/utils";
 
 export interface CollectionOption {
@@ -52,8 +59,9 @@ const EMPTY_CLASSIFICATION: Classification = {
   tags: "",
 };
 
-const selectCls =
-  "w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
+const CATEGORY_OPTIONS = CATEGORIES.map((c) => ({ value: c, label: c }));
+const ACCESS_OPTIONS = ACCESS_LEVELS.map((a) => ({ value: a.value, label: `${a.label} — ${a.scope}` }));
+const DEPARTMENT_OPTIONS = DEPARTMENTS.map((d) => ({ value: d, label: d }));
 
 // Formats we can send. .pdf is extracted server-side; the rest are read as UTF-8.
 const ACCEPT = ".md,.markdown,.txt,.text,.pdf";
@@ -80,12 +88,6 @@ const extOf = (name: string) => {
 };
 const isSupported = (name: string) => SUPPORTED.includes(extOf(name));
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 // Tolerant JSON parse for XHR response bodies (never throws).
 function parseJson(text: string): Record<string, unknown> {
   try {
@@ -96,28 +98,39 @@ function parseJson(text: string): Record<string, unknown> {
   }
 }
 
+// Each upload status in the shared status vocabulary (queued = neutral,
+// in flight = accent, done = success, failed = danger).
+const STATUS_KEY: Record<Status, string> = {
+  queued: "queued",
+  uploading: "in_progress",
+  processing: "processing",
+  done: "done",
+  error: "failed",
+};
+
 function StatusPill({ entry }: { entry: FileEntry }) {
+  const tone = statusTone(STATUS_KEY[entry.status]);
   switch (entry.status) {
     case "queued":
-      return <Badge tone="neutral">Queued</Badge>;
+      return <Badge tone={tone}>Queued</Badge>;
     case "uploading":
       return (
-        <Badge tone="accent" className="gap-1.5">
-          <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+        <Badge tone={tone}>
+          <Loader2 size={12} className="animate-spin" aria-hidden="true" />
           Uploading {entry.progress}%
         </Badge>
       );
     case "processing":
       return (
-        <Badge tone="accent" className="gap-1.5">
-          <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+        <Badge tone={tone}>
+          <Loader2 size={12} className="animate-spin" aria-hidden="true" />
           Processing…
         </Badge>
       );
     case "done":
       return (
-        <Badge tone="success" className="gap-1.5">
-          <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+        <Badge tone={tone}>
+          <CheckCircle2 size={12} aria-hidden="true" />
           {entry.result?.skipped
             ? "Already ingested"
             : `Done · ${entry.result?.chunks ?? 0} chunks`}
@@ -125,8 +138,8 @@ function StatusPill({ entry }: { entry: FileEntry }) {
       );
     case "error":
       return (
-        <Badge tone="danger" className="gap-1.5" title={entry.error}>
-          <XCircle className="h-3 w-3" aria-hidden="true" />
+        <Badge tone={tone}>
+          <XCircle size={12} aria-hidden="true" />
           Failed
         </Badge>
       );
@@ -312,258 +325,199 @@ export function UploadsClient({ collections = [] }: { collections?: CollectionOp
   );
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {/* Screen-reader announcements for status changes. */}
       <p className="sr-only" role="status" aria-live="polite">
         {live}
       </p>
 
       {/* Step 1 — classify the batch. Applied to every file uploaded below. */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Tags className="h-4 w-4 text-accent" aria-hidden="true" />
-            Classify this batch
-          </CardTitle>
-          <CardDescription>
-            These are applied to every file you upload next, and populate the Documents
-            table and governance views. All optional — set what you know.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="up-collection">Collection</Label>
-              <select id="up-collection" className={selectCls} value={classify.collectionId} onChange={(e) => setField("collectionId", e.target.value)}>
-                <option value="">No collection</option>
-                {collections.map((c) => (
-                  <option key={c.id} value={c.id}>{c.name}</option>
-                ))}
-              </select>
-            </div>
+      <SectionCard
+        icon={Tags}
+        title="Classify this batch"
+        description="Applied to every file you upload next, and shown in Documents and the governance views. All optional: set what you know."
+        actions={
+          (classify.collectionId || classify.category || classify.access) ? (
+            <Button variant="ghost" size="sm" onClick={() => setClassify(EMPTY_CLASSIFICATION)}>
+              Clear
+            </Button>
+          ) : undefined
+        }
+      >
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <Field label="Collection">
+            <Select
+              id="up-collection"
+              value={classify.collectionId}
+              onChange={(e) => setField("collectionId", e.target.value)}
+              placeholder="No collection"
+              options={collections.map((c) => ({ value: c.id, label: c.name }))}
+            />
+          </Field>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="up-category">Category</Label>
-              <select id="up-category" className={selectCls} value={classify.category} onChange={(e) => setField("category", e.target.value)}>
-                <option value="">Uncategorized</option>
-                {CATEGORIES.map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
-              </select>
-            </div>
+          <Field label="Category">
+            <Select
+              id="up-category"
+              value={classify.category}
+              onChange={(e) => setField("category", e.target.value)}
+              placeholder="Uncategorized"
+              options={CATEGORY_OPTIONS}
+            />
+          </Field>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="up-access">Access level</Label>
-              <select id="up-access" className={selectCls} value={classify.access} onChange={(e) => setField("access", e.target.value)}>
-                <option value="">Team (default)</option>
-                {ACCESS_LEVELS.map((a) => (
-                  <option key={a.value} value={a.value}>{a.label} — {a.scope}</option>
-                ))}
-              </select>
-            </div>
+          <Field label="Access level">
+            <Select
+              id="up-access"
+              value={classify.access}
+              onChange={(e) => setField("access", e.target.value)}
+              placeholder="Team (default)"
+              options={ACCESS_OPTIONS}
+            />
+          </Field>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="up-department">Department</Label>
-              <select id="up-department" className={selectCls} value={classify.department} onChange={(e) => setField("department", e.target.value)}>
-                <option value="">Any</option>
-                {DEPARTMENTS.map((d) => (
-                  <option key={d} value={d}>{d}</option>
-                ))}
-              </select>
-            </div>
+          <Field label="Department">
+            <Select
+              id="up-department"
+              value={classify.department}
+              onChange={(e) => setField("department", e.target.value)}
+              placeholder="Any"
+              options={DEPARTMENT_OPTIONS}
+            />
+          </Field>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="up-owner">Source owner</Label>
-              <Input id="up-owner" placeholder="e.g. Afra" value={classify.owner} onChange={(e) => setField("owner", e.target.value)} />
-            </div>
+          <Field label="Source owner">
+            <Input id="up-owner" placeholder="e.g. Afra" value={classify.owner} onChange={(e) => setField("owner", e.target.value)} />
+          </Field>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="up-review">Review date</Label>
-              <Input id="up-review" type="date" value={classify.reviewDate} onChange={(e) => setField("reviewDate", e.target.value)} />
-            </div>
+          <Field label="Review date">
+            <Input id="up-review" type="date" value={classify.reviewDate} onChange={(e) => setField("reviewDate", e.target.value)} />
+          </Field>
 
-            <div className="space-y-1.5 sm:col-span-2 lg:col-span-3">
-              <Label htmlFor="up-tags">Tags</Label>
-              <Input id="up-tags" placeholder="comma, separated, tags" value={classify.tags} onChange={(e) => setField("tags", e.target.value)} />
-            </div>
-          </div>
+          <Field label="Tags" hint="Comma-separated." className="sm:col-span-2 lg:col-span-3">
+            <Input id="up-tags" placeholder="pricing, onboarding, q3" value={classify.tags} onChange={(e) => setField("tags", e.target.value)} />
+          </Field>
+        </div>
 
-          {(classify.collectionId || classify.category || classify.access) && (
-            <div className="mt-3 flex items-center justify-between gap-2">
-              <p className="text-xs text-muted-foreground">
-                New uploads inherit this classification.
-              </p>
-              <Button variant="ghost" size="sm" onClick={() => setClassify(EMPTY_CLASSIFICATION)}>
-                Clear
-              </Button>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+        {(classify.collectionId || classify.category || classify.access) && (
+          <p className="mt-3 text-xs text-muted-foreground">New uploads inherit this classification.</p>
+        )}
+      </SectionCard>
 
       {/* Step 2 — upload the files. */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Upload documents</CardTitle>
-          <CardDescription>
-            Drag files onto the box below (or browse) to add them to the knowledge base. They
-            are chunked, embedded, and made searchable. Supports Markdown, plain text, and PDF.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {/* The whole drop zone is a single focusable button: keyboard-activatable
-              (Enter/Space open the picker) with no nested interactive controls. */}
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            onDragEnter={onDragEnter}
-            onDragOver={onDragOver}
-            onDragLeave={onDragLeave}
-            onDrop={onDrop}
-            aria-label="Upload files: drag and drop here, or activate to browse"
-            className={cn(
-              "flex w-full flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-12 text-center transition-colors",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-              dragging
-                ? "border-accent bg-accent/10"
-                : "border-border bg-surface/50 hover:bg-surface-muted"
-            )}
-          >
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-surface-muted">
-              <UploadCloud className="h-6 w-6 text-muted-foreground" aria-hidden="true" />
-            </div>
-            <div>
-              <p className="text-sm font-medium">
-                {dragging ? "Drop to upload" : "Drag & drop files here"}
-              </p>
-              <p className="mt-1 text-sm text-muted-foreground">
-                or click to browse · .md, .txt, .pdf · multiple files welcome
-              </p>
-            </div>
-            <span className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm font-medium">
-              <FileText className="h-4 w-4" aria-hidden="true" />
-              Browse files
-            </span>
-          </button>
-          <input
-            ref={inputRef}
-            type="file"
-            accept={ACCEPT}
-            multiple
-            className="sr-only"
-            tabIndex={-1}
-            aria-hidden="true"
-            onChange={onPick}
-          />
-        </CardContent>
-      </Card>
-
-      {entries.length === 0 ? (
-        <EmptyState
-          icon={FileText}
-          title="No uploads yet"
-          description="Files you drop or choose will appear here with live progress and results."
+      <SectionCard
+        icon={UploadCloud}
+        title="Upload files"
+        description="Each file is extracted, redacted, chunked, embedded and indexed so it can be retrieved."
+      >
+        {/* The whole drop zone is a single focusable button: keyboard-activatable
+            (Enter/Space open the picker) with no nested interactive controls. */}
+        <button
+          type="button"
+          onClick={() => inputRef.current?.click()}
+          onDragEnter={onDragEnter}
+          onDragOver={onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+          className={cn(
+            "flex w-full flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-border bg-surface-muted/40 px-4 py-8 text-center text-[13px] text-muted-foreground transition-colors hover:border-accent/40 hover:bg-accent-softer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            dragging && "border-accent/60 bg-accent-softer"
+          )}
+        >
+          <span aria-hidden className="grid h-10 w-10 place-items-center rounded-full bg-accent-soft text-accent">
+            <UploadCloud size={18} />
+          </span>
+          <span className="block text-sm font-medium text-foreground">
+            {dragging ? "Drop to upload" : "Drag and drop files here"}
+          </span>
+          <span className="block">or click to browse · .md, .txt, .pdf · multiple files welcome</span>
+        </button>
+        <input
+          ref={inputRef}
+          type="file"
+          accept={ACCEPT}
+          multiple
+          className="sr-only"
+          tabIndex={-1}
+          aria-hidden="true"
+          onChange={onPick}
         />
-      ) : (
-        <Card>
-          <CardHeader>
-            <CardTitle>Files</CardTitle>
-            <CardDescription>
-              {inFlight > 0
-                ? `${inFlight} in progress…`
-                : `${doneCount} done${errorCount ? `, ${errorCount} failed` : ""} · ${totalChunks} chunks added`}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <ul className="divide-y divide-border rounded-lg border border-border">
-              {entries.map((entry) => (
-                <li key={entry.id} className="flex items-start gap-3 px-3 py-3">
-                  <FileText
-                    className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground"
-                    aria-hidden="true"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="truncate text-sm font-medium">{entry.name}</p>
-                      <span className="shrink-0 text-xs text-muted-foreground">
-                        {formatBytes(entry.size)}
+      </SectionCard>
+
+      {entries.length > 0 && (
+        <TableCard
+          title="Files"
+          meta={
+            inFlight > 0
+              ? `${inFlight} in progress…`
+              : `${doneCount} done${errorCount ? `, ${errorCount} failed` : ""} · ${totalChunks} chunks added`
+          }
+          actions={
+            <Button variant="ghost" size="sm" onClick={clearFinished} disabled={doneCount + errorCount === 0}>
+              Clear finished
+            </Button>
+          }
+        >
+          <ul>
+            {entries.map((entry) => (
+              <li key={entry.id} className="flex items-start gap-3 border-t border-border px-4 py-2.5 first:border-t-0">
+                <FileText size={16} className="mt-0.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="truncate text-[13px] font-medium text-foreground">{entry.name}</p>
+                    <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                      {fmtBytes(entry.size)}
+                    </span>
+                  </div>
+
+                  {(entry.status === "uploading" || entry.status === "processing") && (
+                    <Meter
+                      className="mt-2"
+                      value={entry.progress}
+                      tone="accent"
+                      indeterminate={entry.status === "processing"}
+                      label={`Upload progress for ${entry.name}`}
+                    />
+                  )}
+
+                  <div className="mt-1.5 flex min-w-0 items-start gap-2">
+                    <StatusPill entry={entry} />
+                    {entry.status === "error" && entry.error && (
+                      <span className="min-w-0 break-words text-xs text-muted-foreground">
+                        {entry.error}
                       </span>
-                    </div>
-
-                    {(entry.status === "uploading" || entry.status === "processing") && (
-                      <div
-                        className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-surface-muted"
-                        role="progressbar"
-                        aria-valuenow={entry.status === "processing" ? undefined : entry.progress}
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                      >
-                        <div
-                          className={cn(
-                            "h-full rounded-full bg-accent transition-all",
-                            entry.status === "processing" && "animate-pulse"
-                          )}
-                          style={{
-                            width: entry.status === "processing" ? "100%" : `${entry.progress}%`,
-                          }}
-                        />
-                      </div>
-                    )}
-
-                    <div className="mt-2 flex items-center gap-2">
-                      <StatusPill entry={entry} />
-                      {entry.status === "error" && entry.error && (
-                        <span className="truncate text-xs text-muted-foreground" title={entry.error}>
-                          {entry.error}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="flex shrink-0 items-center gap-1">
-                    {entry.status === "error" && isSupported(entry.name) && (
-                      <Button variant="ghost" size="sm" onClick={() => retry(entry)}>
-                        <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-                        Retry
-                      </Button>
-                    )}
-                    {entry.status !== "uploading" && entry.status !== "processing" && (
-                      <button
-                        type="button"
-                        onClick={() => removeEntry(entry.id)}
-                        className="rounded p-1 text-muted-foreground hover:bg-surface-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        aria-label={`Remove ${entry.name}`}
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
                     )}
                   </div>
-                </li>
-              ))}
-            </ul>
+                </div>
 
-            {doneCount > 0 && (
+                <div className="flex shrink-0 items-center gap-1">
+                  {entry.status === "error" && isSupported(entry.name) && (
+                    <Button variant="ghost" size="sm" onClick={() => retry(entry)}>
+                      <RotateCcw size={14} aria-hidden="true" />
+                      Retry
+                    </Button>
+                  )}
+                  {entry.status !== "uploading" && entry.status !== "processing" && (
+                    <IconButton size="sm" onClick={() => removeEntry(entry.id)} aria-label={`Remove ${entry.name}`}>
+                      <X size={14} aria-hidden="true" />
+                    </IconButton>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+
+          {doneCount > 0 && (
+            <div className="border-t border-border p-4">
               <Alert tone="success">
                 Ingested files are now searchable.{" "}
-                <Link href="/dashboard/documents" className="font-medium text-accent underline">
+                <Link href="/dashboard/documents" className="font-medium text-accent-strong underline underline-offset-2">
                   View documents
                 </Link>
                 .
               </Alert>
-            )}
-
-            <div className="flex items-center justify-end">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={clearFinished}
-                disabled={doneCount + errorCount === 0}
-              >
-                Clear finished
-              </Button>
             </div>
-          </CardContent>
-        </Card>
+          )}
+        </TableCard>
       )}
     </div>
   );

@@ -11,16 +11,24 @@
 // session + org server-side. It never resolves org or touches the DB directly.
 
 import * as React from "react";
-import { Plug, Plus, Trash2, KeyRound } from "lucide-react";
-import { PageHeader } from "@/components/ui/PageHeader";
-import { Card, CardContent } from "@/components/ui/Card";
-import { Button } from "@/components/ui/Button";
-import { Input } from "@/components/ui/Input";
-import { Label } from "@/components/ui/Label";
-import { Badge } from "@/components/ui/Badge";
-import { Alert } from "@/components/ui/Alert";
-import { Dialog } from "@/components/ui/Dialog";
-import { EmptyState } from "@/components/ui/EmptyState";
+import { Globe, KeyRound, Plug, Plus, Trash2 } from "lucide-react";
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Dialog,
+  EmptyState,
+  Field,
+  Input,
+  PageHeader,
+  Select,
+  Skeleton,
+  Textarea,
+  useConfirm,
+} from "@/components/ui";
+import { fmtDate } from "@/lib/format";
+import { statusTone } from "@/lib/ui-labels";
 
 // ---------------------------------------------------------------------------
 // Types + labels
@@ -57,12 +65,6 @@ const KIND_LABELS: Record<string, string> = {
   mcp: "MCP server",
   http_api: "HTTP API",
 };
-
-function formatDate(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-}
 
 // ---------------------------------------------------------------------------
 // Page
@@ -117,35 +119,51 @@ export default function ConnectorsPage() {
     <div>
       <PageHeader
         title="Connectors"
-        description="External integrations — MCP servers and HTTP APIs — that granted keys can use."
+        description="Outside tools and APIs that API keys can be granted."
         actions={
-          <Button onClick={() => setDialogOpen(true)}>
-            <Plus className="h-4 w-4" aria-hidden="true" />
-            Add connector
+          <Button size="toolbar" onClick={() => setDialogOpen(true)}>
+            <Plus size={14} aria-hidden />
+            New connector
           </Button>
         }
       />
 
       {loadError && (
         <Alert tone="danger" title="Couldn't load connectors" className="mb-4">
-          {loadError}
+          <span className="text-danger">{loadError}</span>
         </Alert>
       )}
 
       {loading ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
+        <div role="status" className="space-y-4">
+          <span className="sr-only">Loading connectors…</span>
+          {[0, 1].map((i) => (
+            <Card key={i} aria-hidden className="p-4">
+              <div className="flex items-center gap-3">
+                <Skeleton className="h-8 w-8 shrink-0" />
+                <div className="min-w-0 flex-1 space-y-2">
+                  <Skeleton className="h-4 w-40" />
+                  <Skeleton className="h-3 w-64 max-w-full" />
+                </div>
+              </div>
+              <Skeleton className="mt-4 h-9 w-full rounded-xl" />
+            </Card>
+          ))}
+        </div>
       ) : connectors.length === 0 ? (
-        <EmptyState
-          icon={Plug}
-          title="No connectors yet"
-          description="Register an MCP server or HTTP API to grant it to consumer apps."
-          action={
-            <Button onClick={() => setDialogOpen(true)}>
-              <Plus className="h-4 w-4" aria-hidden="true" />
-              Add connector
-            </Button>
-          }
-        />
+        !loadError && (
+          <EmptyState
+            icon={Plug}
+            title="No connectors yet"
+            description="Register an MCP server or HTTP API to grant it to consumer apps."
+            action={
+              <Button size="toolbar" onClick={() => setDialogOpen(true)}>
+                <Plus size={14} aria-hidden />
+                New connector
+              </Button>
+            }
+          />
+        )
       ) : (
         <div className="space-y-4">
           {connectors.map((c) => (
@@ -189,10 +207,12 @@ function ConnectorCard({
   const [granting, setGranting] = React.useState(false);
   const [busyGrant, setBusyGrant] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const { confirm, dialog } = useConfirm();
 
   // Keys that can still be granted: active and not already linked.
   const grantedIds = new Set(connector.grants.map((g) => g.api_key_id));
   const available = apiKeys.filter((k) => !k.revoked_at && !grantedIds.has(k.id));
+  const KindIcon = connector.kind === "http_api" ? Globe : Plug;
 
   async function grant() {
     if (!selectedKey) return;
@@ -245,42 +265,56 @@ function ConnectorCard({
     }
   }
 
+  async function confirmUngrant(g: Grant) {
+    const keyName = g.key_name ?? "Untitled key";
+    const ok = await confirm({
+      title: `Remove access for ${keyName}?`,
+      description: `Apps using this key can no longer use ${connector.name}. You can grant it again later.`,
+      confirmLabel: "Remove access",
+      tone: "danger",
+    });
+    if (ok) await ungrant(g.id);
+  }
+
   return (
     <Card>
-      <CardContent className="p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h3 className="text-base font-semibold">{connector.name}</h3>
-              <Badge tone="accent">{KIND_LABELS[connector.kind] ?? connector.kind}</Badge>
-              {!connector.is_active && <Badge tone="warning">Inactive</Badge>}
-            </div>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Added {formatDate(connector.created_at)}
-              {connector.auth_secret_ref && (
-                <>
-                  {" · secret ref "}
-                  <code className="rounded bg-surface-muted px-1 py-0.5 font-mono">
-                    {connector.auth_secret_ref}
-                  </code>
-                </>
-              )}
-            </p>
+      <div className="flex items-start gap-3 px-4 pt-4">
+        <span aria-hidden className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-accent-soft text-accent">
+          <KindIcon size={16} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-sm font-semibold text-foreground">{connector.name}</h2>
+            <Badge tone="neutral">{KIND_LABELS[connector.kind] ?? connector.kind}</Badge>
+            <Badge tone={statusTone(connector.is_active ? "active" : "inactive")}>
+              {connector.is_active ? "Active" : "Inactive"}
+            </Badge>
           </div>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Added {fmtDate(connector.created_at)}
+            {connector.auth_secret_ref && (
+              <>
+                {" · secret ref "}
+                <code className="rounded-md bg-surface-muted px-1.5 py-0.5 font-mono text-[11px] text-foreground">
+                  {connector.auth_secret_ref}
+                </code>
+              </>
+            )}
+          </p>
         </div>
+      </div>
 
+      <div className="space-y-4 p-4">
         {/* Config preview — read-only, treated as data. */}
         {Object.keys(connector.config ?? {}).length > 0 && (
-          <pre className="mt-3 max-h-40 overflow-auto rounded-lg border border-border bg-surface-muted p-3 text-xs">
+          <pre className="max-h-40 overflow-auto rounded-xl border border-border bg-surface-muted p-3 font-mono text-xs text-foreground">
             {JSON.stringify(connector.config, null, 2)}
           </pre>
         )}
 
         {/* Grants */}
-        <div className="mt-4 border-t border-border pt-4">
-          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Granted keys
-          </p>
+        <div className="border-t border-border pt-4">
+          <h3 className="mb-2 text-xs font-medium text-muted-foreground">Granted keys</h3>
 
           {error && (
             <Alert tone="danger" className="mb-3">
@@ -289,19 +323,19 @@ function ConnectorCard({
           )}
 
           {connector.grants.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Not granted to any key yet.</p>
+            <p className="text-[13px] text-muted-foreground">Not granted to any key yet.</p>
           ) : (
             <ul className="space-y-1.5">
               {connector.grants.map((g) => (
                 <li
                   key={g.id}
-                  className="flex items-center justify-between gap-3 rounded-lg bg-surface-muted px-3 py-2"
+                  className="flex items-center justify-between gap-3 rounded-xl bg-surface-muted px-3 py-1.5"
                 >
-                  <span className="flex min-w-0 items-center gap-2 text-sm">
-                    <KeyRound className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-                    <span className="truncate font-medium">{g.key_name ?? "Untitled key"}</span>
+                  <span className="flex min-w-0 items-center gap-2 text-[13px]">
+                    <KeyRound size={14} className="shrink-0 text-muted-foreground" aria-hidden />
+                    <span className="truncate font-medium text-foreground">{g.key_name ?? "Untitled key"}</span>
                     {g.key_prefix && (
-                      <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+                      <code className="rounded-md bg-surface px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
                         {g.key_prefix}…
                       </code>
                     )}
@@ -309,11 +343,12 @@ function ConnectorCard({
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => ungrant(g.id)}
+                    onClick={() => confirmUngrant(g)}
                     disabled={busyGrant === g.id}
+                    loading={busyGrant === g.id}
                     aria-label={`Remove grant for ${g.key_name ?? "key"}`}
                   >
-                    <Trash2 className="h-4 w-4" aria-hidden="true" />
+                    {busyGrant !== g.id && <Trash2 size={14} aria-hidden />}
                     {busyGrant === g.id ? "Removing…" : "Remove"}
                   </Button>
                 </li>
@@ -323,24 +358,21 @@ function ConnectorCard({
 
           {/* Grant to a new key */}
           {available.length > 0 ? (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <Label htmlFor={`grant-${connector.id}`} className="sr-only">
-                Grant to key
-              </Label>
-              <select
-                id={`grant-${connector.id}`}
-                value={selectedKey}
-                onChange={(e) => setSelectedKey(e.target.value)}
-                className="h-9 flex-1 rounded-lg border border-border bg-surface px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
-              >
-                <option value="">Select a key to grant…</option>
-                {available.map((k) => (
-                  <option key={k.id} value={k.id}>
-                    {(k.name ?? "Untitled key") + (k.key_prefix ? ` (${k.key_prefix}…)` : "")}
-                  </option>
-                ))}
-              </select>
-              <Button size="sm" onClick={grant} disabled={!selectedKey || granting}>
+            <div className="mt-3 flex flex-wrap items-end gap-2">
+              <Field label="Grant to a key" className="min-w-0 flex-1 sm:max-w-sm">
+                <Select
+                  id={`grant-${connector.id}`}
+                  density="compact"
+                  value={selectedKey}
+                  onChange={(e) => setSelectedKey(e.target.value)}
+                  placeholder="Select a key…"
+                  options={available.map((k) => ({
+                    value: k.id,
+                    label: (k.name ?? "Untitled key") + (k.key_prefix ? ` (${k.key_prefix}…)` : ""),
+                  }))}
+                />
+              </Field>
+              <Button size="toolbar" onClick={grant} disabled={!selectedKey || granting} loading={granting}>
                 {granting ? "Granting…" : "Grant"}
               </Button>
             </div>
@@ -352,7 +384,8 @@ function ConnectorCard({
             )
           )}
         </div>
-      </CardContent>
+      </div>
+      {dialog}
     </Card>
   );
 }
@@ -432,24 +465,26 @@ function CreateConnectorDialog({
     <Dialog
       open
       onClose={onClose}
-      title="Add connector"
+      title="New connector"
       description="Register an external integration. Store secrets by reference, never inline."
+      size="lg"
+      closeOnBackdrop={false}
+      dismissible={!submitting}
       footer={
         <>
-          <Button variant="outline" onClick={onClose} disabled={submitting}>
+          <Button variant="secondary" onClick={onClose} disabled={submitting}>
             Cancel
           </Button>
-          <Button onClick={submit} disabled={submitting}>
+          <Button onClick={submit} loading={submitting}>
             {submitting ? "Creating…" : "Create connector"}
           </Button>
         </>
       }
     >
-      <div className="space-y-4 pb-2">
+      <div className="space-y-4 pb-1">
         {error && <Alert tone="danger">{error}</Alert>}
 
-        <div className="space-y-1.5">
-          <Label htmlFor="conn-name">Name</Label>
+        <Field label="Name">
           <Input
             id="conn-name"
             value={name}
@@ -457,54 +492,48 @@ function CreateConnectorDialog({
             placeholder="e.g. Higgsfield image API"
             autoFocus
           />
-        </div>
+        </Field>
 
-        <div className="space-y-1.5">
-          <Label htmlFor="conn-kind">Kind</Label>
-          <select
+        <Field label="Kind">
+          <Select
             id="conn-kind"
             value={kind}
             onChange={(e) => setKind(e.target.value as (typeof KINDS)[number])}
-            className="flex h-9 w-full rounded-lg border border-border bg-surface px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
-          >
-            {KINDS.map((k) => (
-              <option key={k} value={k}>
-                {KIND_LABELS[k]}
-              </option>
-            ))}
-          </select>
-        </div>
+            options={KINDS.map((k) => ({ value: k, label: KIND_LABELS[k] }))}
+          />
+        </Field>
 
-        <div className="space-y-1.5">
-          <Label htmlFor="conn-config">Config (JSON)</Label>
-          <textarea
+        <Field
+          label="Config (JSON)"
+          hint={
+            kind === "mcp"
+              ? "e.g. server_url and transport for an MCP server."
+              : "e.g. base_url and the tools this API exposes."
+          }
+        >
+          <Textarea
             id="conn-config"
+            mono
             value={config}
             onChange={(e) => setConfig(e.target.value)}
             rows={6}
             spellCheck={false}
             placeholder={placeholder}
-            className="flex w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
           />
-          <p className="text-xs text-muted-foreground">
-            {kind === "mcp"
-              ? "e.g. server_url and transport for an MCP server."
-              : "e.g. base_url and the tools this API exposes."}
-          </p>
-        </div>
+        </Field>
 
-        <div className="space-y-1.5">
-          <Label htmlFor="conn-secret">Auth secret reference (optional)</Label>
+        <Field
+          label="Auth secret reference (optional)"
+          hint="The env var or vault key that holds the secret, never the secret itself."
+        >
           <Input
             id="conn-secret"
             value={authRef}
             onChange={(e) => setAuthRef(e.target.value)}
             placeholder="e.g. HIGGSFIELD_API_KEY"
+            className="font-mono"
           />
-          <p className="text-xs text-muted-foreground">
-            The env var or vault key that holds the secret — never the secret itself.
-          </p>
-        </div>
+        </Field>
       </div>
     </Dialog>
   );

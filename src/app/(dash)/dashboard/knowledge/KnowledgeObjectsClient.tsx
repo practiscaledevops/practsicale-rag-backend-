@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Search, PlusCircle, Filter } from "lucide-react";
+import { Filter, Library, PlusCircle, X } from "lucide-react";
 import {
   INTELLIGENCE_CLASSES,
   DOMAINS,
@@ -11,31 +11,35 @@ import {
   typesFor,
   domainLabel,
   typeLabel,
-  humanize,
+  authorityLabel,
   FOUNDER_ENDORSEMENTS,
   OBJECT_STATUSES,
   type IntelligenceClass,
 } from "@/lib/intelligence-taxonomy";
 import {
-  C,
-  Chip,
-  KBtn,
-  KInput,
-  KSelect,
-  KTabs,
-  KTable,
-  Th,
-  Td,
-  Empty,
+  Alert,
+  Badge,
+  Button,
+  buttonClass,
+  ClassBadge,
+  EmptyState,
+  Field,
+  FilterTabs,
+  SearchInput,
+  Select,
   Spinner,
-  ErrorNote,
-  StatBox,
-  fmtDate,
-  endorsementTone,
-  authorityTone,
-  statusTone,
-  api,
-} from "@/components/ui/brain-ui";
+  Table,
+  TableCard,
+  TableSkeletonRows,
+  TBody,
+  Td,
+  Th,
+  THead,
+  Tr,
+  type BadgeTone,
+} from "@/components/ui";
+import { fmtDateTime, humanize, relTime } from "@/lib/format";
+import { statusTone } from "@/lib/ui-labels";
 
 interface ObjectRow {
   id: string;
@@ -67,6 +71,30 @@ interface ListResponse {
 }
 
 type Tab = "all" | IntelligenceClass;
+
+/** The list API returns at most this many objects (its default `limit`), newest first. */
+const LIST_CAP = 300;
+
+/**
+ * Governance chips in the list, so admins can scan for rejected or in-test
+ * knowledge: founder endorsement (every value), internal validation (unless
+ * unvalidated) and implementation status (unless not tested).
+ */
+const TRUST: Record<string, { label: string; tone: BadgeTone }> = {
+  practiscale_standard: { label: "Standard", tone: "accent" },
+  approved: { label: "Approved", tone: "success" },
+  interested: { label: "Interested", tone: "neutral" },
+};
+const VALIDATION: Record<string, { label: string; tone: BadgeTone }> = {
+  validated: { label: "Validated", tone: "success" },
+  modified: { label: "Modified", tone: "warning" },
+  rejected: { label: "Rejected", tone: "danger" },
+};
+
+const TABLE_LINK =
+  "rounded-sm font-medium text-foreground hover:text-accent-strong hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+const FILTER_FIELD = "w-full sm:w-44";
 
 export function KnowledgeObjectsClient() {
   const router = useRouter();
@@ -119,127 +147,280 @@ export function KnowledgeObjectsClient() {
     return () => window.clearTimeout(t);
   }, [load, q]);
 
+  // Keep the URL in step with the filters (same parameter names the page reads
+  // on load), so a filtered view can be shared or reloaded. history.replaceState
+  // updates useSearchParams without a server round trip; debounced for typing.
+  React.useEffect(() => {
+    const t = window.setTimeout(() => {
+      const next = new URLSearchParams(window.location.search);
+      const put = (k: string, v: string) => (v ? next.set(k, v) : next.delete(k));
+      put("class", tab === "all" ? "" : tab);
+      put("q", q.trim());
+      put("domain", domain);
+      put("type", type);
+      put("status", status);
+      put("endorsement", endorsement);
+      put("bucket", tab === "business_reality" ? bucket : "");
+      const qs = next.toString();
+      const target = `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`;
+      const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      if (target !== current) window.history.replaceState(null, "", target);
+    }, 300);
+    return () => window.clearTimeout(t);
+  }, [tab, q, domain, type, status, endorsement, bucket]);
+
+  const filtersActive = Boolean(q.trim() || domain || type || status || endorsement || bucket);
+  function clearFilters() {
+    setQ("");
+    setDomain("");
+    setType("");
+    setStatus("");
+    setEndorsement("");
+    setBucket("");
+  }
+
   const counts = data?.counts.byClass ?? {};
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: "all", label: "All", count: data?.total },
-    ...INTELLIGENCE_CLASSES.filter((c) => c.id !== "raw_archive").map((c) => ({ id: c.id as Tab, label: c.label, count: counts[c.id] ?? 0 })),
+    ...INTELLIGENCE_CLASSES.filter((c) => c.id !== "raw_archive").map((c) => ({
+      id: c.id as Tab,
+      label: c.label,
+      count: data ? counts[c.id] ?? 0 : undefined,
+    })),
   ];
   const typeOptions = tab === "all" ? [] : typesFor(tab, domain || undefined).map((t) => ({ value: t.id, label: t.label }));
 
+  const head = (
+    <THead>
+      <tr>
+        <Th>Ref</Th>
+        <Th>Name</Th>
+        <Th>Class</Th>
+        <Th>Governance</Th>
+        <Th>Status</Th>
+        <Th>Updated</Th>
+      </tr>
+    </THead>
+  );
+
+  const rows = data?.objects ?? [];
+
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <StatBox label="Objects" value={data?.total ?? "—"} hint="across all classes" />
-        <StatBox label="Business Reality" value={counts.business_reality ?? "—"} hint="what is true" />
-        <StatBox label="Playbooks" value={counts.playbook ?? "—"} hint="what should work" tone="info" />
-        <StatBox label="Org Learning" value={counts.organizational_learning ?? "—"} hint="what we learned" tone="violet" />
-      </div>
-
       {migrationMissing && (
-        <ErrorNote message="The Operating Intelligence tables are not in the database yet. Apply Brain migration 0017_operating_intelligence.sql in Supabase, then reload." />
+        <Alert tone="info" title="Not enabled yet">
+          <p>Knowledge objects aren&apos;t set up in this workspace&apos;s database yet.</p>
+          <details className="mt-1">
+            <summary className="cursor-pointer text-xs font-medium text-foreground">Technical details</summary>
+            <p className="mt-1 text-xs">
+              The Operating Intelligence tables are missing. Apply Brain migration{" "}
+              <code className="font-mono">0017_operating_intelligence.sql</code> in Supabase, then reload.
+            </p>
+          </details>
+        </Alert>
       )}
 
-      <div className="flex flex-wrap items-center gap-2">
-        <KTabs tabs={tabs} value={tab} onChange={(v) => { setTab(v); setType(""); setBucket(""); }} />
-        <div className="ml-auto flex items-center gap-2">
-          <Link href="/dashboard/knowledge/add">
-            <KBtn variant="primary"><PlusCircle size={14} /> Add knowledge</KBtn>
-          </Link>
-        </div>
-      </div>
+      <FilterTabs
+        label="Class filter"
+        value={tab}
+        tabs={tabs}
+        onChange={(v) => {
+          setTab(v);
+          setType("");
+          setBucket("");
+        }}
+      />
 
-      <div className="grid gap-2 md:grid-cols-6">
-        <div className="relative md:col-span-2">
-          <Search size={14} className="pointer-events-none absolute left-2.5 top-2.5" style={{ color: C.muted }} />
-          <KInput value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search ref, name, summary…" className="pl-8" />
-        </div>
-        <KSelect value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="All domains" options={DOMAINS.map((d) => ({ value: d.id, label: d.label }))} />
-        <KSelect value={type} onChange={(e) => setType(e.target.value)} placeholder={tab === "all" ? "Type (pick a class)" : "All types"} options={typeOptions} disabled={tab === "all"} />
-        <KSelect value={status} onChange={(e) => setStatus(e.target.value)} placeholder="Any status" options={OBJECT_STATUSES.map((s) => ({ value: s.id, label: s.label }))} />
+      <div className="flex flex-wrap items-end gap-3">
+        <SearchInput
+          aria-label="Search knowledge objects"
+          placeholder="Search ref, name, summary…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          wrapperClassName="w-full sm:w-64"
+        />
+        <Field label="Domain" className={FILTER_FIELD}>
+          <Select
+            density="compact"
+            value={domain}
+            onChange={(e) => setDomain(e.target.value)}
+            placeholder="All domains"
+            options={DOMAINS.map((d) => ({ value: d.id, label: d.label }))}
+          />
+        </Field>
+        <Field label="Type" className={FILTER_FIELD}>
+          <Select
+            density="compact"
+            value={type}
+            onChange={(e) => setType(e.target.value)}
+            placeholder={tab === "all" ? "Pick a class first" : "All types"}
+            options={typeOptions}
+            disabled={tab === "all"}
+          />
+        </Field>
+        <Field label="Status" className={FILTER_FIELD}>
+          <Select
+            density="compact"
+            value={status}
+            onChange={(e) => setStatus(e.target.value)}
+            placeholder="Any status"
+            options={OBJECT_STATUSES.map((s) => ({ value: s.id, label: s.label }))}
+          />
+        </Field>
         {tab === "business_reality" ? (
-          <KSelect value={bucket} onChange={(e) => setBucket(e.target.value)} placeholder="All buckets" options={REALITY_BUCKETS.map((b) => ({ value: b.id, label: b.label }))} />
+          <Field label="Bucket" className={FILTER_FIELD}>
+            <Select
+              density="compact"
+              value={bucket}
+              onChange={(e) => setBucket(e.target.value)}
+              placeholder="All buckets"
+              options={REALITY_BUCKETS.map((b) => ({ value: b.id, label: b.label }))}
+            />
+          </Field>
         ) : (
-          <KSelect value={endorsement} onChange={(e) => setEndorsement(e.target.value)} placeholder="Any endorsement" options={FOUNDER_ENDORSEMENTS.map((e) => ({ value: e.id, label: e.label }))} />
+          <Field label="Endorsement" className={FILTER_FIELD}>
+            <Select
+              density="compact"
+              value={endorsement}
+              onChange={(e) => setEndorsement(e.target.value)}
+              placeholder="Any endorsement"
+              options={FOUNDER_ENDORSEMENTS.map((x) => ({ value: x.id, label: x.label }))}
+            />
+          </Field>
         )}
+        <div className="flex h-8 items-center gap-2">
+          {filtersActive && (
+            <Button variant="ghost" size="toolbar" onClick={clearFilters}>
+              <X size={14} aria-hidden />
+              Clear filters
+            </Button>
+          )}
+          {loading && data && <Spinner label="Refreshing…" className="py-0 text-xs" />}
+        </div>
       </div>
 
-      <ErrorNote message={error && !migrationMissing ? error : null} />
+      {error && !migrationMissing && <Alert tone="danger">{error}</Alert>}
 
-      {loading && !data ? (
-        <Spinner label="Loading knowledge objects…" />
-      ) : !data || data.objects.length === 0 ? (
-        <Empty
+      {!data ? (
+        loading ? (
+          <TableCard>
+            <Table caption="Knowledge objects (loading)">
+              {head}
+              <TBody>
+                <TableSkeletonRows rows={6} cols={6} />
+              </TBody>
+            </Table>
+          </TableCard>
+        ) : null
+      ) : rows.length === 0 ? (
+        <EmptyState
+          icon={Library}
           title="No knowledge objects match"
-          hint={data?.total ? "Try clearing a filter." : "Add your first Playbook or Business Reality object — the AI classifies, de-duplicates and compiles it for you."}
+          description={
+            data.total
+              ? "Try clearing a filter."
+              : "Add your first Playbook or Business Reality object — the AI classifies, de-duplicates and compiles it for you."
+          }
           action={
-            <Link href="/dashboard/knowledge/add">
-              <KBtn variant="primary"><PlusCircle size={14} /> Add knowledge</KBtn>
-            </Link>
+            filtersActive ? (
+              <Button variant="secondary" size="toolbar" onClick={clearFilters}>
+                <X size={14} aria-hidden />
+                Clear filters
+              </Button>
+            ) : (
+              <Link href="/dashboard/knowledge/add" className={buttonClass({ size: "toolbar" })}>
+                <PlusCircle size={14} aria-hidden />
+                Add knowledge
+              </Link>
+            )
           }
         />
       ) : (
-        <KTable
-          className="max-h-[calc(100vh-24rem)]"
-          head={
-            <>
-              <Th>Ref</Th>
-              <Th>Name</Th>
-              <Th>Class · Domain · Type · Subtype</Th>
-              <Th>Governance</Th>
-              <Th>Authority</Th>
-              <Th>Status</Th>
-              <Th>Updated</Th>
-            </>
+        <TableCard
+          title={`${rows.length.toLocaleString()} ${rows.length === 1 ? "object" : "objects"}`}
+          meta={
+            rows.length >= LIST_CAP
+              ? "the most recently updated. Narrow the filters to reach older ones."
+              : undefined
+          }
+          footer={
+            <span className="flex items-start gap-1.5">
+              <Filter size={12} aria-hidden className="mt-0.5 shrink-0" />
+              <span>
+                Metadata narrows and boosts retrieval; meaning still comes from embeddings. Governance changes take
+                effect on the next answer.
+              </span>
+            </span>
           }
         >
-          {data.objects.map((o) => {
-            const expired = o.effective_until && new Date(o.effective_until).getTime() <= Date.now();
-            return (
-              <tr
-                key={o.id}
-                className="cursor-pointer transition-colors hover:bg-white/[0.03]"
-                onClick={() => router.push(`/dashboard/knowledge/${o.id}`)}
-              >
-                <Td className="whitespace-nowrap font-mono text-xs" title={o.id}><span style={{ color: C.green }}>{o.ref}</span></Td>
-                <Td>
-                  <div className="font-medium" style={{ color: C.text }}>{o.name}</div>
-                  {o.summary && <div className="line-clamp-1 text-xs" style={{ color: C.muted }}>{o.summary}</div>}
-                </Td>
-                <Td>
-                  <div className="flex flex-wrap items-center gap-1">
-                    <Chip tone={o.intelligence_class === "playbook" ? "info" : o.intelligence_class === "organizational_learning" ? "violet" : "green"}>
-                      {INTELLIGENCE_CLASSES.find((c) => c.id === o.intelligence_class)?.label ?? o.intelligence_class}
-                    </Chip>
-                    <span className="text-xs" style={{ color: C.muted }}>
-                      {domainLabel(o.domain)} · {typeLabel(o.object_type)}{o.subtype ? ` · ${humanize(o.subtype)}` : ""}
-                    </span>
-                  </div>
-                  {o.bucket && <div className="mt-0.5 text-[11px]" style={{ color: C.muted }}>{REALITY_BUCKETS.find((b) => b.id === o.bucket)?.label}</div>}
-                </Td>
-                <Td>
-                  <div className="flex flex-wrap gap-1">
-                    {o.founder_endorsement && <Chip tone={endorsementTone(o.founder_endorsement)}>{humanize(o.founder_endorsement)}</Chip>}
-                    {o.internal_validation !== "unvalidated" && <Chip tone={o.internal_validation === "validated" ? "green" : o.internal_validation === "rejected" ? "red" : "amber"}>{humanize(o.internal_validation)}</Chip>}
-                    {o.implementation_status !== "not_tested" && <Chip tone="mint">{humanize(o.implementation_status)}</Chip>}
-                    {o.priority === "core" && <Chip tone="amber">Core</Chip>}
-                  </div>
-                </Td>
-                <Td><Chip tone={authorityTone(o.authority)}>{o.authority}</Chip></Td>
-                <Td>
-                  <div className="flex flex-wrap gap-1">
-                    <Chip tone={statusTone(o.status)}>{humanize(o.status)}</Chip>
-                    {expired && <Chip tone="red">Expired</Chip>}
-                  </div>
-                </Td>
-                <Td className="whitespace-nowrap text-xs" title={o.updated_at}><span style={{ color: C.muted }}>{fmtDate(o.updated_at)}</span></Td>
-              </tr>
-            );
-          })}
-        </KTable>
+          <Table caption="Knowledge objects">
+            {head}
+            <TBody>
+              {rows.map((o) => {
+                const href = `/dashboard/knowledge/${o.id}`;
+                const expired = o.effective_until && new Date(o.effective_until).getTime() <= Date.now();
+                const trust = o.founder_endorsement
+                  ? (TRUST[o.founder_endorsement] ?? { label: humanize(o.founder_endorsement), tone: "neutral" as const })
+                  : undefined;
+                const validation =
+                  o.internal_validation && o.internal_validation !== "unvalidated"
+                    ? (VALIDATION[o.internal_validation] ?? { label: humanize(o.internal_validation), tone: "neutral" as const })
+                    : undefined;
+                const bucketLabel = o.bucket ? REALITY_BUCKETS.find((b) => b.id === o.bucket)?.label : undefined;
+                return (
+                  // Mouse users can click anywhere on the row; keyboard users tab to the name link.
+                  <Tr key={o.id} interactive className="cursor-pointer" onClick={() => router.push(href)}>
+                    <Td className="whitespace-nowrap font-mono text-xs text-muted-foreground" title={o.id}>
+                      {o.ref}
+                    </Td>
+                    <Td className="min-w-[14rem]">
+                      <Link href={href} onClick={(e) => e.stopPropagation()} className={TABLE_LINK}>
+                        {o.name}
+                      </Link>
+                      {o.summary && <div className="line-clamp-1 text-xs text-muted-foreground">{o.summary}</div>}
+                    </Td>
+                    <Td>
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <ClassBadge klass={o.intelligence_class} />
+                        <span className="text-xs text-muted-foreground">
+                          {domainLabel(o.domain)} · {typeLabel(o.object_type)}
+                          {o.subtype ? ` · ${humanize(o.subtype)}` : ""}
+                          {bucketLabel ? ` · ${bucketLabel}` : ""}
+                        </span>
+                      </div>
+                    </Td>
+                    <Td>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {trust && <Badge tone={trust.tone}>{trust.label}</Badge>}
+                        {validation && <Badge tone={validation.tone}>{validation.label}</Badge>}
+                        {o.implementation_status && o.implementation_status !== "not_tested" && (
+                          <Badge tone="info">{humanize(o.implementation_status)}</Badge>
+                        )}
+                        {o.priority === "core" && <Badge tone="neutral">Core</Badge>}
+                        <abbr
+                          title={`Authority ${o.authority}: ${authorityLabel(o.authority)}`}
+                          className="font-mono text-xs text-muted-foreground no-underline"
+                        >
+                          {o.authority}
+                        </abbr>
+                      </div>
+                    </Td>
+                    <Td>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Badge tone={statusTone(o.status)}>{humanize(o.status)}</Badge>
+                        {expired && <span className="text-xs font-medium text-warning">Expired</span>}
+                      </div>
+                    </Td>
+                    <Td className="whitespace-nowrap text-xs text-muted-foreground" title={fmtDateTime(o.updated_at)}>
+                      {relTime(o.updated_at)}
+                    </Td>
+                  </Tr>
+                );
+              })}
+            </TBody>
+          </Table>
+        </TableCard>
       )}
-      <p className="flex items-center gap-1 text-[11px]" style={{ color: C.muted }}>
-        <Filter size={11} /> Metadata narrows and boosts retrieval; meaning still comes from embeddings. Governance changes take effect on the next answer.
-      </p>
     </div>
   );
 }

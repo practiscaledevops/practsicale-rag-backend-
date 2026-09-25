@@ -9,27 +9,29 @@
 // access goes through /api/admin/prompts, which resolves org_id server-side and
 // enforces the admin's `prompts` permission — the browser never sees another
 // tenant's prompts and never supplies an org id.
+//
+// Presentation: one card per built-in use case (its default prompt plus the
+// saved versions for it, grouped from the one prompts list the page loads);
+// saved prompts for any other use case go in a table below.
 
 import * as React from "react";
-import { Plus, Loader2, Check, Sparkles, MessageSquareText } from "lucide-react";
+import { Check, ChevronRight, FileText, MessageSquareText, Pencil, Plus, Sparkles } from "lucide-react";
 import { PROMPT_USE_CASES, defaultPromptFor } from "@/lib/prompts";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { Textarea } from "@/components/ui/Textarea";
 import { Label } from "@/components/ui/Label";
-import { Alert } from "@/components/ui/Alert";
+import { Field } from "@/components/ui/Field";
+import { Checkbox } from "@/components/ui/Checkbox";
+import { Alert, Notice } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
+import { SectionCard } from "@/components/ui/Card";
 import { Dialog } from "@/components/ui/Dialog";
-import { EmptyState } from "@/components/ui/EmptyState";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/Card";
-import { Table, THead, TBody, Tr, Th, Td } from "@/components/ui/Table";
+import { useConfirm } from "@/components/ui/ConfirmDialog";
+import { Skeleton } from "@/components/ui/Loading";
+import { Table, THead, TBody, Tr, Th, Td, TableCard } from "@/components/ui/Table";
+import { fmtDateTime } from "@/lib/format";
 
 interface Prompt {
   id: string;
@@ -40,32 +42,18 @@ interface Prompt {
   created_at: string;
 }
 
-interface Notice {
+interface Feedback {
   tone: "success" | "danger";
   message: string;
 }
 
-/** Shared classes so the prompt textarea matches the design-system Input. */
-const TEXTAREA_CLASS =
-  "flex w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs leading-relaxed " +
-  "placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 " +
-  "focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background " +
-  "disabled:cursor-not-allowed disabled:opacity-50";
-
-/** Read-only preview of a prompt's grounding rules. */
-function Preview({ content }: { content: string }) {
-  return (
-    <div className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-surface-muted/40 p-3 font-mono text-xs leading-relaxed text-muted-foreground">
-      {content.trim() ? content : "Nothing to preview yet."}
-    </div>
-  );
-}
+const BUILT_IN_KEYS = new Set(PROMPT_USE_CASES.map((u) => u.key));
 
 export default function PromptsPage() {
   const [prompts, setPrompts] = React.useState<Prompt[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
-  const [notice, setNotice] = React.useState<Notice | null>(null);
+  const [notice, setNotice] = React.useState<Feedback | null>(null);
   const [busyId, setBusyId] = React.useState<string | null>(null);
 
   // Editor (create-a-version) dialog state.
@@ -75,6 +63,10 @@ export default function PromptsPage() {
   const [editorContent, setEditorContent] = React.useState("");
   const [activateOnSave, setActivateOnSave] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
+  // A failed save shows inside the editor dialog (the page behind it is under the scrim).
+  const [saveError, setSaveError] = React.useState<string | null>(null);
+
+  const { confirm, dialog } = useConfirm();
 
   const loadPrompts = React.useCallback(async () => {
     setError(null);
@@ -114,6 +106,7 @@ export default function PromptsPage() {
     activate?: boolean;
   }) {
     setNotice(null);
+    setSaveError(null);
     setEditorUseCase(opts.useCase);
     setEditorContent(opts.content);
     setIsNewUseCase(opts.isNew ?? false);
@@ -151,11 +144,22 @@ export default function PromptsPage() {
     }
   }
 
+  /** Activation is org-wide, so it asks first; then the same handler runs. */
+  async function requestActivate(id: string) {
+    const ok = await confirm({
+      title: "Make this prompt live?",
+      description: "This changes answers for everyone in the organisation right away.",
+      confirmLabel: "Activate",
+    });
+    if (ok) await activate(id);
+  }
+
   async function save() {
     const useCase = editorUseCase.trim();
     if (!useCase || !editorContent.trim()) return;
     setSaving(true);
     setNotice(null);
+    setSaveError(null);
     try {
       const res = await fetch("/api/admin/prompts", {
         method: "POST",
@@ -178,33 +182,34 @@ export default function PromptsPage() {
         }.`,
       });
     } catch (e) {
-      setNotice({
-        tone: "danger",
-        message: e instanceof Error ? e.message : "Failed to save version",
-      });
+      setSaveError(e instanceof Error ? e.message : "Failed to save version");
     } finally {
       setSaving(false);
     }
   }
 
   const useCases = [...groups.keys()];
+  const otherUseCases = useCases.filter((u) => !BUILT_IN_KEYS.has(u));
   const knownUseCase = PROMPT_USE_CASES.some((u) => u.key === editorUseCase.trim());
 
   return (
     <div>
       <PageHeader
         title="Prompts"
-        description="Versioned system prompts that ground the assistant. Stored in the database and editable without a redeploy."
+        description="The instructions the Brain follows for each use case. Changes apply to everyone."
         actions={
-          <Button onClick={() => openEditor({ useCase: "", content: "", isNew: true, activate: true })}>
-            <Plus className="h-4 w-4" aria-hidden="true" />
+          <Button size="toolbar" onClick={() => openEditor({ useCase: "", content: "", isNew: true, activate: true })}>
+            <Plus size={14} aria-hidden />
             New use case
           </Button>
         }
       />
 
-      {notice && (
-        <Alert tone={notice.tone} className="mb-4">
+      {notice?.tone === "success" && (
+        <Notice className="mb-4" message={notice.message} onDone={() => setNotice(null)} />
+      )}
+      {notice?.tone === "danger" && (
+        <Alert tone="danger" className="mb-4" onDismiss={() => setNotice(null)}>
           {notice.message}
         </Alert>
       )}
@@ -215,146 +220,99 @@ export default function PromptsPage() {
       )}
 
       {loading ? (
-        <div className="flex items-center gap-2 py-16 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-          Loading prompts…
+        <div role="status" className="space-y-4">
+          <span className="sr-only">Loading prompts…</span>
+          <Skeleton className="h-40 rounded-2xl" />
+          <Skeleton className="h-40 rounded-2xl" />
+          <Skeleton className="h-40 rounded-2xl" />
         </div>
       ) : (
-        <div className="space-y-6">
+        <div className="space-y-4">
           {/* Built-in defaults for EVERY pipeline stage. Each is editable: fork it
               into a saved, activatable version. A stage uses its saved active
               version when one exists, otherwise this compiled default. */}
           {PROMPT_USE_CASES.map((uc) => (
-            <Card key={uc.key}>
-              <CardHeader className="flex flex-row items-start justify-between gap-4">
-                <div className="min-w-0">
-                  <CardTitle className="flex items-center gap-2">
-                    <MessageSquareText className="h-4 w-4 text-accent" aria-hidden="true" />
-                    {uc.label} · <code className="font-mono text-sm">{uc.key}</code>
-                  </CardTitle>
-                  <CardDescription>{uc.description}</CardDescription>
-                </div>
-                <Badge tone={groups.get(uc.key)?.some((v) => v.is_active) ? "success" : "neutral"}>
-                  {groups.get(uc.key)?.some((v) => v.is_active) ? "overridden" : "built-in"}
-                </Badge>
-              </CardHeader>
-              <CardContent>
-                <Preview content={uc.default} />
-              </CardContent>
-              <CardFooter>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => openEditor({ useCase: uc.key, content: uc.default, activate: false })}
-                >
-                  <Sparkles className="h-4 w-4" aria-hidden="true" />
-                  Create version from default
-                </Button>
-              </CardFooter>
-            </Card>
+            <UseCaseCard
+              key={uc.key}
+              useCase={uc.key}
+              label={uc.label}
+              description={uc.description}
+              defaultText={uc.default}
+              versions={groups.get(uc.key) ?? []}
+              busyId={busyId}
+              onEditDefault={() => openEditor({ useCase: uc.key, content: uc.default, activate: false })}
+              onNewVersion={() => newVersionFor(uc.key)}
+              onOpenVersion={(v) => openEditor({ useCase: uc.key, content: v.content, activate: false })}
+              onActivate={(id) => void requestActivate(id)}
+            />
           ))}
 
-          {/* Saved prompts, grouped by use_case. */}
-          {useCases.length === 0 ? (
-            <EmptyState
-              icon={MessageSquareText}
-              title="No saved prompts yet"
-              description="Create a version to override a built-in prompt, or start a new use case."
-              action={
-                <Button
-                  size="sm"
-                  onClick={() => openEditor({ useCase: "", content: "", isNew: true, activate: true })}
-                >
-                  <Plus className="h-4 w-4" aria-hidden="true" />
-                  New use case
-                </Button>
-              }
-            />
-          ) : (
-            useCases.map((useCase) => {
-              const versions = groups.get(useCase)!;
-              const active = versions.find((v) => v.is_active);
-              return (
-                <Card key={useCase}>
-                  <CardHeader className="flex flex-row items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <CardTitle className="font-mono">{useCase}</CardTitle>
-                      <CardDescription>
-                        {versions.length} version{versions.length === 1 ? "" : "s"}
-                      </CardDescription>
-                    </div>
-                    {active ? (
-                      <Badge tone="success">v{active.version} active</Badge>
-                    ) : (
-                      <Badge tone="warning">no active version</Badge>
-                    )}
-                  </CardHeader>
-                  <CardContent>
-                    <Table>
-                      <THead>
-                        <Tr>
-                          <Th>Version</Th>
-                          <Th>Status</Th>
-                          <Th>Created</Th>
-                          <Th className="text-right">Actions</Th>
-                        </Tr>
-                      </THead>
-                      <TBody>
-                        {versions.map((v) => (
+          {/* Saved prompts for use cases without a built-in card. */}
+          {otherUseCases.length > 0 && (
+            <TableCard
+              id="other-prompts"
+              title="Other saved prompts"
+              meta="Use cases without a built-in default"
+            >
+              <Table minWidth={640} caption="Other saved prompts">
+                <THead>
+                  <tr>
+                    <Th>Use case</Th>
+                    <Th>Version</Th>
+                    <Th>Status</Th>
+                    <Th>Created</Th>
+                    <Th className="text-right">
+                      <span className="sr-only">Actions</span>
+                    </Th>
+                  </tr>
+                </THead>
+                <TBody>
+                  {otherUseCases.map((useCase) => {
+                    const versions = groups.get(useCase)!;
+                    const active = versions.find((v) => v.is_active);
+                    return (
+                      <React.Fragment key={useCase}>
+                        {versions.map((v, i) => (
                           <Tr key={v.id}>
-                            <Td className="font-medium tabular-nums">v{v.version}</Td>
-                            <Td>
-                              {v.is_active ? (
-                                <Badge tone="success">Active</Badge>
-                              ) : (
-                                <Badge tone="neutral">Inactive</Badge>
-                              )}
-                            </Td>
-                            <Td className="text-muted-foreground">
-                              {new Date(v.created_at).toLocaleString()}
-                            </Td>
-                            <Td>
-                              <div className="flex items-center justify-end gap-2">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() =>
-                                    openEditor({ useCase, content: v.content, activate: false })
-                                  }
-                                >
-                                  View / edit
-                                </Button>
-                                {!v.is_active && (
-                                  <Button
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={() => activate(v.id)}
-                                    disabled={busyId === v.id}
-                                  >
-                                    {busyId === v.id ? (
-                                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                                    ) : (
-                                      <Check className="h-4 w-4" aria-hidden="true" />
-                                    )}
-                                    Activate
-                                  </Button>
+                            {i === 0 && (
+                              <Td rowSpan={versions.length} className="align-top">
+                                <div id={`prompt-${useCase}`} className="font-mono text-[13px] font-medium">
+                                  {useCase}
+                                </div>
+                                {!active && (
+                                  <Badge tone="warning" className="mt-1">
+                                    No active version
+                                  </Badge>
                                 )}
-                              </div>
+                                <div className="mt-1">
+                                  <Button variant="ghost" size="sm" className="-ml-3" onClick={() => newVersionFor(useCase)}>
+                                    <Plus size={14} aria-hidden />
+                                    New version
+                                  </Button>
+                                </div>
+                              </Td>
+                            )}
+                            <Td className="font-mono tabular-nums">v{v.version}</Td>
+                            <Td>
+                              {v.is_active ? <Badge tone="success">Active</Badge> : <Badge>Inactive</Badge>}
+                            </Td>
+                            <Td className="whitespace-nowrap text-muted-foreground">{fmtDateTime(v.created_at)}</Td>
+                            <Td>
+                              <VersionActions
+                                version={v}
+                                busy={busyId === v.id}
+                                onOpen={() => openEditor({ useCase, content: v.content, activate: false })}
+                                onActivate={() => void requestActivate(v.id)}
+                              />
                             </Td>
                           </Tr>
                         ))}
-                      </TBody>
-                    </Table>
-                  </CardContent>
-                  <CardFooter>
-                    <Button variant="outline" size="sm" onClick={() => newVersionFor(useCase)}>
-                      <Plus className="h-4 w-4" aria-hidden="true" />
-                      New version
-                    </Button>
-                  </CardFooter>
-                </Card>
-              );
-            })
+                      </React.Fragment>
+                    );
+                  })}
+                </TBody>
+              </Table>
+            </TableCard>
           )}
         </div>
       )}
@@ -365,26 +323,28 @@ export default function PromptsPage() {
         onClose={() => setEditorOpen(false)}
         title={isNewUseCase ? "New prompt" : `Edit prompt · ${editorUseCase}`}
         description="Saving creates a new version. Activate it to make it live."
-        className="max-w-3xl"
+        size="xl"
+        closeOnBackdrop={false}
+        dismissible={!saving}
         footer={
           <>
-            <Button variant="outline" onClick={() => setEditorOpen(false)} disabled={saving}>
+            <Button variant="secondary" onClick={() => setEditorOpen(false)} disabled={saving}>
               Cancel
             </Button>
             <Button
-              onClick={save}
-              disabled={saving || !editorContent.trim() || (isNewUseCase && !editorUseCase.trim())}
+              onClick={() => void save()}
+              disabled={!editorContent.trim() || (isNewUseCase && !editorUseCase.trim())}
+              loading={saving}
             >
-              {saving && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
               {saving ? "Saving…" : "Save as new version"}
             </Button>
           </>
         }
       >
         <div className="space-y-4">
+          {saveError && <Alert tone="danger">{saveError}</Alert>}
           {isNewUseCase && (
-            <div className="space-y-1.5">
-              <Label htmlFor="use-case">Use case</Label>
+            <Field label="Use case" hint="A short key that identifies where this prompt is used.">
               <Input
                 id="use-case"
                 value={editorUseCase}
@@ -392,54 +352,205 @@ export default function PromptsPage() {
                 placeholder="e.g. chat, summarize, coaching"
                 autoComplete="off"
               />
-              <p className="text-xs text-muted-foreground">
-                A short key that identifies where this prompt is used.
-              </p>
-            </div>
+            </Field>
           )}
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <Label htmlFor="content">Content</Label>
-                {knownUseCase && (
-                  <button
-                    type="button"
-                    onClick={() => setEditorContent(defaultPromptFor(editorUseCase.trim()))}
-                    className="text-xs font-medium text-accent hover:underline"
-                  >
-                    Load built-in default
-                  </button>
-                )}
-              </div>
-              <textarea
-                id="content"
-                rows={14}
-                value={editorContent}
-                onChange={(e) => setEditorContent(e.target.value)}
-                placeholder="Write the system prompt / grounding rules…"
-                className={TEXTAREA_CLASS}
-                spellCheck={false}
-              />
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="prompt-content">Prompt</Label>
+              {knownUseCase && (
+                <button
+                  type="button"
+                  onClick={() => setEditorContent(defaultPromptFor(editorUseCase.trim()))}
+                  className="rounded-md text-xs font-medium text-accent-strong underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  Load built-in default
+                </button>
+              )}
             </div>
-
-            <div className="space-y-1.5">
-              <Label>Grounding rules preview</Label>
-              <Preview content={editorContent} />
-            </div>
+            <Textarea
+              id="prompt-content"
+              mono
+              rows={14}
+              value={editorContent}
+              onChange={(e) => setEditorContent(e.target.value)}
+              placeholder="Write the system prompt / grounding rules…"
+              spellCheck={false}
+            />
           </div>
 
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
+          <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-border px-3 py-2.5 transition-colors hover:bg-surface-muted">
+            <Checkbox
               checked={activateOnSave}
               onChange={(e) => setActivateOnSave(e.target.checked)}
-              className="h-4 w-4 rounded border-border accent-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="mt-0.5"
             />
-            <span>Activate this version on save</span>
+            <span className="min-w-0">
+              <span className="block text-[13px] font-medium text-foreground">Activate this version on save</span>
+              <span className="block text-xs text-muted-foreground">
+                Makes it live for everyone in the organisation as soon as it saves.
+              </span>
+            </span>
           </label>
         </div>
       </Dialog>
+
+      {dialog}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Presentation pieces
+// ---------------------------------------------------------------------------
+
+/** View/edit a saved version, and activate it when it isn't live. */
+function VersionActions({
+  version,
+  busy,
+  onOpen,
+  onActivate,
+}: {
+  version: Prompt;
+  busy: boolean;
+  onOpen: () => void;
+  onActivate: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-end gap-1.5">
+      <Button variant="ghost" size="sm" onClick={onOpen}>
+        View / edit<span className="sr-only"> v{version.version}</span>
+      </Button>
+      {!version.is_active && (
+        <Button variant="secondary" size="sm" onClick={onActivate} loading={busy}>
+          {!busy && <Check size={14} aria-hidden />}
+          Activate<span className="sr-only"> v{version.version}</span>
+        </Button>
+      )}
+    </div>
+  );
+}
+
+/** One built-in use case: what's live, its default prompt, and its saved versions. */
+function UseCaseCard({
+  useCase,
+  label,
+  description,
+  defaultText,
+  versions,
+  busyId,
+  onEditDefault,
+  onNewVersion,
+  onOpenVersion,
+  onActivate,
+}: {
+  useCase: string;
+  label: string;
+  description: string;
+  defaultText: string;
+  versions: Prompt[];
+  busyId: string | null;
+  onEditDefault: () => void;
+  onNewVersion: () => void;
+  onOpenVersion: (v: Prompt) => void;
+  onActivate: (id: string) => void;
+}) {
+  const active = versions.find((v) => v.is_active);
+  const hasVersions = versions.length > 0;
+
+  return (
+    <SectionCard
+      id={`prompt-${useCase}`}
+      icon={MessageSquareText}
+      title={
+        <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
+          {label}
+          {active ? <Badge tone="accent">Custom · active</Badge> : <Badge tone="neutral">Default</Badge>}
+        </span>
+      }
+      description={description}
+      actions={
+        hasVersions ? (
+          <Button variant="secondary" size="toolbar" onClick={onNewVersion}>
+            <Plus size={14} aria-hidden />
+            New version
+          </Button>
+        ) : (
+          <Button variant="secondary" size="toolbar" onClick={onEditDefault}>
+            <Pencil size={14} aria-hidden />
+            Edit
+          </Button>
+        )
+      }
+      bodyClassName="space-y-3"
+    >
+      <p className="text-[13px] text-muted-foreground">
+        <code className="mr-1.5 rounded bg-surface-muted px-1.5 py-0.5 font-mono text-xs text-foreground">
+          {useCase}
+        </code>
+        {active ? (
+          <>
+            Live: <span className="font-medium text-foreground">saved version v{active.version}</span>, created{" "}
+            {fmtDateTime(active.created_at)}.
+          </>
+        ) : hasVersions ? (
+          <>
+            Live: <span className="font-medium text-foreground">the default prompt</span>. None of the saved
+            versions is active.
+          </>
+        ) : (
+          <>
+            Live: <span className="font-medium text-foreground">the default prompt</span>. Edit it to save a
+            custom version.
+          </>
+        )}
+      </p>
+
+      <details className="group rounded-xl border border-border">
+        <summary className="flex h-9 cursor-pointer list-none items-center gap-1.5 rounded-xl px-3 text-[13px] font-medium text-foreground transition-colors hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+          <ChevronRight
+            size={14}
+            aria-hidden
+            className="shrink-0 text-muted-foreground transition-transform group-open:rotate-90"
+          />
+          Default prompt
+        </summary>
+        <div className="space-y-2 border-t border-border p-3">
+          <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-xl border border-border bg-surface-muted p-3 font-mono text-xs text-foreground">
+            {defaultText}
+          </pre>
+          <Button variant="ghost" size="sm" onClick={onEditDefault}>
+            <Sparkles size={14} aria-hidden />
+            Create version from default
+          </Button>
+        </div>
+      </details>
+
+      {hasVersions && (
+        <div>
+          <h3 className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+            <FileText size={14} aria-hidden />
+            Saved versions
+          </h3>
+          <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border">
+            {versions.map((v) => (
+              <li key={v.id} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 bg-surface px-3 py-2">
+                <span className="font-mono text-[13px] font-medium tabular-nums text-foreground">v{v.version}</span>
+                {v.is_active && <Badge tone="success">Active</Badge>}
+                <span className="text-xs text-muted-foreground">{fmtDateTime(v.created_at)}</span>
+                <div className="ml-auto">
+                  <VersionActions
+                    version={v}
+                    busy={busyId === v.id}
+                    onOpen={() => onOpenVersion(v)}
+                    onActivate={() => onActivate(v.id)}
+                  />
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </SectionCard>
   );
 }

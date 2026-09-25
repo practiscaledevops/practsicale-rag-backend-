@@ -1,8 +1,10 @@
 import { requireAdmin } from "@/lib/auth/admin";
 import { supabaseAdmin } from "@/lib/supabase";
-import { PageHeader } from "@/components/ui/PageHeader";
-import { Alert } from "@/components/ui/Alert";
+import { Alert, PageHeader } from "@/components/ui";
 import { SourcesClient, type DataSource } from "./SourcesClient";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Sources" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic"; // always reflect current sources + status
@@ -27,13 +29,13 @@ export default async function SourcesPage() {
   return (
     <div>
       <PageHeader
-        title="Data Sources"
-        description="Register pull endpoints the Brain ingests from, and sync them on demand."
+        title="Sources"
+        description="Systems the Brain pulls knowledge from, and how their syncs are going."
       />
 
       {error ? (
-        <Alert tone="danger" title="Could not load data sources">
-          {error.message}
+        <Alert tone="danger" title="Couldn't load sources">
+          <span className="text-danger">{error.message}</span>
         </Alert>
       ) : (
         <SourcesClient sources={(data as unknown as DataSource[]) ?? []} />

@@ -1,6 +1,9 @@
 import { requireAdmin } from "@/lib/auth/admin";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { RelationshipsClient } from "./RelationshipsClient";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Relationships" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,7 +15,7 @@ export default async function RelationshipsPage() {
     <div>
       <PageHeader
         title="Relationships"
-        description="The Brain's graph, without a graph database: MG-001 complements MG-002, implemented in IMP-014, validated by EXP-032. Suggestions wait for your confirmation."
+        description="How knowledge connects: MG-001 complements MG-002, is implemented in IMP-014 and validated by EXP-032. Links the AI suggests wait here for your review."
       />
       <RelationshipsClient />
     </div>

@@ -1,29 +1,50 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
-  ArrowLeft,
-  RefreshCw,
+  AlertTriangle,
+  CalendarCheck,
+  CheckCircle2,
+  ChevronRight,
+  CircleDashed,
+  Clock,
+  Gauge,
+  GitCommitHorizontal,
+  Loader2,
   Pause,
   Play,
-  Loader2,
-  CheckCircle2,
-  AlertTriangle,
+  Plug,
   Radio,
-  Clock,
-  GitCommitHorizontal,
-  Gauge,
+  RefreshCw,
   ScrollText,
-  CalendarCheck,
+  Workflow,
+  type LucideIcon,
 } from "lucide-react";
-import { Button } from "@/components/ui/Button";
-import { Badge } from "@/components/ui/Badge";
-import { Alert } from "@/components/ui/Alert";
-import { Card, CardContent } from "@/components/ui/Card";
-import { Table, THead, TBody, Tr, Th, Td } from "@/components/ui/Table";
-import { cn } from "@/lib/utils";
+import {
+  Alert,
+  Badge,
+  Button,
+  Menu,
+  PageHeader,
+  SectionCard,
+  StatGrid,
+  StatTile,
+  Table,
+  TableCard,
+  TableEmptyRow,
+  TBody,
+  Td,
+  Th,
+  THead,
+  Tr,
+  useConfirm,
+  type BadgeTone,
+  type MenuItem,
+  type StatTone,
+} from "@/components/ui";
+import { fmtDateTime, fmtDuration, fmtInt, humanize, relTime } from "@/lib/format";
+import { sourceTypeLabel, statusTone, triggerLabel } from "@/lib/ui-labels";
 
 export interface SourceRun {
   status: string;
@@ -60,29 +81,54 @@ export interface SourceHealth {
   avgTimeToSearchableMs: number | null;
 }
 
-function relTime(iso: string | null): string {
-  if (!iso) return "never";
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return "never";
-  const m = Math.floor((Date.now() - t) / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
+const AUTH_LABELS: Record<string, string> = {
+  none: "No auth",
+  bearer: "Bearer token auth",
+  api_key: "API key auth",
+  basic: "Basic auth",
+};
+
+
+const RUN_STATUS_LABELS: Record<string, string> = {
+  success: "Succeeded",
+  error: "Failed",
+  running: "Running",
+};
+
+// true only after hydration, so locale-dependent strings never mismatch the server HTML.
+const noopSubscribe = () => () => {};
+function useHydrated() {
+  return React.useSyncExternalStore(noopSubscribe, () => true, () => false);
 }
 
-function duration(ms: number | null): string {
-  if (ms === null) return "—";
-  if (ms < 1000) return `${ms}ms`;
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  return `${m}m ${s % 60}s`;
+/** Relative time ("5m ago") with the exact local date and time in its tooltip. */
+function TimeAgo({ iso, never = "Never" }: { iso: string | null; never?: string }) {
+  const hydrated = useHydrated();
+  if (!iso) return <>{never}</>;
+  return (
+    <time dateTime={iso} title={hydrated ? fmtDateTime(iso) : undefined} suppressHydrationWarning>
+      {relTime(iso, { never, absolute: hydrated })}
+    </time>
+  );
 }
+
+/** One label/value pair in a definition grid. */
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <>
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 break-words text-foreground">{children}</dd>
+    </>
+  );
+}
+
+const Muted = ({ children }: { children: React.ReactNode }) => (
+  <span className="text-muted-foreground">{children}</span>
+);
 
 export function SourceHealthClient({ health, runs }: { health: SourceHealth; runs: SourceRun[] }) {
   const router = useRouter();
+  const { confirm, dialog } = useConfirm();
   const [syncing, setSyncing] = React.useState(false);
   const [toggling, setToggling] = React.useState(false);
   const [backfilling, setBackfilling] = React.useState(false);
@@ -183,190 +229,285 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
   const errorState = health.lastStatus === "error";
   const paused = !health.isActive;
 
+  // Confirmation gates. The handlers above are unchanged; these only ask first.
+  async function onToggleActive() {
+    if (!paused) {
+      const ok = await confirm({
+        title: "Pause syncing this source?",
+        description:
+          "Scheduled syncs for this source stop until you resume it. Knowledge it has already ingested is not removed.",
+        confirmLabel: "Pause",
+      });
+      if (!ok) return;
+    }
+    await toggleActive();
+  }
+
+  async function onRepairDates() {
+    const ok = await confirm({
+      title: "Repair call dates for the whole organisation?",
+      description: "This rewrites call dates across every source, not just this one.",
+      confirmLabel: "Repair dates",
+    });
+    if (ok) await repairDates();
+  }
+
+  async function onBackfill() {
+    const ok = await confirm({
+      title: "Back-fill call transcripts?",
+      description:
+        "This fetches and stores the raw transcript of every past call from this source. It can take a while; transcripts that are already stored are skipped.",
+      confirmLabel: "Back-fill",
+    });
+    if (ok) await backfillTranscripts();
+  }
+
+  // P0: a source that has never completed a sync is not "Connected" (and not green).
+  const hasSucceeded = Boolean(health.lastSuccessAt) || health.lastStatus === "success";
+  const neverSynced = !health.lastStatus || !hasSucceeded;
+  const running = health.lastStatus === "running";
+
+  const syncState: { label: string; tone: BadgeTone } = errorState
+    ? { label: "Last sync failed", tone: "danger" }
+    : running
+      ? { label: "Syncing", tone: "accent" }
+      : neverSynced
+        ? { label: "Never synced", tone: "neutral" }
+        : { label: "Healthy", tone: "success" };
+
+  const connection: { value: string; tone: StatTone; icon: LucideIcon } = paused
+    ? { value: "Paused", tone: "neutral", icon: Pause }
+    : errorState
+      ? { value: "Error", tone: "danger", icon: AlertTriangle }
+      : running
+        ? { value: "Syncing", tone: "default", icon: Radio }
+        : neverSynced
+          ? { value: "Never synced", tone: "neutral", icon: CircleDashed }
+          : { value: "Connected", tone: "success", icon: CheckCircle2 };
+
+  const kindLabel = health.kind === "pull_http" ? "API sync connector" : humanize(health.kind);
+  const description = [
+    sourceTypeLabel(health.sourceType),
+    kindLabel,
+    health.scheduleCron ? `Schedule ${health.scheduleCron}` : "Manual or webhook syncs",
+  ].join(" · ");
+
+  const busyLabel = repairing ? "Repairing call dates…" : backfilling ? "Back-filling transcripts…" : null;
+
+  const moreItems: MenuItem[] =
+    health.kind === "pull_http"
+      ? [
+          { label: "Repair call dates", icon: CalendarCheck, onSelect: onRepairDates, disabled: repairing },
+          { label: "Back-fill transcripts", icon: ScrollText, onSelect: onBackfill, disabled: backfilling },
+        ]
+      : [];
+
   return (
-    <div className="space-y-6">
-      <Link href="/dashboard/sources" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
-        <ArrowLeft className="h-4 w-4" /> Knowledge sources
-      </Link>
-
-      {/* Header + controls */}
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-semibold tracking-tight">{health.name}</h1>
-            <Badge tone={paused ? "warning" : "success"}>{paused ? "Paused" : "Active"}</Badge>
-            {errorState && <Badge tone="danger">Last sync failed</Badge>}
-          </div>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {health.sourceType.replace(/_/g, " ")} · {health.kind === "pull_http" ? "API sync connector" : health.kind}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={toggleActive} disabled={toggling}>
-            {toggling ? <Loader2 className="h-4 w-4 animate-spin" /> : paused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
-            {paused ? "Resume sync" : "Pause sync"}
-          </Button>
-          {health.kind === "pull_http" && (
-            <Button variant="outline" size="sm" onClick={backfillTranscripts} disabled={backfilling} title="Fetch and store every past call's raw transcript">
-              {backfilling ? <Loader2 className="h-4 w-4 animate-spin" /> : <ScrollText className="h-4 w-4" />}
-              {backfilling ? "Back-filling…" : "Back-fill transcripts"}
+    <div className="space-y-5">
+      <PageHeader
+        title={health.name}
+        description={description}
+        backHref="/dashboard/sources"
+        backLabel="Sources"
+        className="mb-0"
+        actions={
+          <>
+            <Button size="toolbar" onClick={syncNow} loading={syncing}>
+              {!syncing && <RefreshCw size={14} aria-hidden />}
+              {syncing ? "Syncing…" : errorState ? "Retry sync" : "Sync now"}
             </Button>
-          )}
-          {health.kind === "pull_http" && (
-            <Button variant="outline" size="sm" onClick={repairDates} disabled={repairing} title="Align every stored call date with the scoring app (fixes blank / mis-dated calls)">
-              {repairing ? <Loader2 className="h-4 w-4 animate-spin" /> : <CalendarCheck className="h-4 w-4" />}
-              {repairing ? "Repairing…" : "Repair call dates"}
+            <Button variant="secondary" size="toolbar" onClick={onToggleActive} loading={toggling}>
+              {!toggling && (paused ? <Play size={14} aria-hidden /> : <Pause size={14} aria-hidden />)}
+              {paused ? "Resume sync" : "Pause sync"}
             </Button>
-          )}
-          <Button size="sm" onClick={syncNow} disabled={syncing}>
-            {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            {syncing ? "Syncing…" : errorState ? "Retry sync" : "Sync now"}
-          </Button>
+            {moreItems.length > 0 && (
+              <Menu
+                label="More source actions"
+                items={moreItems}
+                width={220}
+                triggerClassName="border border-border bg-surface"
+              />
+            )}
+          </>
+        }
+      >
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <Badge tone={syncState.tone} dot>
+            {syncState.label}
+          </Badge>
+          {paused && <Badge tone="neutral">Paused</Badge>}
+          <span role="status" className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+            {busyLabel && (
+              <>
+                <Loader2 size={12} aria-hidden className="animate-spin" />
+                {busyLabel}
+              </>
+            )}
+          </span>
         </div>
-      </div>
+      </PageHeader>
 
-      {msg && <Alert tone={msg.tone}>{msg.text}</Alert>}
+      {msg && (
+        <Alert tone={msg.tone} onDismiss={() => setMsg(null)}>
+          {msg.text}
+        </Alert>
+      )}
 
       {/* Sync state */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          icon={health.lastStatus === "success" ? CheckCircle2 : errorState ? AlertTriangle : Radio}
-          tone={health.lastStatus === "success" ? "ok" : errorState ? "bad" : "muted"}
+      <StatGrid cols={4}>
+        <StatTile
+          icon={connection.icon}
+          tone={connection.tone}
           label="Connection"
-          value={paused ? "Paused" : errorState ? "Error" : "Connected"}
-          hint={health.authType === "none" ? "no auth" : `${health.authType} auth`}
+          value={connection.value}
+          hint={AUTH_LABELS[health.authType] ?? `${humanize(health.authType)} auth`}
         />
-        <StatCard icon={CheckCircle2} tone="ok" label="Last successful sync" value={relTime(health.lastSuccessAt)} hint={health.lastSuccessAt ? new Date(health.lastSuccessAt).toLocaleString() : "—"} />
-        <StatCard icon={Clock} tone="muted" label="Last attempted" value={relTime(health.lastRunAt)} hint={health.scheduleCron ? `schedule: ${health.scheduleCron}` : "manual only"} />
-        <StatCard icon={Gauge} tone="muted" label="Avg time to searchable" value={duration(health.avgTimeToSearchableMs)} hint="call → embedded" />
-      </div>
+        <StatTile
+          icon={health.lastSuccessAt ? CheckCircle2 : CircleDashed}
+          tone={health.lastSuccessAt ? "success" : "default"}
+          label="Last successful sync"
+          value={<TimeAgo iso={health.lastSuccessAt} />}
+          hint={health.lastSuccessAt ? "Newest successful run" : "No successful sync yet"}
+        />
+        <StatTile
+          icon={Clock}
+          label="Last attempted"
+          value={<TimeAgo iso={health.lastRunAt} />}
+          hint={health.scheduleCron ? `Schedule: ${health.scheduleCron}` : "Manual only"}
+        />
+        <StatTile
+          icon={Gauge}
+          label="Avg time to searchable"
+          value={fmtDuration(health.avgTimeToSearchableMs)}
+          hint="From call to embedded"
+        />
+      </StatGrid>
 
       {/* Throughput */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <StatCard icon={Radio} tone="ok" label="Records ingested" value={health.totalIngested.toLocaleString()} hint="across recent runs" />
-        <StatCard icon={GitCommitHorizontal} tone="muted" label="Chunks embedded" value={health.totalChunks.toLocaleString()} hint="searchable pieces" />
-        <StatCard icon={AlertTriangle} tone={health.totalSkipped > 0 ? "warn" : "muted"} label="Skipped as duplicates" value={health.totalSkipped.toLocaleString()} hint="idempotent by content hash" />
-      </div>
+      <StatGrid cols={3}>
+        <StatTile
+          icon={Radio}
+          label="Records ingested"
+          value={fmtInt(health.totalIngested)}
+          hint="Across recent runs"
+        />
+        <StatTile
+          icon={GitCommitHorizontal}
+          label="Chunks embedded"
+          value={fmtInt(health.totalChunks)}
+          hint="Searchable pieces"
+        />
+        <StatTile
+          icon={AlertTriangle}
+          tone={health.totalSkipped > 0 ? "warning" : "default"}
+          label="Skipped as duplicates"
+          value={fmtInt(health.totalSkipped)}
+          hint="Idempotent by content hash"
+        />
+      </StatGrid>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {/* Checkpoint + connection */}
-        <Card>
-          <CardContent className="p-5">
-            <h2 className="mb-3 text-base font-semibold">Connection &amp; checkpoint</h2>
-            <dl className="space-y-2.5 text-sm">
-              <Row label="Endpoint">{health.endpointUrl ? <code className="break-all text-xs">{health.httpMethod} {health.endpointUrl}</code> : "—"}</Row>
-              <Row label="Sync cursor field">{health.cursorField || "—"}</Row>
-              <Row label="Last checkpoint">{health.cursorValue ? <code className="break-all text-xs">{health.cursorValue}</code> : <span className="text-muted-foreground">not yet set</span>}</Row>
-              <Row label="Incremental param">{health.cursorParam || "—"}</Row>
-            </dl>
-          </CardContent>
-        </Card>
+        <SectionCard icon={Plug} title="Connection and checkpoint">
+          <dl className="grid grid-cols-[160px_minmax(0,1fr)] gap-x-4 gap-y-2 text-[13px]">
+            <Row label="Endpoint">
+              {health.endpointUrl ? (
+                <code className="break-all font-mono text-xs">
+                  {health.httpMethod} {health.endpointUrl}
+                </code>
+              ) : (
+                <Muted>—</Muted>
+              )}
+            </Row>
+            <Row label="Sync cursor field">{health.cursorField || <Muted>—</Muted>}</Row>
+            <Row label="Last checkpoint">
+              {health.cursorValue ? (
+                <code className="break-all font-mono text-xs">{health.cursorValue}</code>
+              ) : (
+                <Muted>Not set yet</Muted>
+              )}
+            </Row>
+            <Row label="Incremental param">{health.cursorParam || <Muted>—</Muted>}</Row>
+          </dl>
+        </SectionCard>
 
-        {/* Field mapping */}
-        <Card>
-          <CardContent className="p-5">
-            <h2 className="mb-3 text-base font-semibold">Ingestion mapping</h2>
-            <dl className="space-y-2.5 text-sm">
-              <Row label="Records path">{health.recordsPath ? <code className="text-xs">{health.recordsPath}</code> : "—"}</Row>
-              <Row label="Record id field">{health.recordIdField || "—"}</Row>
-              <Row label="Source type">{health.sourceType.replace(/_/g, " ")}</Row>
-              <Row label="Schedule">{health.scheduleCron || "manual / webhook only"}</Row>
-            </dl>
-          </CardContent>
-        </Card>
+        <SectionCard icon={Workflow} title="Ingestion mapping">
+          <dl className="grid grid-cols-[160px_minmax(0,1fr)] gap-x-4 gap-y-2 text-[13px]">
+            <Row label="Records path">
+              {health.recordsPath ? (
+                <code className="break-all font-mono text-xs">{health.recordsPath}</code>
+              ) : (
+                <Muted>—</Muted>
+              )}
+            </Row>
+            <Row label="Record id field">{health.recordIdField || <Muted>—</Muted>}</Row>
+            <Row label="Source type">{sourceTypeLabel(health.sourceType)}</Row>
+            <Row label="Schedule">{health.scheduleCron || <Muted>Manual or webhook only</Muted>}</Row>
+          </dl>
+        </SectionCard>
       </div>
 
       {/* Run history */}
-      <Card>
-        <CardContent className="p-0">
-          <div className="border-b border-border p-5">
-            <h2 className="text-base font-semibold">Sync history</h2>
-            <p className="text-xs text-muted-foreground">Recent runs, newest first. Errors show the failure reason.</p>
-          </div>
-          <div className="overflow-x-auto">
-            <Table>
-              <THead>
-                <Tr>
-                  <Th>Started</Th>
-                  <Th>Trigger</Th>
-                  <Th>Status</Th>
-                  <Th className="text-right">Ingested</Th>
-                  <Th className="text-right">Chunks</Th>
-                  <Th className="text-right">Skipped</Th>
-                  <Th>Duration</Th>
-                </Tr>
-              </THead>
-              <TBody>
-                {runs.length === 0 ? (
-                  <Tr>
-                    <Td className="py-8 text-center text-muted-foreground" colSpan={7}>
-                      No syncs yet. Run “Sync now” to pull the first batch.
+      <TableCard title="Sync history" meta="Recent runs, newest first">
+        <Table minWidth={720} caption="Sync history">
+          <THead>
+            <tr>
+              <Th>Started</Th>
+              <Th>Trigger</Th>
+              <Th>Status</Th>
+              <Th numeric>Ingested</Th>
+              <Th numeric>Chunks</Th>
+              <Th numeric>Skipped</Th>
+              <Th numeric>Duration</Th>
+            </tr>
+          </THead>
+          <TBody>
+            {runs.length === 0 ? (
+              <TableEmptyRow colSpan={7}>No syncs yet. Use Sync now to pull the first batch.</TableEmptyRow>
+            ) : (
+              runs.map((r, i) => {
+                const dur = r.finishedAt ? new Date(r.finishedAt).getTime() - new Date(r.startedAt).getTime() : null;
+                const firstLine = r.error ? r.error.split("\n")[0] : "";
+                return (
+                  <Tr key={i}>
+                    <Td className="whitespace-nowrap align-top text-muted-foreground">
+                      <TimeAgo iso={r.startedAt || null} />
                     </Td>
+                    <Td className="whitespace-nowrap align-top text-muted-foreground">
+                      {triggerLabel(r.trigger)}
+                    </Td>
+                    <Td className="align-top">
+                      <div className="flex max-w-[44ch] flex-col items-start gap-1">
+                        <Badge tone={statusTone(r.status)}>{RUN_STATUS_LABELS[r.status] ?? humanize(r.status)}</Badge>
+                        {r.error && (
+                          <details className="group w-full text-xs text-danger">
+                            <summary className="flex cursor-pointer list-none items-center gap-1 rounded-md [&::-webkit-details-marker]:hidden">
+                              <ChevronRight
+                                size={12}
+                                aria-hidden
+                                className="shrink-0 transition-transform group-open:rotate-90"
+                              />
+                              <span className="truncate">{firstLine || "Show error"}</span>
+                            </summary>
+                            <p className="mt-1 whitespace-pre-wrap break-words rounded-lg bg-danger/5 px-2 py-1.5 font-mono text-xs text-danger">
+                              {r.error}
+                            </p>
+                          </details>
+                        )}
+                      </div>
+                    </Td>
+                    <Td numeric className="align-top">{fmtInt(r.ingested)}</Td>
+                    <Td numeric className="align-top">{fmtInt(r.chunks)}</Td>
+                    <Td numeric className="align-top">{fmtInt(r.skipped)}</Td>
+                    <Td numeric className="align-top text-muted-foreground">{fmtDuration(dur)}</Td>
                   </Tr>
-                ) : (
-                  runs.map((r, i) => {
-                    const dur = r.finishedAt ? new Date(r.finishedAt).getTime() - new Date(r.startedAt).getTime() : null;
-                    return (
-                      <Tr key={i}>
-                        <Td className="whitespace-nowrap text-muted-foreground">{new Date(r.startedAt).toLocaleString()}</Td>
-                        <Td className="capitalize text-muted-foreground">{r.trigger}</Td>
-                        <Td>
-                          <Badge tone={r.status === "success" ? "success" : r.status === "error" ? "danger" : "warning"}>{r.status}</Badge>
-                          {r.error && <span className="ml-2 text-xs text-danger" title={r.error}>{r.error.slice(0, 40)}</span>}
-                        </Td>
-                        <Td className="text-right tabular-nums">{r.ingested.toLocaleString()}</Td>
-                        <Td className="text-right tabular-nums">{r.chunks.toLocaleString()}</Td>
-                        <Td className="text-right tabular-nums">{r.skipped.toLocaleString()}</Td>
-                        <Td className="whitespace-nowrap text-muted-foreground">{duration(dur)}</Td>
-                      </Tr>
-                    );
-                  })
-                )}
-              </TBody>
-            </Table>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
+                );
+              })
+            )}
+          </TBody>
+        </Table>
+      </TableCard>
 
-function StatCard({
-  icon: Icon,
-  tone,
-  label,
-  value,
-  hint,
-}: {
-  icon: typeof CheckCircle2;
-  tone: "ok" | "bad" | "warn" | "muted";
-  label: string;
-  value: string;
-  hint: string;
-}) {
-  const iconCls =
-    tone === "ok" ? "bg-emerald-500/15 text-emerald-500" : tone === "bad" ? "bg-rose-500/15 text-rose-500" : tone === "warn" ? "bg-amber-500/15 text-amber-500" : "bg-surface-muted text-muted-foreground";
-  return (
-    <Card>
-      <CardContent className="p-4">
-        <div className="flex items-start justify-between gap-2">
-          <p className="text-xs text-muted-foreground">{label}</p>
-          <span className={cn("grid h-7 w-7 shrink-0 place-items-center rounded-lg", iconCls)}>
-            <Icon className="h-4 w-4" aria-hidden />
-          </span>
-        </div>
-        <p className="mt-1.5 text-xl font-semibold tabular-nums">{value}</p>
-        <p className="text-[11px] text-muted-foreground">{hint}</p>
-      </CardContent>
-    </Card>
-  );
-}
-
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-start justify-between gap-4">
-      <dt className="shrink-0 text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 text-right font-medium">{children}</dd>
+      {dialog}
     </div>
   );
 }

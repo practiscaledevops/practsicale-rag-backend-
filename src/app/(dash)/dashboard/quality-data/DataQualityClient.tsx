@@ -11,22 +11,51 @@ import {
   AlertTriangle,
   CheckCircle2,
   RefreshCw,
-  Loader2,
   ArrowRight,
 } from "lucide-react";
-import { Card, CardContent } from "@/components/ui/Card";
-import { Badge } from "@/components/ui/Badge";
-import { Button } from "@/components/ui/Button";
-import { Alert } from "@/components/ui/Alert";
-import { cn } from "@/lib/utils";
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  SectionCard,
+  StatGrid,
+  StatTile,
+  buttonClass,
+  type StatTone,
+} from "@/components/ui";
+import { fmtDateTime, fmtInt, relTime } from "@/lib/format";
+import { sourceTypeLabel, triggerLabel } from "@/lib/ui-labels";
 import type { DataQuality, QualityDoc } from "@/lib/data-quality";
 
-const SOURCE_LABELS: Record<string, string> = {
-  document: "Document",
-  call_score: "Call score",
-  coaching: "Coaching",
-  transcript: "Transcript",
-};
+/** In-page anchors: each summary tile links to its section. */
+const SECTION_IDS = {
+  unsearchable: "not-searchable",
+  failedRuns: "failed-runs",
+  reviewDue: "review-due",
+  stale: "stale-knowledge",
+  noOwner: "collections-without-owner",
+} as const;
+
+
+/** Table links: foreground text, accent on hover. */
+const tableLink = "font-medium text-foreground hover:text-accent-strong hover:underline";
+
+// true only after hydration, so locale-dependent strings never mismatch the server HTML.
+const noopSubscribe = () => () => {};
+function useHydrated() {
+  return React.useSyncExternalStore(noopSubscribe, () => true, () => false);
+}
+
+/** Relative time ("5m ago") with the exact local date and time in its tooltip. */
+function TimeAgo({ iso }: { iso: string }) {
+  const hydrated = useHydrated();
+  return (
+    <time dateTime={iso} title={hydrated ? fmtDateTime(iso) : undefined} suppressHydrationWarning>
+      {relTime(iso, { never: "—", absolute: hydrated })}
+    </time>
+  );
+}
 
 export function DataQualityClient({ data }: { data: DataQuality }) {
   const router = useRouter();
@@ -58,41 +87,108 @@ export function DataQualityClient({ data }: { data: DataQuality }) {
     }
   }
 
-  return (
-    <div className="space-y-6">
-      {error && <Alert tone="danger">{error}</Alert>}
+  // Tile tone: danger/warning while there is something to fix, success when clear.
+  const tileTone = (count: number, severity: "danger" | "warning"): StatTone => (count > 0 ? severity : "success");
+  const anchor = (count: number, id: string) => (count > 0 ? `#${id}` : undefined);
 
-      {/* Summary cards */}
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-5">
-        <SummaryCard icon={Layers} tone={data.counts.unsearchable > 0 ? "bad" : "ok"} label="Not searchable" value={data.counts.unsearchable} />
-        <SummaryCard icon={AlertTriangle} tone={data.counts.failedRuns > 0 ? "bad" : "ok"} label="Failed runs" value={data.counts.failedRuns} />
-        <SummaryCard icon={CalendarClock} tone={data.counts.reviewDue > 0 ? "warn" : "ok"} label="Review due" value={data.counts.reviewDue} />
-        <SummaryCard icon={Clock} tone={data.counts.stale > 0 ? "warn" : "ok"} label="Stale (90d+)" value={data.counts.stale} />
-        <SummaryCard icon={UserX} tone={data.counts.noOwner > 0 ? "warn" : "ok"} label="No owner" value={data.counts.noOwner} />
-      </div>
+  const openDoc = (d: QualityDoc) => (
+    <Link
+      href={`/dashboard/documents/${d.id}`}
+      aria-label={`Open ${d.title || "untitled document"}`}
+      className={buttonClass({ variant: "secondary", size: "sm" })}
+    >
+      Open
+    </Link>
+  );
+
+  return (
+    <div className="space-y-5">
+      {error && (
+        <Alert tone="danger" onDismiss={() => setError(null)}>
+          {error}
+        </Alert>
+      )}
+
+      {/* Summary tiles, each linking to its section below */}
+      <StatGrid cols={3} className="lg:grid-cols-5">
+        <StatTile
+          icon={Layers}
+          tone={tileTone(data.counts.unsearchable, "danger")}
+          label="Not searchable"
+          value={fmtInt(data.counts.unsearchable)}
+          hint="Documents with no chunks"
+          href={anchor(data.counts.unsearchable, SECTION_IDS.unsearchable)}
+        />
+        <StatTile
+          icon={AlertTriangle}
+          tone={tileTone(data.counts.failedRuns, "danger")}
+          label="Failed runs"
+          value={fmtInt(data.counts.failedRuns)}
+          hint="Syncs that errored"
+          href={anchor(data.counts.failedRuns, SECTION_IDS.failedRuns)}
+        />
+        <StatTile
+          icon={CalendarClock}
+          tone={tileTone(data.counts.reviewDue, "warning")}
+          label="Review due"
+          value={fmtInt(data.counts.reviewDue)}
+          hint="Review date has passed"
+          href={anchor(data.counts.reviewDue, SECTION_IDS.reviewDue)}
+        />
+        <StatTile
+          icon={Clock}
+          tone={tileTone(data.counts.stale, "warning")}
+          label="Stale (90d+)"
+          value={fmtInt(data.counts.stale)}
+          hint="Not updated in 90+ days"
+          href={anchor(data.counts.stale, SECTION_IDS.stale)}
+        />
+        <StatTile
+          icon={UserX}
+          tone={tileTone(data.counts.noOwner, "warning")}
+          label="No owner"
+          value={fmtInt(data.counts.noOwner)}
+          hint="Collections without an owner"
+          href={anchor(data.counts.noOwner, SECTION_IDS.noOwner)}
+        />
+      </StatGrid>
 
       {allClear ? (
-        <Card>
-          <CardContent className="flex items-center gap-3 p-6">
-            <CheckCircle2 className="h-6 w-6 text-emerald-500" />
-            <div>
-              <p className="font-medium">Knowledge base is in good shape.</p>
-              <p className="text-sm text-muted-foreground">
-                Everything is searchable, owned, fresh, and processing cleanly across {data.totalDocuments.toLocaleString()} documents.
-              </p>
-            </div>
-          </CardContent>
+        <Card className="flex items-center gap-3 p-4">
+          <span aria-hidden className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-success/10 text-success">
+            <CheckCircle2 size={18} />
+          </span>
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-foreground">Knowledge base is in good shape.</p>
+            <p className="text-[13px] text-muted-foreground">
+              Everything is searchable, owned, fresh, and processing cleanly across {fmtInt(data.totalDocuments)} documents.
+            </p>
+          </div>
         </Card>
       ) : (
-        <div className="space-y-6">
+        <div className="space-y-5">
           {/* Not searchable — highest priority (reprocess) */}
           {data.unsearchable.length > 0 && (
-            <Section title="Not searchable" hint="Documents with no embedded chunks. Reprocess to make them retrievable." tone="bad">
+            <Section
+              id={SECTION_IDS.unsearchable}
+              icon={Layers}
+              title="Not searchable"
+              description="Documents with no embedded chunks. Reprocess them to make them retrievable."
+              tone="danger"
+              shown={data.unsearchable.length}
+              total={data.counts.unsearchable}
+            >
               <DocList
                 docs={data.unsearchable}
                 action={(d) => (
-                  <Button variant="outline" size="sm" onClick={() => reprocess(d.id)} disabled={reprocessing === d.id}>
-                    {reprocessing === d.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => reprocess(d.id)}
+                    loading={reprocessing === d.id}
+                    aria-label={`Reprocess ${d.title || "untitled document"}`}
+                  >
+                    {reprocessing !== d.id && <RefreshCw size={14} aria-hidden />}
                     Reprocess
                   </Button>
                 )}
@@ -102,20 +198,41 @@ export function DataQualityClient({ data }: { data: DataQuality }) {
 
           {/* Failed runs */}
           {data.failedRuns.length > 0 && (
-            <Section title="Failed ingestion runs" hint="Open the source to retry a failed sync." tone="bad">
-              <ul className="divide-y divide-border rounded-lg border border-border">
+            <Section
+              id={SECTION_IDS.failedRuns}
+              icon={AlertTriangle}
+              title="Failed ingestion runs"
+              description="Open the source to retry a failed sync."
+              tone="danger"
+              shown={data.failedRuns.length}
+              total={data.counts.failedRuns}
+            >
+              <ul>
                 {data.failedRuns.map((r) => (
-                  <li key={r.id} className="flex items-center gap-3 px-3 py-2.5">
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-medium">{r.error || "Unknown error"}</span>
-                      <span className="text-xs text-muted-foreground">{r.trigger} · {new Date(r.startedAt).toLocaleString()}</span>
-                    </span>
+                  <li key={r.id} className="flex items-center justify-between gap-3 border-t border-border px-4 py-2.5 first:border-t-0">
+                    <div className="min-w-0 flex-1">
+                      <p className="break-words text-[13px] font-medium text-foreground">
+                        {r.error || "Unknown error"}
+                      </p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {triggerLabel(r.trigger)} · <TimeAgo iso={r.startedAt} />
+                      </p>
+                    </div>
                     {r.dataSourceId ? (
-                      <Link href={`/dashboard/sources/${r.dataSourceId}`} className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-sm text-muted-foreground hover:bg-surface-muted hover:text-foreground">
-                        Open source <ArrowRight className="h-3.5 w-3.5" />
+                      <Link
+                        href={`/dashboard/sources/${r.dataSourceId}`}
+                        className={buttonClass({ variant: "secondary", size: "sm", className: "shrink-0" })}
+                      >
+                        Open source
+                        <ArrowRight size={14} aria-hidden />
                       </Link>
                     ) : (
-                      <Link href="/dashboard/processing" className="text-sm text-accent hover:underline">Processing</Link>
+                      <Link
+                        href="/dashboard/processing"
+                        className={buttonClass({ variant: "secondary", size: "sm", className: "shrink-0" })}
+                      >
+                        Processing runs
+                      </Link>
                     )}
                   </li>
                 ))}
@@ -125,30 +242,57 @@ export function DataQualityClient({ data }: { data: DataQuality }) {
 
           {/* Review due */}
           {data.reviewDue.length > 0 && (
-            <Section title="Review date passed" hint="These sources are due for an owner review." tone="warn">
-              <DocList docs={data.reviewDue} action={(d) => (
-                <Link href={`/dashboard/documents/${d.id}`} className="text-sm text-accent hover:underline">Open</Link>
-              )} />
+            <Section
+              id={SECTION_IDS.reviewDue}
+              icon={CalendarClock}
+              title="Review date passed"
+              description="These sources are due for an owner review."
+              tone="warning"
+              shown={data.reviewDue.length}
+              total={data.counts.reviewDue}
+            >
+              <DocList docs={data.reviewDue} action={openDoc} />
             </Section>
           )}
 
           {/* Stale */}
           {data.stale.length > 0 && (
-            <Section title="Stale knowledge" hint="Not updated in 90+ days. Confirm it's still accurate or assign a review." tone="warn">
-              <DocList docs={data.stale} action={(d) => (
-                <Link href={`/dashboard/documents/${d.id}`} className="text-sm text-accent hover:underline">Open</Link>
-              )} />
+            <Section
+              id={SECTION_IDS.stale}
+              icon={Clock}
+              title="Stale knowledge"
+              description="Not updated in 90+ days. Confirm it's still accurate or assign a review."
+              tone="warning"
+              shown={data.stale.length}
+              total={data.counts.stale}
+            >
+              <DocList docs={data.stale} action={openDoc} />
             </Section>
           )}
 
           {/* Collections without owner */}
           {data.collectionsNoOwner.length > 0 && (
-            <Section title="Collections without an owner" hint="Assign an owner in each collection's governance settings." tone="warn">
+            <Section
+              id={SECTION_IDS.noOwner}
+              icon={UserX}
+              title="Collections without an owner"
+              description="Assign an owner in each collection's governance settings."
+              tone="warning"
+              shown={data.collectionsNoOwner.length}
+              total={data.counts.noOwner}
+              padded
+            >
               <ul className="flex flex-wrap gap-2">
                 {data.collectionsNoOwner.map((c) => (
-                  <Link key={c.id} href="/dashboard/collections" className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface-muted">
-                    {c.name} <ArrowRight className="h-3.5 w-3.5 text-muted-foreground" />
-                  </Link>
+                  <li key={c.id}>
+                    <Link
+                      href="/dashboard/collections"
+                      className="inline-flex h-7 items-center gap-1.5 rounded-full border border-border bg-surface px-3 text-[13px] text-foreground transition-colors hover:bg-surface-muted"
+                    >
+                      {c.name}
+                      <ArrowRight size={14} aria-hidden className="text-muted-foreground" />
+                    </Link>
+                  </li>
                 ))}
               </ul>
             </Section>
@@ -159,51 +303,71 @@ export function DataQualityClient({ data }: { data: DataQuality }) {
   );
 }
 
-function SummaryCard({ icon: Icon, tone, label, value }: { icon: typeof Clock; tone: "ok" | "warn" | "bad"; label: string; value: number }) {
-  const cls = tone === "bad" && value > 0 ? "text-rose-500" : tone === "warn" && value > 0 ? "text-amber-500" : "text-emerald-500";
+function Section({
+  id,
+  icon,
+  title,
+  description,
+  tone,
+  shown,
+  total,
+  padded = false,
+  children,
+}: {
+  id: string;
+  icon: React.ComponentProps<typeof SectionCard>["icon"];
+  title: string;
+  description: string;
+  tone: "danger" | "warning";
+  shown: number;
+  total: number;
+  /** Pad the body (chip lists); row lists run edge to edge. */
+  padded?: boolean;
+  children: React.ReactNode;
+}) {
   return (
-    <Card>
-      <CardContent className="p-4">
-        <div className="flex items-center gap-2 text-muted-foreground">
-          <Icon className="h-4 w-4" aria-hidden />
-          <span className="text-xs font-medium">{label}</span>
-        </div>
-        <p className={cn("mt-1.5 text-2xl font-semibold tabular-nums", value > 0 ? cls : "text-foreground")}>{value}</p>
-      </CardContent>
-    </Card>
-  );
-}
-
-function Section({ title, hint, tone, children }: { title: string; hint: string; tone: "bad" | "warn"; children: React.ReactNode }) {
-  return (
-    <Card>
-      <CardContent className="p-5">
-        <div className="mb-3 flex items-start gap-2">
-          <span className={cn("mt-1 h-2 w-2 shrink-0 rounded-full", tone === "bad" ? "bg-rose-500" : "bg-amber-500")} />
-          <div>
-            <h2 className="text-base font-semibold">{title}</h2>
-            <p className="text-xs text-muted-foreground">{hint}</p>
-          </div>
-        </div>
-        {children}
-      </CardContent>
-    </Card>
+    <SectionCard
+      id={id}
+      icon={icon}
+      title={title}
+      description={description}
+      actions={<Badge tone={tone}>{fmtInt(total)}</Badge>}
+      className="scroll-mt-4"
+      bodyClassName={padded ? "p-4" : "p-0"}
+    >
+      {children}
+      {total > shown && (
+        <p
+          className={
+            padded
+              ? "mt-3 text-xs text-muted-foreground"
+              : "border-t border-border px-4 py-2.5 text-xs text-muted-foreground"
+          }
+        >
+          Showing the first {fmtInt(shown)} of {fmtInt(total)}.
+        </p>
+      )}
+    </SectionCard>
   );
 }
 
 function DocList({ docs, action }: { docs: QualityDoc[]; action: (d: QualityDoc) => React.ReactNode }) {
   return (
-    <ul className="divide-y divide-border rounded-lg border border-border">
+    <ul>
       {docs.map((d) => (
-        <li key={d.id} className="flex items-center gap-3 px-3 py-2.5">
-          <span className="min-w-0 flex-1">
-            <Link href={`/dashboard/documents/${d.id}`} className="block truncate text-sm font-medium text-accent hover:underline">
+        <li key={d.id} className="flex items-center justify-between gap-3 border-t border-border px-4 py-2.5 first:border-t-0">
+          <div className="min-w-0 flex-1">
+            <Link href={`/dashboard/documents/${d.id}`} className={`block truncate text-[13px] ${tableLink}`}>
               {d.title || "Untitled"}
             </Link>
-            <span className="text-xs text-muted-foreground">{d.reason}</span>
-          </span>
-          <Badge tone="neutral">{SOURCE_LABELS[d.sourceType] ?? d.sourceType}</Badge>
-          {action(d)}
+            <p className="truncate text-xs text-muted-foreground">{d.reason}</p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Badge tone="neutral" className="hidden sm:inline-flex">
+              {sourceTypeLabel(d.sourceType)}
+            </Badge>
+            {action(d)}
+          </div>
         </li>
       ))}
     </ul>

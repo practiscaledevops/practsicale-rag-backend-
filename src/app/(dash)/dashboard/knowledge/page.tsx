@@ -1,8 +1,14 @@
 import { Suspense } from "react";
+import Link from "next/link";
+import { PlusCircle } from "lucide-react";
 import { requireAdmin } from "@/lib/auth/admin";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { buttonClass } from "@/components/ui/Button";
 import { KnowledgeObjectsClient } from "./KnowledgeObjectsClient";
 import DashboardLoading from "../loading";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Knowledge objects" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,7 +25,13 @@ export default async function KnowledgePage() {
     <div>
       <PageHeader
         title="Knowledge objects"
-        description="Everything the Brain knows, as connected intelligence objects — not a pile of documents. Filter by class, domain, type and governance."
+        description="Everything the Brain knows, with its class, trust level and status."
+        actions={
+          <Link href="/dashboard/knowledge/add" className={buttonClass({ size: "toolbar" })}>
+            <PlusCircle size={14} aria-hidden />
+            Add knowledge
+          </Link>
+        }
       />
       {/* The explorer reads its initial filters from the URL (useSearchParams), which needs a Suspense boundary. */}
       <Suspense fallback={<DashboardLoading />}>

@@ -1,12 +1,17 @@
 "use client";
 
-// Knowledge control center — a fixed 3-pane operational workspace:
+// Knowledge control center — a 3-pane operational workspace:
 //   collections (left) → documents (middle) → detail inspector (right).
-// The page itself never scrolls; each pane scrolls independently. Deep green
-// palette per the Brain brand. Live counts are derived from the documents +
-// collections passed in; the document inspector lazy-loads chunks. Every
-// document is shown with its Operating Intelligence lane (class · domain) and,
-// when it backs a compiled knowledge object, that object's ref.
+// Full-bleed: the page itself never scrolls; each pane scrolls independently.
+// Below xl only one pane shows at a time, picked with the "Workspace pane"
+// switcher (choosing a collection opens Documents, a document opens Details).
+// xl, not lg: from lg up the shell's 256px rail is open, so a 1024px window
+// leaves 768px here, and 280 + 320 of side panes would squeeze the document
+// list to ~170px. At 1280 the list gets ~420px.
+// Live counts are derived from the documents + collections passed in; the
+// document inspector lazy-loads chunks. Every document is shown with its
+// Operating Intelligence lane (class · domain) and, when it backs a compiled
+// knowledge object, that object's ref.
 
 import * as React from "react";
 import Link from "next/link";
@@ -18,9 +23,7 @@ import {
   FileText,
   Database,
   Lock,
-  Search,
   Plus,
-  MoreHorizontal,
   RefreshCw,
   Trash2,
   Eye,
@@ -31,25 +34,32 @@ import {
   X,
   Pencil,
   Save,
+  Info,
 } from "lucide-react";
 import { WORK_MODES, MODE_LABELS } from "@/lib/prompts";
 import { ACCESS_LEVELS } from "@/lib/knowledge-taxonomy";
-import { INTELLIGENCE_CLASSES, domainLabel, humanize } from "@/lib/intelligence-taxonomy";
-
-// ---- Green palette (self-contained; independent of global tokens) -----------
-const C = {
-  bg: "#06100D",
-  sidebar: "#091914",
-  surface: "#0D1E18",
-  raised: "#122B23",
-  border: "#204438",
-  text: "#EDF7F2",
-  muted: "#91AAA0",
-  green: "#00BFAE",
-  restricted: "#94DCA7",
-  amber: "#F3B661",
-  red: "#FF7B75",
-};
+import { domainLabel, humanize } from "@/lib/intelligence-taxonomy";
+import { Alert, Notice } from "@/components/ui/Alert";
+import { Badge, StatusDot, Tag } from "@/components/ui/Badge";
+import { Button, buttonClass } from "@/components/ui/Button";
+import { useConfirm } from "@/components/ui/ConfirmDialog";
+import { Dialog } from "@/components/ui/Dialog";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { Field } from "@/components/ui/Field";
+import { IconButton } from "@/components/ui/IconButton";
+import { Input, SearchInput } from "@/components/ui/Input";
+import { Spinner } from "@/components/ui/Loading";
+import { Menu, type MenuItem } from "@/components/ui/Menu";
+import { RelTime, useHydrated } from "@/components/ui/RelTime";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { Segmented, type SegmentedOption } from "@/components/ui/Segmented";
+import { Select } from "@/components/ui/Select";
+import { CompactStat } from "@/components/ui/StatTile";
+import { Switch } from "@/components/ui/Switch";
+import { FilterTabs } from "@/components/ui/Tabs";
+import { fmtDate, fmtDateTime, fmtInt, relTime } from "@/lib/format";
+import { ACCESS_LABELS, CLASS_LABEL, sourceTypeLabel, statusTone, triggerLabel } from "@/lib/ui-labels";
+import { cn } from "@/lib/utils";
 
 export interface WsSettings {
   owner?: string;
@@ -93,21 +103,6 @@ export interface WsDocument {
   collectionIds: string[];
 }
 
-// source_type "document" is everything not synced from an API: uploads, pasted
-// text, links and compiled knowledge objects.
-const SOURCE_LABEL: Record<string, string> = {
-  document: "Manual",
-  call_score: "Call score",
-  coaching: "Coaching",
-  transcript: "Transcript",
-};
-const ACCESS_LABEL: Record<string, string> = {
-  team: "Team",
-  restricted: "Restricted",
-  confidential: "Confidential",
-  ceo_only: "CEO only",
-  public: "Public",
-};
 const RESTRICTED = new Set(["restricted", "confidential", "ceo_only"]);
 const STALE_DAYS = 90;
 
@@ -115,18 +110,12 @@ function ageDays(iso: string): number {
   const t = new Date(iso).getTime();
   return Number.isNaN(t) ? 0 : Math.floor((Date.now() - t) / 86_400_000);
 }
-function relTime(iso: string | null): string {
-  if (!iso) return "—";
-  const d = ageDays(iso);
-  if (d <= 0) return "today";
-  if (d === 1) return "yesterday";
-  if (d < 30) return `${d}d ago`;
-  if (d < 365) return `${Math.floor(d / 30)}mo ago`;
-  return `${Math.floor(d / 365)}y ago`;
-}
 function docAccess(d: WsDocument): string {
-  if (d.access) return ACCESS_LABEL[d.access.toLowerCase()] ?? d.access;
+  if (d.access) return ACCESS_LABELS[d.access.toLowerCase()] ?? d.access;
   return d.sourceType === "call_score" ? "Restricted" : "Team";
+}
+function docRestricted(d: WsDocument): boolean {
+  return RESTRICTED.has((d.access ?? "").toLowerCase()) || d.sourceType === "call_score";
 }
 function docStatus(d: WsDocument): "ready" | "processing" {
   return d.chunkCount > 0 ? "ready" : "processing";
@@ -138,21 +127,25 @@ function docReviewDue(d: WsDocument): boolean {
 }
 /** Lane label. A NULL class is a legacy row and reads as Business Reality (as hybrid_search_lane treats it). */
 function docClassLabel(d: WsDocument): string {
-  if (d.intelligenceClass === "raw_archive") return "Raw archive";
   const id = d.intelligenceClass ?? "business_reality";
-  return INTELLIGENCE_CLASSES.find((c) => c.id === id)?.label ?? humanize(id);
+  return CLASS_LABEL[id] ?? humanize(id);
 }
 /** The compiled page of a knowledge object (raw sources link to their object but are not "compiled"). */
 function docCompiled(d: WsDocument): boolean {
   return Boolean(d.objectId) && d.intelligenceClass !== "raw_archive";
+}
+/** A date-only value ("2026-03-01") reads as that calendar day in every time zone. */
+function fmtDay(value: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  return m ? fmtDate(new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))) : fmtDate(value);
 }
 
 const FILTERS = [
   ["all", "All"],
   ["compiled", "Compiled"],
   ["raw", "Raw archive"],
-  ["call_score", "Call score"],
-  ["document", "Manual"],
+  ["call_score", sourceTypeLabel("call_score")],
+  ["document", sourceTypeLabel("document")],
   ["ready", "Ready"],
   ["processing", "Processing"],
   ["review", "Needs review"],
@@ -161,30 +154,66 @@ const FILTERS = [
 ] as const;
 type FilterKey = (typeof FILTERS)[number][0];
 
-// Shared by the fixed header and every row so the columns stay aligned.
-const DOC_GRID = "minmax(0,2.2fr) minmax(0,1.5fr) 0.8fr 0.6fr 0.8fr 0.7fr 28px";
+function passesFilter(d: WsDocument, filter: FilterKey): boolean {
+  switch (filter) {
+    case "all": return true;
+    case "compiled": return docCompiled(d);
+    case "raw": return d.intelligenceClass === "raw_archive";
+    case "call_score": return d.sourceType === "call_score";
+    case "document": return d.sourceType === "document";
+    case "ready": return d.chunkCount > 0;
+    case "processing": return d.chunkCount === 0;
+    case "review": return docReviewDue(d);
+    case "restricted": return RESTRICTED.has((d.access ?? "").toLowerCase()) || d.sourceType === "call_score";
+    case "recent": return ageDays(d.updatedAt) < 7;
+  }
+}
+
+/** Folder colour bars cycle through the kit colours, as in the chatbot rail. */
+const FOLDER_BARS = ["bg-folder-1", "bg-folder-2", "bg-folder-3", "bg-folder-4", "bg-folder-5"];
+
+type Pane = "collections" | "documents" | "details";
+const PANE_OPTIONS: SegmentedOption<Pane>[] = [
+  { value: "collections", label: "Collections" },
+  { value: "documents", label: "Documents" },
+  { value: "details", label: "Details" },
+];
 
 // A synthetic id for the "All documents" and "Unfiled" pseudo-collections.
 const ALL = "__all__";
 const UNFILED = "__unfiled__";
 
+// The inspector's chunk list, for the row menu's "View chunks".
+const INSPECTOR_CHUNKS_ID = "ws-inspector-chunks";
+
+type NoticeState = { tone: "success" | "danger"; text: string } | null;
+
 export function KnowledgeWorkspace({
   collections,
   documents,
   governanceEnabled,
+  truncated = false,
 }: {
   collections: WsCollection[];
   documents: WsDocument[];
   governanceEnabled: boolean;
+  /** The server's document list hit its row cap, so older documents are not shown. */
+  truncated?: boolean;
 }) {
   const router = useRouter();
+  const { confirm, dialog } = useConfirm();
+  const hydrated = useHydrated();
   const [selectedCol, setSelectedCol] = React.useState<string>(ALL);
   const [selectedDoc, setSelectedDoc] = React.useState<string | null>(null);
   const [colSearch, setColSearch] = React.useState("");
   const [filter, setFilter] = React.useState<FilterKey>("all");
   const [docSearch, setDocSearch] = React.useState("");
   const [busyDoc, setBusyDoc] = React.useState<string | null>(null);
-  const [notice, setNotice] = React.useState<string | null>(null);
+  const [notice, setNotice] = React.useState<NoticeState>(null);
+  // Which pane shows below xl (all three show from xl up; see the layout note below).
+  const [pane, setPane] = React.useState<Pane>("collections");
+  const docSearchRef = React.useRef<HTMLInputElement>(null);
+  const workspaceRef = React.useRef<HTMLDivElement>(null);
 
   // Membership index: collectionId -> docs.
   const byCollection = React.useMemo(() => {
@@ -206,7 +235,7 @@ export function KnowledgeWorkspace({
 
   // Enriched collection rows (chunk totals, freshness, health, attention).
   const enriched = React.useMemo(() => {
-    return collections.map((c) => {
+    return collections.map((c, i) => {
       const docs = byCollection.get(c.id) ?? [];
       const chunks = docs.reduce((n, d) => n + d.chunkCount, 0);
       const lastUpdated = docs.reduce<string | null>((acc, d) => (!acc || d.updatedAt > acc ? d.updatedAt : acc), null);
@@ -218,7 +247,9 @@ export function KnowledgeWorkspace({
         ? "API sync"
         : "Manual upload";
       const attention = failing > 0 ? "fail" : stale > 0 ? "stale" : !s.owner ? "owner" : restricted ? "restricted" : null;
-      return { c, docs, chunks, lastUpdated, failing, stale, restricted, sourceKind, attention };
+      // Colour follows the collection's place in the full list, so it doesn't shift while searching.
+      const bar = FOLDER_BARS[i % FOLDER_BARS.length];
+      return { c, docs, chunks, lastUpdated, failing, stale, restricted, sourceKind, attention, bar };
     });
   }, [collections, byCollection]);
 
@@ -228,44 +259,65 @@ export function KnowledgeWorkspace({
     return enriched.filter((e) => e.c.name.toLowerCase().includes(q));
   }, [enriched, colSearch]);
 
-  // Documents for the middle pane.
-  const paneDocs = React.useMemo(() => {
-    let docs =
-      selectedCol === ALL ? documents : selectedCol === UNFILED ? byCollection.get(UNFILED) ?? [] : byCollection.get(selectedCol) ?? [];
-    // filter
-    docs = docs.filter((d) => {
-      switch (filter) {
-        case "all": return true;
-        case "compiled": return docCompiled(d);
-        case "raw": return d.intelligenceClass === "raw_archive";
-        case "call_score": return d.sourceType === "call_score";
-        case "document": return d.sourceType === "document";
-        case "ready": return d.chunkCount > 0;
-        case "processing": return d.chunkCount === 0;
-        case "review": return docReviewDue(d);
-        case "restricted": return RESTRICTED.has((d.access ?? "").toLowerCase()) || d.sourceType === "call_score";
-        case "recent": return ageDays(d.updatedAt) < 7;
-      }
-    });
-    const q = docSearch.trim().toLowerCase();
-    if (q) {
-      docs = docs.filter((d) =>
-        `${d.title ?? ""} ${d.objectRef ?? ""} ${d.objectName ?? ""} ${docClassLabel(d)} ${domainLabel(d.domain)} ${d.category ?? ""} ${d.owner ?? ""}`
-          .toLowerCase()
-          .includes(q)
-      );
-    }
-    return docs;
-  }, [selectedCol, filter, docSearch, documents, byCollection]);
+  // Documents for the middle pane: the selected collection, then search, then the filter.
+  const scopeDocs = React.useMemo(
+    () =>
+      selectedCol === ALL ? documents : selectedCol === UNFILED ? byCollection.get(UNFILED) ?? [] : byCollection.get(selectedCol) ?? [],
+    [selectedCol, documents, byCollection]
+  );
+
+  // Typing stays responsive over thousands of rows: filtering follows a deferred copy.
+  const deferredDocSearch = React.useDeferredValue(docSearch);
+  const searchedDocs = React.useMemo(() => {
+    const q = deferredDocSearch.trim().toLowerCase();
+    if (!q) return scopeDocs;
+    return scopeDocs.filter((d) =>
+      `${d.title ?? ""} ${d.objectRef ?? ""} ${d.objectName ?? ""} ${docClassLabel(d)} ${domainLabel(d.domain)} ${d.category ?? ""} ${d.owner ?? ""}`
+        .toLowerCase()
+        .includes(q)
+    );
+  }, [scopeDocs, deferredDocSearch]);
+
+  const paneDocs = React.useMemo(() => searchedDocs.filter((d) => passesFilter(d, filter)), [searchedDocs, filter]);
+
+  const filterTabs = React.useMemo(
+    () =>
+      FILTERS.map(([id, label]) => ({
+        id,
+        label,
+        count: id === "all" ? searchedDocs.length : searchedDocs.filter((d) => passesFilter(d, id)).length,
+      })),
+    [searchedDocs]
+  );
 
   const selectedCollection = collections.find((c) => c.id === selectedCol) ?? null;
   const selectedDocument = documents.find((d) => d.id === selectedDoc) ?? null;
+
+  /**
+   * Below xl, switching panes hides the one that held focus, so move focus to
+   * the new pane's heading. From xl up all panes stay visible and focus stays
+   * put, unless `always` (the inspector's close button, which disappears).
+   */
+  function focusPane(p: Pane, always = false) {
+    requestAnimationFrame(() => {
+      if (!always && window.matchMedia("(min-width: 1280px)").matches) return;
+      workspaceRef.current?.querySelector<HTMLElement>(`[data-pane="${p}"] h2`)?.focus({ preventScroll: true });
+    });
+  }
 
   function pickCollection(id: string) {
     setSelectedCol(id);
     setSelectedDoc(null);
     setFilter("all");
     setDocSearch("");
+    setPane("documents");
+    focusPane("documents");
+  }
+
+  function pickDocument(id: string) {
+    setSelectedDoc(id);
+    setPane("details");
+    focusPane("details");
   }
 
   async function reprocess(id: string) {
@@ -273,21 +325,29 @@ export function KnowledgeWorkspace({
     setNotice(null);
     try {
       const res = await fetch(`/api/admin/documents/${id}/reingest`, { method: "POST" });
-      setNotice(res.ok ? "Reprocessing started." : "Reprocess failed.");
+      setNotice(res.ok ? { tone: "success", text: "Reprocessing started." } : { tone: "danger", text: "Reprocess failed." });
       if (res.ok) router.refresh();
     } finally {
       setBusyDoc(null);
     }
   }
   async function del(id: string) {
-    if (!confirm("Delete this document and its chunks permanently? This can't be undone.")) return;
+    const ok = await confirm({
+      title: "Delete this document and its chunks permanently?",
+      description: "This can't be undone.",
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
+    if (!ok) return;
     setBusyDoc(id);
     try {
       const res = await fetch(`/api/admin/documents?id=${encodeURIComponent(id)}`, { method: "DELETE" });
       if (res.ok) {
         if (selectedDoc === id) setSelectedDoc(null);
+        // The row (and its menu trigger) is about to go: keep focus on a stable heading.
+        focusPane("documents", true);
         router.refresh();
-      } else setNotice("Delete failed.");
+      } else setNotice({ tone: "danger", text: "Delete failed." });
     } finally {
       setBusyDoc(null);
     }
@@ -295,165 +355,214 @@ export function KnowledgeWorkspace({
 
   const totalDocs = documents.length;
   const totalChunks = documents.reduce((n, d) => n + d.chunkCount, 0);
+  const unfiled = byCollection.get(UNFILED) ?? [];
+  const scopeName =
+    selectedCol === ALL ? "All documents" : selectedCol === UNFILED ? "Unfiled" : selectedCollection?.name ?? "Documents";
+  const docFiltersActive = docSearch.trim() !== "" || filter !== "all";
 
   return (
-    <div
-      className="-m-4 grid h-[calc(100vh-4rem)] overflow-hidden text-[13px] lg:-m-6"
-      style={{ backgroundColor: C.bg, color: C.text, gridTemplateColumns: "300px minmax(0,1fr) 340px" }}
-    >
-      {/* ============ LEFT: collections ============ */}
-      <section className="flex min-h-0 flex-col border-r" style={{ borderColor: C.border, backgroundColor: C.sidebar }}>
-        <div className="shrink-0 border-b p-3" style={{ borderColor: C.border }}>
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="flex items-center gap-2 text-sm font-semibold">
-              <Library size={16} style={{ color: C.green }} /> Collections
-            </h2>
-            <NewCollectionButton onCreated={() => router.refresh()} />
-          </div>
-          <div className="flex items-center gap-2 rounded-lg border px-2.5" style={{ borderColor: C.border, backgroundColor: C.surface }}>
-            <Search size={13} style={{ color: C.muted }} />
-            <input
+    <div ref={workspaceRef} className="flex h-full min-h-0 flex-col text-[13px]">
+      {/* ============ Top bar ============ */}
+      <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border px-4 py-3 sm:px-6">
+        <PageHeader title="Collections" className="mb-0 mr-auto" />
+        <NewCollectionButton onCreated={() => router.refresh()} />
+        <Segmented label="Workspace pane" value={pane} options={PANE_OPTIONS} onChange={setPane} className="xl:hidden" />
+      </div>
+
+      {notice && (
+        <div className="shrink-0 border-b border-border px-4 py-2 sm:px-6">
+          <Notice
+            tone={notice.tone}
+            message={notice.text}
+            onDone={() => setNotice(null)}
+            timeoutMs={notice.tone === "success" ? 4000 : 0}
+          />
+        </div>
+      )}
+
+      <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)] xl:grid-cols-[280px_minmax(0,1fr)_320px]">
+        {/* ============ LEFT: collections ============ */}
+        <section
+          aria-label="Collections"
+          data-pane="collections"
+          className={cn("flex min-h-0 min-w-0 flex-col xl:border-r xl:border-border", pane !== "collections" && "hidden xl:flex")}
+        >
+          <div className="shrink-0 border-b border-border p-3">
+            <SearchInput
+              aria-label="Search collections"
+              placeholder="Search collections"
               value={colSearch}
               onChange={(e) => setColSearch(e.target.value)}
-              placeholder="Search collections"
-              className="w-full bg-transparent py-2 text-xs outline-none"
-              style={{ color: C.text }}
             />
           </div>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-2">
-          <CollectionRow
-            active={selectedCol === ALL}
-            onClick={() => pickCollection(ALL)}
-            icon={<Database size={16} style={{ color: C.green }} />}
-            name="All documents"
-            sub={`${totalDocs} docs · ${totalChunks.toLocaleString()} chunks`}
-          />
-          {filteredCols.map((e) => (
-            <CollectionRow
-              key={e.c.id}
-              active={selectedCol === e.c.id}
-              onClick={() => pickCollection(e.c.id)}
-              icon={e.restricted ? <Lock size={15} style={{ color: C.restricted }} /> : <Folder size={16} style={{ color: C.green }} />}
-              name={e.c.name}
-              sub={`${e.docs.length} docs · ${e.chunks.toLocaleString()} chunks`}
-              meta={e.sourceKind}
-              attention={e.attention}
-              updated={relTime(e.lastUpdated)}
-            />
-          ))}
-          {(byCollection.get(UNFILED)?.length ?? 0) > 0 && (
-            <CollectionRow
-              active={selectedCol === UNFILED}
-              onClick={() => pickCollection(UNFILED)}
-              icon={<FolderOpen size={16} style={{ color: C.muted }} />}
-              name="Unfiled"
-              sub={`${byCollection.get(UNFILED)!.length} docs`}
-            />
-          )}
-        </div>
-      </section>
+          <div className="min-h-0 flex-1 overflow-y-auto p-2">
+            <ul className="space-y-0.5">
+              <CollectionRow
+                active={selectedCol === ALL}
+                onClick={() => pickCollection(ALL)}
+                icon={<Database size={16} aria-hidden />}
+                name="All documents"
+                count={totalDocs}
+                detail={`${fmtInt(totalDocs)} docs · ${fmtInt(totalChunks)} chunks`}
+              />
+              {filteredCols.map((e) => (
+                <CollectionRow
+                  key={e.c.id}
+                  active={selectedCol === e.c.id}
+                  onClick={() => pickCollection(e.c.id)}
+                  icon={e.restricted ? <Lock size={15} aria-hidden /> : <Folder size={16} aria-hidden />}
+                  name={e.c.name}
+                  count={e.docs.length}
+                  // "updated …" only after hydration: it depends on the clock and time zone.
+                  detail={`${fmtInt(e.docs.length)} docs · ${fmtInt(e.chunks)} chunks · ${e.sourceKind}${hydrated ? ` · updated ${relTime(e.lastUpdated, { never: "—" })}` : ""}`}
+                  attention={e.attention}
+                  bar={e.bar}
+                />
+              ))}
+              {unfiled.length > 0 && (
+                <CollectionRow
+                  active={selectedCol === UNFILED}
+                  onClick={() => pickCollection(UNFILED)}
+                  icon={<FolderOpen size={16} aria-hidden />}
+                  name="Unfiled"
+                  count={unfiled.length}
+                  detail={`${fmtInt(unfiled.length)} docs`}
+                />
+              )}
+            </ul>
+            {colSearch.trim() !== "" && filteredCols.length === 0 && (
+              <p className="px-3 py-4 text-xs text-muted-foreground">No collections match “{colSearch.trim()}”.</p>
+            )}
+          </div>
+        </section>
 
-      {/* ============ MIDDLE: documents ============ */}
-      <section className="flex min-h-0 flex-col" style={{ backgroundColor: C.surface }}>
-        <div className="shrink-0 border-b p-3" style={{ borderColor: C.border }}>
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <h1 className="truncate text-base font-semibold">
-              {selectedCol === ALL ? "All documents" : selectedCol === UNFILED ? "Unfiled" : selectedCollection?.name ?? "Documents"}
-            </h1>
-            <div className="flex items-center gap-2 rounded-lg border px-2.5" style={{ borderColor: C.border, backgroundColor: C.bg }}>
-              <Search size={13} style={{ color: C.muted }} />
-              <input
+        {/* ============ MIDDLE: documents ============ */}
+        <section
+          aria-label="Documents"
+          data-pane="documents"
+          className={cn("flex min-h-0 min-w-0 flex-col xl:border-r xl:border-border", pane !== "documents" && "hidden xl:flex")}
+        >
+          <div className="shrink-0 space-y-2 border-b border-border p-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <h2
+                tabIndex={-1}
+                className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground outline-none"
+                title={scopeName}
+              >
+                {scopeName}
+              </h2>
+              <SearchInput
+                ref={docSearchRef}
+                aria-label="Search documents"
+                placeholder="Search documents"
                 value={docSearch}
                 onChange={(e) => setDocSearch(e.target.value)}
-                placeholder="Search documents"
-                className="w-44 bg-transparent py-1.5 text-xs outline-none"
-                style={{ color: C.text }}
+                wrapperClassName="w-44 shrink-0 sm:w-56"
               />
             </div>
+            <FilterTabs label="Document filter" value={filter} tabs={filterTabs} onChange={setFilter} />
           </div>
-          <div className="flex flex-wrap gap-1">
-            {FILTERS.map(([k, label]) => (
-              <button
-                key={k}
-                type="button"
-                onClick={() => setFilter(k)}
-                title={k === "document" ? "Uploaded, pasted, linked or compiled — not synced from an API" : undefined}
-                className="rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors"
-                style={
-                  filter === k
-                    ? { borderColor: C.green, color: C.green, backgroundColor: "rgba(0,191,174,0.12)" }
-                    : { borderColor: C.border, color: C.muted }
+
+          <div className="min-h-0 flex-1 overflow-y-auto p-2">
+            {paneDocs.length === 0 ? (
+              <EmptyState
+                variant="plain"
+                icon={FileText}
+                title={scopeDocs.length === 0 ? "No documents here yet" : "No documents match"}
+                description={
+                  scopeDocs.length === 0
+                    ? "Add knowledge or bulk-upload files into this collection to see them here."
+                    : "Try a different search or filter."
                 }
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {notice && (
-          <div className="shrink-0 px-3 py-1.5 text-[11px]" style={{ color: C.green }}>{notice}</div>
-        )}
-
-        {/* Fixed table header */}
-        <div
-          className="grid shrink-0 items-center gap-2 border-b px-3 py-2 text-[10px] font-semibold uppercase tracking-wider"
-          style={{ borderColor: C.border, color: C.muted, gridTemplateColumns: DOC_GRID }}
-        >
-          <span>Document</span>
-          <span>Class · Domain</span>
-          <span>Access</span>
-          <span className="text-right">Chunks</span>
-          <span>Status</span>
-          <span>Updated</span>
-          <span />
-        </div>
-
-        {/* Scrolling body */}
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {paneDocs.length === 0 ? (
-            <p className="p-8 text-center text-xs" style={{ color: C.muted }}>No documents match.</p>
-          ) : (
-            paneDocs.map((d) => (
-              <DocRow
-                key={d.id}
-                d={d}
-                active={selectedDoc === d.id}
-                busy={busyDoc === d.id}
-                onSelect={() => setSelectedDoc(d.id)}
-                onReprocess={() => reprocess(d.id)}
-                onDelete={() => del(d.id)}
-                onPlayground={() => router.push("/dashboard/playground")}
+                action={
+                  scopeDocs.length > 0 && docFiltersActive ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setDocSearch("");
+                        setFilter("all");
+                        docSearchRef.current?.focus();
+                      }}
+                    >
+                      Clear search and filter
+                    </Button>
+                  ) : undefined
+                }
               />
-            ))
-          )}
-        </div>
-        <div className="shrink-0 border-t px-3 py-1.5 text-[11px]" style={{ borderColor: C.border, color: C.muted }}>
-          {paneDocs.length.toLocaleString()} shown
-        </div>
-      </section>
-
-      {/* ============ RIGHT: detail inspector ============ */}
-      <aside className="flex min-h-0 flex-col border-l" style={{ borderColor: C.border, backgroundColor: C.sidebar }}>
-        {selectedDocument ? (
-          <DocumentInspector d={selectedDocument} onClose={() => setSelectedDoc(null)} onReprocess={() => reprocess(selectedDocument.id)} />
-        ) : selectedCol !== ALL && selectedCol !== UNFILED && selectedCollection ? (
-          <CollectionInspector
-            c={selectedCollection}
-            enriched={enriched.find((e) => e.c.id === selectedCollection.id)}
-            governanceEnabled={governanceEnabled}
-          />
-        ) : (
-          <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
-            <Library size={28} style={{ color: C.border }} />
-            <p className="text-sm font-medium">Knowledge inspector</p>
-            <p className="text-xs" style={{ color: C.muted }}>
-              Select a collection or a document to see its details, chunks, and health.
-            </p>
+            ) : (
+              <ul className="space-y-0.5">
+                {paneDocs.map((d) => (
+                  <DocRow
+                    key={d.id}
+                    d={d}
+                    active={selectedDoc === d.id}
+                    busy={busyDoc === d.id}
+                    onSelect={() => pickDocument(d.id)}
+                    onViewChunks={() => {
+                      pickDocument(d.id);
+                      // After the inspector renders (and, below xl, its pane shows).
+                      requestAnimationFrame(() =>
+                        requestAnimationFrame(() =>
+                          document.getElementById(INSPECTOR_CHUNKS_ID)?.scrollIntoView({ block: "start" })
+                        )
+                      );
+                    }}
+                    onReprocess={() => reprocess(d.id)}
+                    onDelete={() => del(d.id)}
+                    onPlayground={() => router.push("/dashboard/playground")}
+                  />
+                ))}
+              </ul>
+            )}
           </div>
-        )}
-      </aside>
+          <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-0.5 border-t border-border px-3 py-2 text-xs text-muted-foreground">
+            <span className="tabular-nums">{fmtInt(paneDocs.length)} shown</span>
+            {truncated && (
+              <span className="inline-flex items-center gap-1">
+                <Info size={12} aria-hidden className="shrink-0" />
+                Showing the first {fmtInt(documents.length)} documents
+              </span>
+            )}
+          </div>
+        </section>
+
+        {/* ============ RIGHT: detail inspector ============ */}
+        <aside
+          aria-label="Details"
+          data-pane="details"
+          className={cn("flex min-h-0 min-w-0 flex-col", pane !== "details" && "hidden xl:flex")}
+        >
+          {selectedDocument ? (
+            <DocumentInspector
+              d={selectedDocument}
+              busy={busyDoc === selectedDocument.id}
+              onClose={() => {
+                setSelectedDoc(null);
+                setPane("documents");
+                focusPane("documents", true);
+              }}
+              onReprocess={() => reprocess(selectedDocument.id)}
+            />
+          ) : selectedCol !== ALL && selectedCol !== UNFILED && selectedCollection ? (
+            <CollectionInspector
+              c={selectedCollection}
+              enriched={enriched.find((e) => e.c.id === selectedCollection.id)}
+              governanceEnabled={governanceEnabled}
+            />
+          ) : (
+            <EmptyState
+              variant="plain"
+              icon={Library}
+              title="Knowledge inspector"
+              description="Select a collection or a document to see its details, chunks, and health."
+              className="flex-1 justify-center"
+            />
+          )}
+        </aside>
+      </div>
+
+      {dialog}
     </div>
   );
 }
@@ -466,66 +575,82 @@ function CollectionRow({
   onClick,
   icon,
   name,
-  sub,
-  meta,
+  count,
+  detail,
   attention,
-  updated,
+  bar,
 }: {
   active: boolean;
   onClick: () => void;
   icon: React.ReactNode;
   name: string;
-  sub: string;
-  meta?: string;
+  count: number;
+  /** Full summary, shown on hover (the inspector shows the same facts). */
+  detail: string;
   attention?: string | null;
-  updated?: string;
+  /** Folder colour bar class (real collections only). */
+  bar?: string;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="mb-0.5 flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors"
-      style={active ? { backgroundColor: "rgba(0,191,174,0.12)" } : undefined}
-      onMouseEnter={(e) => { if (!active) e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.04)"; }}
-      onMouseLeave={(e) => { if (!active) e.currentTarget.style.backgroundColor = "transparent"; }}
-    >
-      <span className="mt-0.5 shrink-0">{icon}</span>
-      <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-1.5">
-          <span className="truncate text-[13px] font-medium" style={{ color: active ? C.green : C.text }}>{name}</span>
-          {attention && <AttentionDot kind={attention} />}
-        </span>
-        <span className="mt-0.5 block truncate text-[11px]" style={{ color: C.muted }}>{sub}</span>
-        {(meta || updated) && (
-          <span className="mt-0.5 block truncate text-[10px]" style={{ color: C.muted }}>
-            {meta}{meta && updated ? " · " : ""}{updated ? `updated ${updated}` : ""}
-          </span>
+    <li>
+      <button
+        type="button"
+        onClick={onClick}
+        aria-current={active ? "true" : undefined}
+        title={detail}
+        className={cn(
+          "relative flex h-8 w-full items-center gap-2.5 rounded-lg pl-3 pr-2 text-left text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+          active ? "bg-accent-soft font-medium text-accent-strong" : "text-foreground hover:bg-surface-muted"
         )}
-      </span>
-    </button>
+      >
+        {/* Hairline ring: the pale folder colours (yellow, tea) vanish on white without it. */}
+        {bar && <span aria-hidden className={cn("absolute inset-y-1.5 left-0 w-[3px] rounded-r-full ring-1 ring-foreground/10", bar)} />}
+        <span className={cn("flex w-4 shrink-0 items-center justify-center", active ? "text-accent" : "text-muted-foreground")}>
+          {icon}
+        </span>
+        <span className="min-w-0 flex-1 truncate">{name}</span>
+        {attention && <AttentionDot kind={attention} />}
+        <span className={cn("shrink-0 text-xs font-normal tabular-nums", active ? "text-accent-strong" : "text-muted-foreground")}>
+          {fmtInt(count)}
+          <span className="sr-only"> documents</span>
+        </span>
+      </button>
+    </li>
   );
 }
 
+const ATTENTION: Record<string, { label: string; dot: string }> = {
+  fail: { label: "Has failing documents", dot: "bg-danger" },
+  stale: { label: "Stale knowledge", dot: "bg-warning" },
+  owner: { label: "No owner", dot: "bg-warning" },
+  restricted: { label: "Restricted", dot: "bg-muted-foreground/50" },
+};
+
 function AttentionDot({ kind }: { kind: string }) {
-  const color = kind === "fail" ? C.red : kind === "restricted" ? C.restricted : C.amber;
-  const label = kind === "fail" ? "Has failing documents" : kind === "stale" ? "Stale knowledge" : kind === "owner" ? "No owner" : "Restricted";
-  return <span title={label} className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: color }} />;
+  const a = ATTENTION[kind] ?? ATTENTION.restricted;
+  return (
+    <span title={a.label} className="flex shrink-0 items-center">
+      <span aria-hidden className={cn("h-1.5 w-1.5 rounded-full", a.dot)} />
+      <span className="sr-only">({a.label})</span>
+    </span>
+  );
 }
 
 // ---------------------------------------------------------------------------
-// Middle: document row (+ 3-dot menu)
+// Middle: document row (+ actions menu)
 // ---------------------------------------------------------------------------
-/** The object's stable ref (BR-SAL-003), linking to its page. Muted for a raw source, green for the compiled page. */
+/** The object's stable ref (BR-SAL-003), linking to its page. Muted for a raw source, accent for the compiled page. */
 function RefChip({ d }: { d: WsDocument }) {
   if (!d.objectRef || !d.objectId) return null;
   const compiled = docCompiled(d);
   return (
     <Link
       href={`/dashboard/knowledge/${d.objectId}`}
-      onClick={(e) => e.stopPropagation()}
       title={`${compiled ? "Open knowledge object" : "Raw source of"} ${d.objectName ?? d.objectRef}`}
-      className="shrink-0 rounded px-1 font-mono text-[10px] leading-4 hover:underline"
-      style={compiled ? { color: C.green, border: "1px solid rgba(0,191,174,0.35)" } : { color: C.muted, border: `1px solid ${C.border}` }}
+      className={cn(
+        "shrink-0 rounded-md border px-1.5 font-mono text-[11px] leading-5 hover:underline",
+        compiled ? "border-accent/30 text-accent-strong" : "border-border text-muted-foreground"
+      )}
     >
       {d.objectRef}
     </Link>
@@ -537,6 +662,7 @@ function DocRow({
   active,
   busy,
   onSelect,
+  onViewChunks,
   onReprocess,
   onDelete,
   onPlayground,
@@ -545,86 +671,110 @@ function DocRow({
   active: boolean;
   busy: boolean;
   onSelect: () => void;
+  onViewChunks: () => void;
   onReprocess: () => void;
   onDelete: () => void;
   onPlayground: () => void;
 }) {
-  const [menu, setMenu] = React.useState(false);
-  const ref = React.useRef<HTMLDivElement>(null);
-  React.useEffect(() => {
-    if (!menu) return;
-    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setMenu(false); };
-    document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
-  }, [menu]);
-
   const ready = docStatus(d) === "ready";
-  const restricted = RESTRICTED.has((d.access ?? "").toLowerCase()) || d.sourceType === "call_score";
+  const restricted = docRestricted(d);
+  const name = d.title || "Untitled";
+  const items: MenuItem[] = [
+    { label: "Open details", icon: Eye, onSelect },
+    { label: "View chunks", icon: Layers, onSelect: onViewChunks },
+    { label: "Test retrieval", icon: FlaskConical, onSelect: onPlayground },
+    { label: "Reprocess", icon: RefreshCw, onSelect: onReprocess, disabled: busy },
+    { label: "Delete permanently", icon: Trash2, danger: true, separatorBefore: true, onSelect: onDelete },
+  ];
+
+  // The row is a list item holding three siblings (select button, ref link,
+  // menu), so no control is nested in another and nothing fires twice.
   return (
-    <div
-      className="grid cursor-pointer items-center gap-2 border-b px-3 py-2 transition-colors"
-      style={{ borderColor: "rgba(32,68,56,0.5)", gridTemplateColumns: DOC_GRID, backgroundColor: active ? "rgba(0,191,174,0.10)" : undefined }}
-      onClick={onSelect}
-      onMouseEnter={(e) => { if (!active) e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.03)"; }}
-      onMouseLeave={(e) => { if (!active) e.currentTarget.style.backgroundColor = active ? "rgba(0,191,174,0.10)" : "transparent"; }}
+    <li
+      className={cn(
+        "flex items-center gap-1 rounded-lg pr-1 transition-colors",
+        active ? "bg-accent-soft" : "hover:bg-surface-muted"
+      )}
     >
-      <span className="flex min-w-0 items-center gap-2">
-        <FileText size={14} style={{ color: C.muted }} className="shrink-0" />
-        <span className="truncate font-medium" style={{ color: C.text }}>{d.title || "Untitled"}</span>
-      </span>
-      <span className="flex min-w-0 flex-col">
-        <span className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate" style={{ color: C.text }}>
-            {docClassLabel(d)}
-            {d.domain && <span style={{ color: C.muted }}> · {domainLabel(d.domain)}</span>}
+      <button
+        type="button"
+        onClick={onSelect}
+        aria-current={active ? "true" : undefined}
+        className="flex min-w-0 flex-1 items-start gap-2.5 rounded-lg py-2 pl-3 pr-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      >
+        <FileText
+          size={14}
+          aria-hidden
+          className={cn("mt-[3px] shrink-0", active ? "text-accent" : "text-muted-foreground")}
+        />
+        <span className="min-w-0 flex-1">
+          <span className="flex min-w-0 items-center gap-2">
+            <span
+              className={cn(
+                "min-w-0 flex-1 truncate text-[13px] font-medium",
+                active ? "text-accent-strong" : "text-foreground"
+              )}
+            >
+              {name}
+            </span>
+            <Badge tone={statusTone(ready ? "ready" : "processing")} className="shrink-0">
+              {ready ? "Ready" : "Processing"}
+            </Badge>
           </span>
-          <RefChip d={d} />
+          <span
+            className={cn(
+              "mt-0.5 block truncate text-xs",
+              active ? "text-foreground/75" : "text-muted-foreground"
+            )}
+          >
+            {docClassLabel(d)}
+            {d.domain ? ` · ${domainLabel(d.domain)}` : ""}
+            {" · "}
+            {restricted && <Lock size={11} aria-hidden className="-mt-px mr-0.5 inline" />}
+            {docAccess(d)}
+            {` · ${fmtInt(d.chunkCount)} chunk${d.chunkCount === 1 ? "" : "s"} · `}
+            {/* Server-rendered row: RelTime keeps the SSR text time-zone independent. */}
+            <RelTime iso={d.updatedAt} />
+          </span>
         </span>
-        {d.category && <span className="truncate text-[10px]" style={{ color: C.muted }}>{humanize(d.category)}</span>}
-      </span>
-      <span className="flex items-center gap-1 truncate" style={{ color: C.muted }}>
-        {restricted && <Lock size={11} style={{ color: C.restricted }} />}{docAccess(d)}
-      </span>
-      <span className="text-right tabular-nums" style={{ color: C.text }}>{d.chunkCount}</span>
-      <span>
-        <span className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium" style={ready ? { backgroundColor: "rgba(0,191,174,0.15)", color: C.green } : { backgroundColor: "rgba(243,182,97,0.15)", color: C.amber }}>
-          {ready ? "Ready" : "Processing"}
-        </span>
-      </span>
-      <span className="tabular-nums" style={{ color: C.muted }}>{relTime(d.updatedAt)}</span>
-      <span className="relative flex justify-end" ref={ref} onClick={(e) => e.stopPropagation()}>
-        <button type="button" onClick={() => setMenu((m) => !m)} className="grid h-6 w-6 place-items-center rounded" style={{ color: C.muted }} aria-label="Actions">
-          {busy ? <Loader2 size={13} className="animate-spin" /> : <MoreHorizontal size={14} />}
-        </button>
-        {menu && (
-          <div className="absolute right-0 top-full z-20 mt-1 w-48 rounded-lg border p-1 shadow-lg" style={{ borderColor: C.border, backgroundColor: C.raised }}>
-            <MenuItem icon={Eye} label="Open details" onClick={() => { setMenu(false); onSelect(); }} />
-            <MenuItem icon={Layers} label="View chunks" onClick={() => { setMenu(false); onSelect(); }} />
-            <MenuItem icon={FlaskConical} label="Test retrieval" onClick={() => { setMenu(false); onPlayground(); }} />
-            <MenuItem icon={RefreshCw} label="Reprocess" onClick={() => { setMenu(false); onReprocess(); }} />
-            <div className="my-1 border-t" style={{ borderColor: C.border }} />
-            <MenuItem icon={Trash2} label="Delete permanently" danger onClick={() => { setMenu(false); onDelete(); }} />
-          </div>
-        )}
-      </span>
-    </div>
+      </button>
+      <RefChip d={d} />
+      <Menu
+        size="sm"
+        label={`Actions for ${name}`}
+        items={items}
+        trigger={busy ? <Loader2 size={14} aria-hidden className="animate-spin" /> : undefined}
+      />
+    </li>
   );
 }
 
-function MenuItem({ icon: Icon, label, onClick, danger }: { icon: typeof Eye; label: string; onClick: () => void; danger?: boolean }) {
+// ---------------------------------------------------------------------------
+// Right: shared inspector bits
+// ---------------------------------------------------------------------------
+function InspectorSection({ title, id, children }: { title: string; id?: string; children: React.ReactNode }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors"
-      style={{ color: danger ? C.red : C.text }}
-      onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.05)")}
-      onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
-    >
-      <Icon size={13} style={{ color: danger ? C.red : C.muted }} />
-      {label}
-    </button>
+    <section id={id} className="mt-5 scroll-mt-4">
+      <h3 className="mb-2 text-xs font-medium text-muted-foreground">{title}</h3>
+      {children}
+    </section>
   );
+}
+
+/** Label/value definition grid (the document detail page's recipe, narrowed for the pane). */
+function DefList({ children }: { children: React.ReactNode }) {
+  return <dl className="grid grid-cols-[104px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[13px]">{children}</dl>;
+}
+function Def({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <>
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 break-words text-foreground">{children}</dd>
+    </>
+  );
+}
+function Missing() {
+  return <span className="text-muted-foreground">Not set</span>;
 }
 
 // ---------------------------------------------------------------------------
@@ -638,29 +788,38 @@ function CollectionInspector({ c, enriched, governanceEnabled }: { c: WsCollecti
   const docs = enriched?.docs ?? [];
   const [editing, setEditing] = React.useState(false);
   React.useEffect(() => setEditing(false), [c.id]);
+  const noEligibility = s.ceo_copilot_eligible === false && s.employee_chat_eligible === false && !s.client_facing_eligible;
 
   return (
     <>
-      <div className="flex shrink-0 items-start justify-between gap-2 border-b p-4" style={{ borderColor: C.border }}>
+      <div className="flex shrink-0 items-start justify-between gap-2 border-b border-border p-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            {enriched?.restricted ? <Lock size={16} style={{ color: C.restricted }} /> : <Folder size={16} style={{ color: C.green }} />}
-            <h2 className="truncate text-sm font-semibold">{c.name}</h2>
+            {enriched?.restricted ? (
+              <Lock size={16} aria-hidden className="shrink-0 text-muted-foreground" />
+            ) : (
+              <Folder size={16} aria-hidden className="shrink-0 text-accent" />
+            )}
+            <h2 tabIndex={-1} className="truncate text-sm font-semibold text-foreground outline-none" title={c.name}>
+              {c.name}
+            </h2>
           </div>
-          {c.description && <p className="mt-1 text-xs" style={{ color: C.muted }}>{c.description}</p>}
+          {c.description && <p className="mt-1 text-xs text-muted-foreground">{c.description}</p>}
         </div>
         {governanceEnabled && !editing && (
-          <button type="button" onClick={() => setEditing(true)} className="inline-flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-[11px]" style={{ borderColor: C.border, color: C.muted }}>
-            <Pencil size={11} /> Edit
-          </button>
+          <Button variant="secondary" size="sm" onClick={() => setEditing(true)}>
+            <Pencil size={12} aria-hidden />
+            Edit
+            <span className="sr-only"> governance for {c.name}</span>
+          </Button>
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <div className="grid grid-cols-2 gap-2">
-          <Stat label="Documents" value={docs.length.toLocaleString()} />
-          <Stat label="Chunks" value={(enriched?.chunks ?? 0).toLocaleString()} />
-          <Stat label="Failing" value={String(enriched?.failing ?? 0)} tone={(enriched?.failing ?? 0) > 0 ? "bad" : "ok"} />
-          <Stat label="Stale (90d+)" value={String(enriched?.stale ?? 0)} tone={(enriched?.stale ?? 0) > 0 ? "warn" : "ok"} />
+          <CompactStat label="Documents" value={fmtInt(docs.length)} />
+          <CompactStat label="Chunks" value={fmtInt(enriched?.chunks ?? 0)} />
+          <CompactStat label="Failing" value={fmtInt(enriched?.failing ?? 0)} />
+          <CompactStat label="Stale (90d+)" value={fmtInt(enriched?.stale ?? 0)} />
         </div>
 
         {editing ? (
@@ -672,32 +831,49 @@ function CollectionInspector({ c, enriched, governanceEnabled }: { c: WsCollecti
           />
         ) : (
           <>
-            <Section title="Governance">
-              <Row label="Owner">{s.owner || <Missing />}</Row>
-              <Row label="Access level">{ACCESS_LABEL[s.access_level ?? ""] ?? "Team"}</Row>
-              <Row label="Source">{enriched?.sourceKind ?? "—"}</Row>
-              <Row label="Last updated">{relTime(enriched?.lastUpdated ?? null)}</Row>
-              <Row label="Review cycle">{s.review_interval_days ? `${s.review_interval_days} days` : <Missing />}</Row>
-              <Row label="Retention">{s.retention_days ? `${s.retention_days} days` : "Keep"}</Row>
-            </Section>
+            <InspectorSection title="Governance">
+              <DefList>
+                <Def label="Owner">{s.owner || <Missing />}</Def>
+                <Def label="Access level">{ACCESS_LABELS[s.access_level ?? ""] ?? "Team"}</Def>
+                <Def label="Source">{enriched?.sourceKind ?? "—"}</Def>
+                <Def label="Last updated">
+                  <span title={enriched?.lastUpdated ? fmtDateTime(enriched.lastUpdated) : undefined}>
+                    {relTime(enriched?.lastUpdated ?? null, { never: "—" })}
+                  </span>
+                </Def>
+                <Def label="Review cycle">{s.review_interval_days ? `${s.review_interval_days} days` : <Missing />}</Def>
+                <Def label="Retention">{s.retention_days ? `${s.retention_days} days` : "Keep"}</Def>
+              </DefList>
+            </InspectorSection>
 
-            <Section title="Chatbot eligibility">
+            <InspectorSection title="Chatbot eligibility">
               <div className="flex flex-wrap gap-1.5">
-                {s.ceo_copilot_eligible !== false && <Chip>CEO Copilot</Chip>}
-                {s.employee_chat_eligible !== false && <Chip>Team chat</Chip>}
-                {s.client_facing_eligible && <Chip tone="warn">Client-facing</Chip>}
+                {s.ceo_copilot_eligible !== false && <Badge tone="neutral">CEO Copilot</Badge>}
+                {s.employee_chat_eligible !== false && <Badge tone="neutral">Team chat</Badge>}
+                {s.client_facing_eligible && <Badge tone="neutral">Client-facing</Badge>}
+                {noEligibility && <span className="text-xs text-muted-foreground">None</span>}
               </div>
               {(s.allowed_work_modes?.length ?? 0) > 0 && (
                 <div className="mt-2 flex flex-wrap gap-1.5">
-                  {s.allowed_work_modes!.map((m) => <Chip key={m}>{MODE_LABELS[m as keyof typeof MODE_LABELS] ?? m.replace(/_/g, " ")}</Chip>)}
+                  {s.allowed_work_modes!.map((m) => (
+                    <Badge key={m} tone="neutral">
+                      {MODE_LABELS[m as keyof typeof MODE_LABELS] ?? m.replace(/_/g, " ")}
+                    </Badge>
+                  ))}
                 </div>
               )}
-            </Section>
+            </InspectorSection>
 
             {!governanceEnabled && (
-              <p className="mt-4 rounded-lg border p-2 text-[11px]" style={{ borderColor: C.amber, color: C.amber, backgroundColor: "rgba(243,182,97,0.08)" }}>
-                Governance fields need migration 0013_collection_settings.sql.
-              </p>
+              <Alert tone="info" title="Not enabled yet" className="mt-5">
+                <p>Governance settings aren&apos;t available in this workspace yet.</p>
+                <details className="mt-1">
+                  <summary className="cursor-pointer text-xs font-medium text-foreground">Technical details</summary>
+                  <p className="mt-1 text-xs">
+                    Apply Brain migration <code className="font-mono">0013_collection_settings.sql</code>.
+                  </p>
+                </details>
+              </Alert>
             )}
           </>
         )}
@@ -717,9 +893,6 @@ function GovernanceEditor({ id, initial, onCancel, onSaved }: { id: string; init
   const [client, setClient] = React.useState(initial.client_facing_eligible === true);
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
-
-  const field = "w-full rounded-md border bg-transparent px-2 py-1.5 text-xs outline-none";
-  const fieldStyle = { borderColor: C.border, color: C.text };
 
   async function save() {
     setBusy(true);
@@ -754,64 +927,78 @@ function GovernanceEditor({ id, initial, onCancel, onSaved }: { id: string; init
   }
 
   return (
-    <div className="mt-4 space-y-3">
-      {err && <p className="text-[11px]" style={{ color: C.red }}>{err}</p>}
-      <div>
-        <label className="mb-1 block text-[10px] uppercase tracking-wider" style={{ color: C.muted }}>Owner</label>
-        <input value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="e.g. Afra" className={field} style={fieldStyle} />
-      </div>
-      <div>
-        <label className="mb-1 block text-[10px] uppercase tracking-wider" style={{ color: C.muted }}>Access level</label>
-        <select value={access} onChange={(e) => setAccess(e.target.value)} className={field} style={{ ...fieldStyle, backgroundColor: C.surface }}>
-          {ACCESS_LEVELS.map((a) => <option key={a.value} value={a.value} style={{ color: "#000" }}>{a.label} — {a.scope}</option>)}
-        </select>
-      </div>
-      <div>
-        <label className="mb-1 block text-[10px] uppercase tracking-wider" style={{ color: C.muted }}>Allowed work modes</label>
+    <div className="mt-5 space-y-3">
+      {err && <Alert tone="danger">{err}</Alert>}
+      <Field label="Owner">
+        <Input value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="e.g. Afra" />
+      </Field>
+      <Field label="Access level">
+        <Select
+          value={access}
+          onChange={(e) => setAccess(e.target.value)}
+          options={ACCESS_LEVELS.map((a) => ({ value: a.value, label: `${a.label} — ${a.scope}` }))}
+        />
+      </Field>
+      <fieldset>
+        <legend className="mb-1.5 text-xs font-medium text-muted-foreground">Allowed work modes</legend>
         <div className="flex flex-wrap gap-1">
           {WORK_MODES.map((m) => {
             const on = modes.has(m);
             return (
-              <button key={m} type="button" onClick={() => setModes((p) => { const n = new Set(p); if (n.has(m)) n.delete(m); else n.add(m); return n; })}
-                className="rounded-full border px-2 py-0.5 text-[10px]"
-                style={on ? { borderColor: C.green, color: C.green, backgroundColor: "rgba(0,191,174,0.12)" } : { borderColor: C.border, color: C.muted }}>
+              <button
+                key={m}
+                type="button"
+                aria-pressed={on}
+                onClick={() => setModes((p) => { const n = new Set(p); if (n.has(m)) n.delete(m); else n.add(m); return n; })}
+                className={cn(
+                  "inline-flex h-7 items-center rounded-full border px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  on
+                    ? "border-accent/30 bg-accent-soft text-accent-strong"
+                    : "border-border text-muted-foreground hover:bg-surface-muted hover:text-foreground"
+                )}
+              >
                 {MODE_LABELS[m]}
               </button>
             );
           })}
         </div>
-      </div>
+      </fieldset>
       <div className="grid grid-cols-2 gap-2">
-        <div>
-          <label className="mb-1 block text-[10px] uppercase tracking-wider" style={{ color: C.muted }}>Review (days)</label>
-          <input type="number" min={0} value={review} onChange={(e) => setReview(e.target.value)} className={field} style={fieldStyle} />
-        </div>
-        <div>
-          <label className="mb-1 block text-[10px] uppercase tracking-wider" style={{ color: C.muted }}>Retention (days)</label>
-          <input type="number" min={0} value={retention} onChange={(e) => setRetention(e.target.value)} placeholder="keep" className={field} style={fieldStyle} />
-        </div>
+        <Field label="Review (days)">
+          <Input type="number" min={0} value={review} onChange={(e) => setReview(e.target.value)} />
+        </Field>
+        <Field label="Retention (days)">
+          <Input type="number" min={0} value={retention} onChange={(e) => setRetention(e.target.value)} placeholder="Keep" />
+        </Field>
       </div>
-      <div className="space-y-1.5 rounded-lg border p-2" style={{ borderColor: C.border }}>
+      <fieldset className="rounded-xl border border-border px-3 pb-1.5 pt-1">
+        <legend className="px-1 text-xs font-medium text-muted-foreground">Chatbot eligibility</legend>
         <EditCheck label="CEO Copilot" checked={ceo} onChange={setCeo} />
         <EditCheck label="Employee chat" checked={team} onChange={setTeam} />
         <EditCheck label="Client-facing generation" checked={client} onChange={setClient} />
-      </div>
-      <div className="flex justify-end gap-2">
-        <button type="button" onClick={onCancel} disabled={busy} className="rounded-md border px-3 py-1.5 text-xs" style={{ borderColor: C.border, color: C.muted }}>Cancel</button>
-        <button type="button" onClick={save} disabled={busy} className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium" style={{ backgroundColor: C.green, color: C.bg, opacity: busy ? 0.5 : 1 }}>
-          {busy ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />} Save
-        </button>
+      </fieldset>
+      <div className="flex justify-end gap-2 pt-1">
+        <Button variant="secondary" size="toolbar" onClick={onCancel} disabled={busy}>
+          Cancel
+        </Button>
+        <Button size="toolbar" onClick={save} loading={busy}>
+          {!busy && <Save size={14} aria-hidden />}
+          Save
+        </Button>
       </div>
     </div>
   );
 }
 
 function EditCheck({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
+  const labelId = React.useId();
   return (
-    <label className="flex cursor-pointer items-center gap-2 text-xs" style={{ color: C.text }}>
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="h-3.5 w-3.5" style={{ accentColor: C.green }} />
-      {label}
-    </label>
+    <div className="flex items-center justify-between gap-3 py-1">
+      <span id={labelId} className="text-[13px] text-foreground">
+        {label}
+      </span>
+      <Switch checked={checked} onChange={onChange} aria-labelledby={labelId} />
+    </div>
   );
 }
 
@@ -822,11 +1009,26 @@ interface InspectChunk { id: string; content: string; context: string | null; pa
 interface InspectStats { totalRetrievals: number; citations: number; lastRetrieved: string | null }
 interface InspectRun { status: string; trigger: string; chunks: number; error: string | null; startedAt: string; finishedAt: string | null }
 
-function DocumentInspector({ d, onClose, onReprocess }: { d: WsDocument; onClose: () => void; onReprocess: () => void }) {
+
+function DocumentInspector({
+  d,
+  busy,
+  onClose,
+  onReprocess,
+}: {
+  d: WsDocument;
+  busy: boolean;
+  onClose: () => void;
+  onReprocess: () => void;
+}) {
   const [chunks, setChunks] = React.useState<InspectChunk[] | null>(null);
   const [stats, setStats] = React.useState<InspectStats | null>(null);
   const [runs, setRuns] = React.useState<InspectRun[]>([]);
   const [openChunk, setOpenChunk] = React.useState<string | null>(null);
+  // A failed inspect fetch is its own state: it must never read as "no chunks".
+  const [failed, setFailed] = React.useState(false);
+  // Bumped by Retry to re-run the same loader.
+  const [attempt, setAttempt] = React.useState(0);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -834,6 +1036,7 @@ function DocumentInspector({ d, onClose, onReprocess }: { d: WsDocument; onClose
     setStats(null);
     setRuns([]);
     setOpenChunk(null);
+    setFailed(false);
     (async () => {
       try {
         const res = await fetch(`/api/admin/documents/${d.id}/inspect`, { cache: "no-store" });
@@ -842,194 +1045,219 @@ function DocumentInspector({ d, onClose, onReprocess }: { d: WsDocument; onClose
           setChunks(data.chunks ?? []);
           setStats(data.stats ?? null);
           setRuns(data.runs ?? []);
-        } else if (!cancelled) setChunks([]);
+        } else if (!cancelled) setFailed(true);
       } catch {
-        if (!cancelled) setChunks([]);
+        if (!cancelled) setFailed(true);
       }
     })();
     return () => { cancelled = true; };
-  }, [d.id]);
+  }, [d.id, attempt]);
 
   const ready = docStatus(d) === "ready";
-  const restricted = RESTRICTED.has((d.access ?? "").toLowerCase()) || d.sourceType === "call_score";
+  const restricted = docRestricted(d);
+  const name = d.title || "Untitled";
 
   return (
     <>
-      <div className="flex shrink-0 items-start justify-between gap-2 border-b p-4" style={{ borderColor: C.border }}>
+      <div className="flex shrink-0 items-start justify-between gap-2 border-b border-border p-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <FileText size={15} style={{ color: C.green }} />
-            <h2 className="truncate text-sm font-semibold">{d.title || "Untitled"}</h2>
+            <FileText size={16} aria-hidden className="shrink-0 text-accent" />
+            <h2 tabIndex={-1} className="truncate text-sm font-semibold text-foreground outline-none" title={name}>
+              {name}
+            </h2>
           </div>
-          <p className="mt-0.5 text-[11px]" style={{ color: C.muted }}>
-            {SOURCE_LABEL[d.sourceType] ?? d.sourceType} · {docClassLabel(d)}{d.domain ? ` / ${domainLabel(d.domain)}` : ""}
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            {sourceTypeLabel(d.sourceType)} · {docClassLabel(d)}{d.domain ? ` / ${domainLabel(d.domain)}` : ""}
           </p>
         </div>
-        <button type="button" onClick={onClose} className="grid h-6 w-6 shrink-0 place-items-center rounded" style={{ color: C.muted }} aria-label="Close">
-          <X size={15} />
-        </button>
+        <IconButton aria-label={`Close details for ${name}`} size="sm" onClick={onClose}>
+          <X size={16} aria-hidden />
+        </IconButton>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <div className="grid grid-cols-2 gap-2">
-          <Stat label="Chunks" value={String(d.chunkCount)} />
-          <Stat label="Index" value={ready ? "Indexed" : "Pending"} tone={ready ? "ok" : "warn"} />
-          <Stat label="Retrievals" value={stats ? stats.totalRetrievals.toLocaleString() : "—"} />
-          <Stat label="Citations" value={stats ? stats.citations.toLocaleString() : "—"} tone={stats && stats.citations > 0 ? "ok" : undefined} />
+          <CompactStat label="Chunks" value={fmtInt(d.chunkCount)} />
+          <CompactStat label="Index" value={ready ? "Indexed" : "Pending"} />
+          <CompactStat label="Retrievals" value={stats ? fmtInt(stats.totalRetrievals) : "—"} />
+          <CompactStat label="Citations" value={stats ? fmtInt(stats.citations) : "—"} />
         </div>
         {stats?.lastRetrieved && (
-          <p className="mt-2 text-[11px]" style={{ color: C.muted }}>Last retrieved {relTime(stats.lastRetrieved)}</p>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Last retrieved <span title={fmtDateTime(stats.lastRetrieved)}>{relTime(stats.lastRetrieved)}</span>
+          </p>
         )}
 
-        <Section title="Metadata">
-          <Row label="Class">{docClassLabel(d)}</Row>
-          <Row label="Domain">{d.domain ? domainLabel(d.domain) : <Missing />}</Row>
-          <Row label="Object">
-            {d.objectRef && d.objectId ? (
-              <Link href={`/dashboard/knowledge/${d.objectId}`} className="hover:underline" style={{ color: C.green }}>
-                <span className="font-mono">{d.objectRef}</span>
-                {d.objectName ? ` · ${d.objectName}` : ""}
-              </Link>
-            ) : (
-              <span style={{ color: C.muted }}>Not compiled</span>
-            )}
-          </Row>
-          {d.category && <Row label="Category">{humanize(d.category)}</Row>}
-          <Row label="Owner">{d.owner || <Missing />}</Row>
-          <Row label="Access">
-            <span className="inline-flex items-center gap-1">{restricted && <Lock size={11} style={{ color: C.restricted }} />}{docAccess(d)}</span>
-          </Row>
-          <Row label="Review date">{d.reviewDate ? (docReviewDue(d) ? <span style={{ color: C.red }}>{d.reviewDate.slice(0, 10)} (due)</span> : d.reviewDate.slice(0, 10)) : <Missing />}</Row>
-          <Row label="Created">{relTime(d.createdAt)}</Row>
-          <Row label="Updated">{relTime(d.updatedAt)}</Row>
-          {d.uri && <Row label="Source">{d.uri.length > 28 ? d.uri.slice(0, 28) + "…" : d.uri}</Row>}
-        </Section>
-
-        <div className="mt-2 flex gap-2">
-          <button type="button" onClick={onReprocess} className="inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium" style={{ borderColor: C.border, color: C.text }}>
-            <RefreshCw size={13} /> Reprocess
-          </button>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Button variant="secondary" size="toolbar" onClick={onReprocess} loading={busy}>
+            {!busy && <RefreshCw size={14} aria-hidden />}
+            Reprocess
+          </Button>
+          <Link href={`/dashboard/documents/${d.id}`} className={buttonClass({ variant: "ghost", size: "toolbar" })}>
+            Open full page
+          </Link>
         </div>
 
+        <InspectorSection title="Metadata">
+          <DefList>
+            <Def label="Class">{docClassLabel(d)}</Def>
+            <Def label="Domain">{d.domain ? domainLabel(d.domain) : <Missing />}</Def>
+            <Def label="Object">
+              {d.objectRef && d.objectId ? (
+                <Link
+                  href={`/dashboard/knowledge/${d.objectId}`}
+                  className="font-medium text-accent-strong hover:underline"
+                >
+                  <span className="font-mono">{d.objectRef}</span>
+                  {d.objectName ? ` · ${d.objectName}` : ""}
+                </Link>
+              ) : (
+                <span className="text-muted-foreground">Not compiled</span>
+              )}
+            </Def>
+            {d.category && <Def label="Category">{humanize(d.category)}</Def>}
+            <Def label="Owner">{d.owner || <Missing />}</Def>
+            <Def label="Access">
+              <span className="inline-flex items-center gap-1">
+                {restricted && <Lock size={12} aria-hidden className="shrink-0 text-muted-foreground" />}
+                {docAccess(d)}
+              </span>
+            </Def>
+            <Def label="Review date">
+              {d.reviewDate ? (
+                docReviewDue(d) ? (
+                  <span className="text-warning">{fmtDay(d.reviewDate)} (due)</span>
+                ) : (
+                  fmtDay(d.reviewDate)
+                )
+              ) : (
+                <Missing />
+              )}
+            </Def>
+            <Def label="Created">
+              <span title={fmtDateTime(d.createdAt)}>{relTime(d.createdAt)}</span>
+            </Def>
+            <Def label="Updated">
+              <span title={fmtDateTime(d.updatedAt)}>{relTime(d.updatedAt)}</span>
+            </Def>
+            {d.uri && (
+              <Def label="Source">
+                <span className="block truncate" title={d.uri}>
+                  {d.uri}
+                </span>
+              </Def>
+            )}
+          </DefList>
+        </InspectorSection>
+
         {runs.length > 0 && (
-          <Section title="Processing runs">
+          <InspectorSection title="Processing runs">
             <ul className="space-y-1">
               {runs.map((r, i) => (
-                <li key={i} className="flex items-center justify-between gap-2 rounded-lg border px-2 py-1.5 text-[11px]" style={{ borderColor: C.border, backgroundColor: C.surface }}>
-                  <span className="flex items-center gap-1.5">
-                    <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: r.status === "success" ? C.green : r.status === "error" ? C.red : C.amber }} />
-                    <span className="capitalize" style={{ color: C.text }}>{r.trigger}</span>
-                    <span style={{ color: C.muted }}>· {r.chunks} chunks</span>
-                    {r.error && <span style={{ color: C.red }}>· {r.error.slice(0, 24)}</span>}
-                  </span>
-                  <span style={{ color: C.muted }}>{relTime(r.startedAt)}</span>
-                </li>
-              ))}
-            </ul>
-          </Section>
-        )}
-
-        <Section title={`Chunks${chunks ? ` (${chunks.length})` : ""}`}>
-          {chunks === null ? (
-            <div className="flex items-center gap-2 py-3 text-xs" style={{ color: C.muted }}>
-              <Loader2 size={13} className="animate-spin" /> Loading chunks…
-            </div>
-          ) : chunks.length === 0 ? (
-            <p className="py-3 text-xs" style={{ color: C.muted }}>No chunks yet — this document isn&apos;t searchable.</p>
-          ) : (
-            <ul className="space-y-1">
-              {chunks.map((ch, i) => (
-                <li key={ch.id}>
-                  <button
-                    type="button"
-                    onClick={() => setOpenChunk((o) => (o === ch.id ? null : ch.id))}
-                    className="flex w-full items-center gap-2 rounded-lg border px-2 py-1.5 text-left"
-                    style={{ borderColor: C.border, backgroundColor: openChunk === ch.id ? "rgba(0,191,174,0.08)" : C.surface }}
-                  >
-                    <span className="shrink-0 text-[10px] tabular-nums" style={{ color: C.muted }}>#{i + 1}</span>
-                    <span className="min-w-0 flex-1 truncate text-[11px]" style={{ color: C.text }}>{ch.content.slice(0, 80)}</span>
-                    {ch.isParent && <span className="shrink-0 rounded px-1 text-[9px]" style={{ backgroundColor: C.raised, color: C.muted }}>parent</span>}
-                    <ChevronRight size={12} style={{ color: C.muted, transform: openChunk === ch.id ? "rotate(90deg)" : undefined }} />
-                  </button>
-                  {openChunk === ch.id && (
-                    <div className="mt-1 rounded-lg border p-2.5" style={{ borderColor: C.border, backgroundColor: C.bg }}>
-                      {ch.context && (
-                        <p className="mb-2 text-[11px] italic" style={{ color: C.muted }}>{ch.context}</p>
-                      )}
-                      <p className="whitespace-pre-wrap text-[11px] leading-relaxed" style={{ color: C.text }}>{ch.content}</p>
-                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px]" style={{ color: C.muted }}>
-                        <span>Position {i + 1} of {chunks.length}</span>
-                        {ch.tokenCount ? <span>{ch.tokenCount} tokens</span> : null}
-                        <span>· retrieved {ch.retrievals}×</span>
-                        {ch.avgScore !== null && <span>score {ch.avgScore.toFixed(2)}</span>}
-                        {ch.citations > 0 && <span style={{ color: C.green }}>cited {ch.citations}×</span>}
-                        {ch.lastRetrieved && <span>last {relTime(ch.lastRetrieved)}</span>}
-                      </div>
-                    </div>
+                <li key={i} className="rounded-lg border border-border px-2.5 py-1.5 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <StatusDot tone={statusTone(r.status)} className="shrink-0 text-foreground">
+                        {triggerLabel(r.trigger)}
+                        <span className="sr-only"> ({humanize(r.status)})</span>
+                      </StatusDot>
+                      <span className="truncate text-muted-foreground">· {fmtInt(r.chunks)} chunks</span>
+                    </span>
+                    <span className="shrink-0 text-muted-foreground" title={fmtDateTime(r.startedAt)}>
+                      {relTime(r.startedAt)}
+                    </span>
+                  </div>
+                  {r.error && (
+                    <p className="mt-0.5 break-words text-danger">
+                      {r.error}
+                    </p>
                   )}
                 </li>
               ))}
             </ul>
+          </InspectorSection>
+        )}
+
+        <InspectorSection id={INSPECTOR_CHUNKS_ID} title={`Chunks${chunks ? ` (${fmtInt(chunks.length)})` : ""}`}>
+          {failed ? (
+            <Alert tone="danger">
+              <p>Couldn&apos;t load this document&apos;s chunks.</p>
+              <Button variant="secondary" size="toolbar" className="mt-2" onClick={() => setAttempt((a) => a + 1)}>
+                <RefreshCw size={14} aria-hidden />
+                Retry
+              </Button>
+            </Alert>
+          ) : chunks === null ? (
+            <Spinner label="Loading chunks…" className="py-3 text-xs" />
+          ) : chunks.length === 0 ? (
+            <p className="py-3 text-xs text-muted-foreground">No chunks yet — this document isn&apos;t searchable.</p>
+          ) : (
+            <ul className="space-y-1">
+              {chunks.map((ch, i) => {
+                const open = openChunk === ch.id;
+                const panelId = `ws-chunk-${ch.id}`;
+                return (
+                  <li key={ch.id}>
+                    <button
+                      type="button"
+                      onClick={() => setOpenChunk((o) => (o === ch.id ? null : ch.id))}
+                      aria-expanded={open}
+                      aria-controls={panelId}
+                      className={cn(
+                        "flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+                        open ? "border-accent/30 bg-accent-soft" : "border-border bg-surface hover:bg-surface-muted"
+                      )}
+                    >
+                      <span className={cn("shrink-0 text-[11px] tabular-nums", open ? "text-accent-strong" : "text-muted-foreground")}>
+                        #{i + 1}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-xs text-foreground">{ch.content.slice(0, 80)}</span>
+                      {ch.isParent && <Tag className="shrink-0">Parent</Tag>}
+                      <ChevronRight
+                        size={14}
+                        aria-hidden
+                        className={cn("shrink-0 text-muted-foreground transition-transform", open && "rotate-90")}
+                      />
+                    </button>
+                    {open && (
+                      <div id={panelId} className="mt-1 rounded-lg border border-border bg-surface p-2.5">
+                        {ch.context && <p className="mb-2 text-xs italic text-muted-foreground">{ch.context}</p>}
+                        <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">{ch.content}</p>
+                        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                          <span>
+                            Position {i + 1} of {chunks.length}
+                          </span>
+                          {ch.tokenCount ? <span>{ch.tokenCount} tokens</span> : null}
+                          <span>Retrieved {ch.retrievals}×</span>
+                          {ch.avgScore !== null && <span>Score {ch.avgScore.toFixed(2)}</span>}
+                          {ch.citations > 0 && <span className="text-accent-strong">Cited {ch.citations}×</span>}
+                          {ch.lastRetrieved && <span>Last {relTime(ch.lastRetrieved)}</span>}
+                        </div>
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
           )}
-        </Section>
+        </InspectorSection>
       </div>
     </>
   );
 }
 
-// ---- small shared bits ------------------------------------------------------
-function Stat({ label, value, tone }: { label: string; value: string; tone?: "ok" | "warn" | "bad" }) {
-  const color = tone === "bad" ? C.red : tone === "warn" ? C.amber : tone === "ok" ? C.green : C.text;
-  return (
-    <div className="rounded-lg border p-2.5" style={{ borderColor: C.border, backgroundColor: C.surface }}>
-      <p className="text-[10px] uppercase tracking-wider" style={{ color: C.muted }}>{label}</p>
-      <p className="mt-0.5 text-lg font-semibold tabular-nums" style={{ color }}>{value}</p>
-    </div>
-  );
-}
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="mt-4">
-      <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider" style={{ color: C.muted }}>{title}</p>
-      {children}
-    </div>
-  );
-}
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-start justify-between gap-3 py-1 text-xs">
-      <span style={{ color: C.muted }}>{label}</span>
-      <span className="text-right font-medium" style={{ color: C.text }}>{children}</span>
-    </div>
-  );
-}
-function Missing() {
-  return <span style={{ color: C.amber }}>Not set</span>;
-}
-function Chip({ children, tone }: { children: React.ReactNode; tone?: "warn" }) {
-  return (
-    <span className="rounded-full border px-2 py-0.5 text-[10px]" style={tone === "warn" ? { borderColor: C.amber, color: C.amber } : { borderColor: C.border, color: C.muted }}>
-      {children}
-    </span>
-  );
-}
-
-// ---- New collection (inline) ------------------------------------------------
+// ---- New collection ---------------------------------------------------------
 function NewCollectionButton({ onCreated }: { onCreated: () => void }) {
   const [open, setOpen] = React.useState(false);
   const [name, setName] = React.useState("");
   const [busy, setBusy] = React.useState(false);
-  const ref = React.useRef<HTMLDivElement>(null);
-  React.useEffect(() => {
-    if (!open) return;
-    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
-    document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
-  }, [open]);
+  const [error, setError] = React.useState<string | null>(null);
 
   async function create() {
     if (!name.trim() || busy) return;
     setBusy(true);
+    setError(null);
     try {
       const res = await fetch("/api/admin/collections", {
         method: "POST",
@@ -1040,33 +1268,63 @@ function NewCollectionButton({ onCreated }: { onCreated: () => void }) {
         setName("");
         setOpen(false);
         onCreated();
+      } else {
+        // Previously a failure closed nothing and said nothing; show the reason.
+        const j = await res.json().catch(() => ({}));
+        setError(typeof j.error === "string" && j.error ? j.error : `Couldn't create the collection (${res.status}).`);
       }
+    } catch {
+      setError("Network error — please try again.");
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="relative" ref={ref}>
-      <button type="button" onClick={() => setOpen((o) => !o)} className="grid h-6 w-6 place-items-center rounded-md" style={{ color: C.green }} aria-label="New collection">
-        <Plus size={15} />
-      </button>
-      {open && (
-        <div className="absolute right-0 top-full z-30 mt-1 w-56 rounded-lg border p-2 shadow-lg" style={{ borderColor: C.border, backgroundColor: C.raised }}>
-          <input
-            autoFocus
+    <>
+      <Button
+        size="toolbar"
+        onClick={() => {
+          setError(null);
+          setOpen(true);
+        }}
+      >
+        <Plus size={14} aria-hidden />
+        New collection
+      </Button>
+      <Dialog
+        open={open}
+        onClose={() => {
+          if (!busy) setOpen(false);
+        }}
+        title="New collection"
+        description="Group related documents so they can be governed and scoped together."
+        size="sm"
+        closeOnBackdrop={false}
+        dismissible={!busy}
+        footer={
+          <>
+            <Button variant="secondary" size="toolbar" onClick={() => setOpen(false)} disabled={busy}>
+              Cancel
+            </Button>
+            <Button size="toolbar" onClick={create} loading={busy} disabled={!name.trim()}>
+              {!busy && <Plus size={14} aria-hidden />}
+              Create
+            </Button>
+          </>
+        }
+      >
+        <Field label="Name" error={error}>
+          <Input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") create(); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") create();
+            }}
             placeholder="Collection name"
-            className="w-full rounded-md border bg-transparent px-2 py-1.5 text-xs outline-none"
-            style={{ borderColor: C.border, color: C.text }}
           />
-          <button type="button" onClick={create} disabled={busy || !name.trim()} className="mt-1.5 flex w-full items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-medium" style={{ backgroundColor: C.green, color: C.bg, opacity: busy || !name.trim() ? 0.5 : 1 }}>
-            {busy ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />} Create
-          </button>
-        </div>
-      )}
-    </div>
+        </Field>
+      </Dialog>
+    </>
   );
 }

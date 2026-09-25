@@ -1,6 +1,9 @@
 import { requireAdmin } from "@/lib/auth/admin";
-import { PageHeader } from "@/components/ui/PageHeader";
+import { PageHeader } from "@/components/ui";
 import { DecisionsClient } from "./DecisionsClient";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Ingestion decisions" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,7 +15,7 @@ export default async function DecisionsPage() {
     <div>
       <PageHeader
         title="Ingestion decisions"
-        description="What the AI ingestion agent decided and why: classify, taxonomy reuse/propose, NEW / ENRICH / DUPLICATE / CONFLICT, compile, entities, relationships."
+        description="Why each item was added, merged or skipped during ingestion."
       />
       <DecisionsClient />
     </div>

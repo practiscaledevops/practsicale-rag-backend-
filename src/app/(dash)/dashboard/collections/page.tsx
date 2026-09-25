@@ -9,6 +9,9 @@ import {
   type WsCollection,
   type WsDocument,
 } from "./KnowledgeWorkspace";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Collections" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -83,13 +86,16 @@ export default async function CollectionsPage() {
     admin = await requireAdmin("collections:read");
   } catch (e) {
     const err = e as AdminAuthError;
+    // Full-bleed route: the shell adds no padding, so this branch brings its own.
     return (
-      <div>
+      <div className="p-4 sm:p-6">
         <PageHeader title="Collections" description="Your knowledge, organized by collection." />
         <Alert tone="danger" title="You don't have access to collections">
-          {err.status === 403
-            ? "Your account is missing the 'collections:read' permission. Ask an administrator to grant it."
-            : err.message}
+          <span className="text-danger">
+            {err.status === 403
+              ? "Your account is missing the 'collections:read' permission. Ask an administrator to grant it."
+              : err.message}
+          </span>
         </Alert>
       </div>
     );
@@ -132,11 +138,15 @@ export default async function CollectionsPage() {
     };
   });
 
+  // The document query is capped at DOC_LIMIT rows; the workspace says so.
+  const truncated = documents.length >= DOC_LIMIT;
+
   return (
     <KnowledgeWorkspace
       collections={collections}
       documents={documents}
       governanceEnabled={colRes.enabled}
+      truncated={truncated}
     />
   );
 }

@@ -4,7 +4,6 @@ import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
-  ArrowLeft,
   FileText,
   ShieldCheck,
   Layers,
@@ -15,20 +14,25 @@ import {
   Pencil,
   Trash2,
   RefreshCw,
-  Loader2,
   Hash,
   Database,
   Link2,
   Check,
+  Workflow,
 } from "lucide-react";
-import { Button } from "@/components/ui/Button";
-import { Alert } from "@/components/ui/Alert";
+import { Alert, Notice } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
+import { Button, buttonClass } from "@/components/ui/Button";
+import { Card, SectionCard } from "@/components/ui/Card";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Dialog } from "@/components/ui/Dialog";
-import { Input } from "@/components/ui/Input";
-import { Label } from "@/components/ui/Label";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
+import { Field } from "@/components/ui/Field";
+import { Input } from "@/components/ui/Input";
+import { Spinner } from "@/components/ui/Loading";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { fmtDateTime, fmtInt } from "@/lib/format";
+import { sourceTypeLabel, statusTone } from "@/lib/ui-labels";
 import { cn } from "@/lib/utils";
 
 // ---- data shapes (must match the GET /api/admin/documents/[id] response) ------
@@ -74,15 +78,7 @@ interface DetailResponse {
   chunks: ChunkDTO[];
 }
 
-const SOURCE_LABELS: Record<string, string> = {
-  document: "Document",
-  call_score: "Call score",
-  coaching: "Coaching",
-  transcript: "Transcript",
-};
-const sourceLabel = (v: string | null) => (v ? SOURCE_LABELS[v] ?? v : "—");
-
-const fmtDate = (iso: string) => new Date(iso).toLocaleString();
+const plural = (n: number, word: string) => `${fmtInt(n)} ${word}${n === 1 ? "" : "s"}`;
 
 // ---- main component -----------------------------------------------------------
 
@@ -127,6 +123,17 @@ export function DocumentDetailClient({ documentId }: { documentId: string }) {
   React.useEffect(() => {
     load();
   }, [load]);
+
+  // "View chunks" links here with #chunks, but the section only exists once the
+  // client fetch lands, so scroll to it on the first successful load.
+  const scrolledToHash = React.useRef(false);
+  React.useEffect(() => {
+    if (!data || scrolledToHash.current) return;
+    scrolledToHash.current = true;
+    if (window.location.hash === "#chunks") {
+      document.getElementById("chunks")?.scrollIntoView({ block: "start" });
+    }
+  }, [data]);
 
   // ---- actions ----------------------------------------------------------------
 
@@ -202,24 +209,15 @@ export function DocumentDetailClient({ documentId }: { documentId: string }) {
 
   // ---- render states ----------------------------------------------------------
 
-  const backLink = (
-    <Link
-      href="/dashboard/documents"
-      className="mb-4 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-    >
-      <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-      Back to documents
-    </Link>
-  );
-
-  if (loading) {
+  // A reload of the same document (after a re-ingest) refreshes in place; only
+  // the first load, or a different document, shows the loading view.
+  if (loading && (!data || data.document.id !== documentId)) {
     return (
       <div>
-        {backLink}
-        <div className="flex items-center gap-2 py-16 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-          Loading document…
-        </div>
+        <PageHeader title="Document" backHref="/dashboard/documents" backLabel="Documents" />
+        <Card className="p-4">
+          <Spinner label="Loading document…" className="py-2" />
+        </Card>
       </div>
     );
   }
@@ -227,14 +225,14 @@ export function DocumentDetailClient({ documentId }: { documentId: string }) {
   if (notFound) {
     return (
       <div>
-        {backLink}
+        <PageHeader title="Document not found" backHref="/dashboard/documents" backLabel="Documents" />
         <EmptyState
           icon={FileText}
-          title="Document not found"
+          title="This document doesn't exist"
           description="It may have been deleted, or it belongs to another workspace."
           action={
-            <Link href="/dashboard/documents">
-              <Button variant="outline">Back to documents</Button>
+            <Link href="/dashboard/documents" className={buttonClass({ variant: "secondary", size: "toolbar" })}>
+              Back to documents
             </Link>
           }
         />
@@ -245,98 +243,102 @@ export function DocumentDetailClient({ documentId }: { documentId: string }) {
   if (loadError || !data) {
     return (
       <div>
-        {backLink}
-        <Alert tone="danger" title="Could not load document">
-          {loadError ?? "Unknown error."}
-        </Alert>
+        <PageHeader title="Couldn't load document" backHref="/dashboard/documents" backLabel="Documents" />
+        <Alert tone="danger">{loadError ?? "Unknown error."}</Alert>
+        <Button variant="secondary" size="toolbar" className="mt-3" onClick={load}>
+          <RefreshCw size={14} aria-hidden />
+          Try again
+        </Button>
       </div>
     );
   }
 
   const { document: doc, chunks } = data;
+  const reingestBlocked = !doc.reingest.available;
+  const dialogOpen = renameOpen || deleteOpen;
 
   return (
     <div>
-      {backLink}
+      <PageHeader
+        title={doc.title || "Untitled"}
+        description="The full processing view — how this document was redacted, chunked, and embedded."
+        backHref="/dashboard/documents"
+        backLabel="Documents"
+        actions={
+          <div className="flex flex-col items-start gap-1 sm:items-end">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="secondary"
+                size="toolbar"
+                onClick={() => {
+                  setActionError(null);
+                  setRenameOpen(true);
+                }}
+              >
+                <Pencil size={14} aria-hidden />
+                Edit title
+              </Button>
 
-      {/* Title + primary actions */}
-      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0">
-          <h1 className="truncate text-xl font-semibold tracking-tight">
-            {doc.title || <span className="text-muted-foreground">Untitled</span>}
-          </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            The full processing view — how this document was redacted, chunked, and embedded.
-          </p>
-        </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              setActionError(null);
-              setRenameOpen(true);
-            }}
-          >
-            <Pencil className="h-4 w-4" aria-hidden="true" />
-            Edit title
-          </Button>
+              {/* Re-ingest is disabled when the source text wasn't retained and
+                  can't be recovered; the reason shows as text below. */}
+              <span title={doc.reingest.reason} className="inline-flex">
+                <Button
+                  variant="secondary"
+                  size="toolbar"
+                  disabled={reingestBlocked || busy !== null}
+                  loading={busy === "reingesting"}
+                  aria-describedby={reingestBlocked ? "reingest-reason" : undefined}
+                  onClick={reingest}
+                >
+                  {busy !== "reingesting" && <RefreshCw size={14} aria-hidden />}
+                  {busy === "reingesting" ? "Re-ingesting…" : "Re-ingest"}
+                </Button>
+              </span>
 
-          {/* Re-ingest: disabled (with an explanatory tooltip) when the source
-              text wasn't retained and can't be recovered. */}
-          <span title={doc.reingest.reason} className="inline-flex">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!doc.reingest.available || busy !== null}
-              onClick={reingest}
-            >
-              {busy === "reingesting" ? (
-                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <RefreshCw className="h-4 w-4" aria-hidden="true" />
-              )}
-              {busy === "reingesting" ? "Re-ingesting…" : "Re-ingest"}
-            </Button>
-          </span>
+              <Button
+                variant="danger-secondary"
+                size="toolbar"
+                onClick={() => {
+                  setActionError(null);
+                  setDeleteOpen(true);
+                }}
+              >
+                <Trash2 size={14} aria-hidden />
+                Delete
+              </Button>
+            </div>
+            {reingestBlocked && (
+              <p id="reingest-reason" className="max-w-xs text-xs text-muted-foreground sm:text-right">
+                {doc.reingest.reason}
+              </p>
+            )}
+          </div>
+        }
+      />
 
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              setActionError(null);
-              setDeleteOpen(true);
-            }}
-          >
-            <Trash2 className="h-4 w-4 text-danger" aria-hidden="true" />
-            Delete
-          </Button>
-        </div>
-      </div>
-
-      {(notice || actionError) && (
+      {(notice || (actionError && !dialogOpen)) && (
         <div className="mb-4 space-y-2">
-          {notice && (
-            <Alert tone="success" title="Done">
-              {notice}
+          {notice && <Notice message={notice} onDone={() => setNotice(null)} />}
+          {actionError && !dialogOpen && (
+            <Alert tone="danger" onDismiss={() => setActionError(null)}>
+              {actionError}
             </Alert>
           )}
-          {actionError && <Alert tone="danger">{actionError}</Alert>}
         </div>
       )}
 
       {/* Header facts */}
-      <Card className="mb-4">
-        <CardContent className="grid grid-cols-1 gap-x-8 gap-y-4 p-5 sm:grid-cols-2">
+      <SectionCard icon={FileText} title="Details" className="mb-4">
+        <dl className="grid grid-cols-[112px_minmax(0,1fr)] gap-x-4 gap-y-2 text-[13px] sm:grid-cols-[140px_minmax(0,1fr)]">
           <Fact label="Type">
-            <Badge tone="accent">{sourceLabel(doc.source_type)}</Badge>
+            <Badge tone="neutral">{sourceTypeLabel(doc.source_type)}</Badge>
           </Fact>
-          <Fact label="Created">{fmtDate(doc.created_at)}</Fact>
-          <Fact label="Last updated">{fmtDate(doc.updated_at)}</Fact>
+          <Fact label="Created">{fmtDateTime(doc.created_at)}</Fact>
+          <Fact label="Last updated">{fmtDateTime(doc.updated_at)}</Fact>
           <Fact label="Data source">
             {doc.data_source ? (
               <span className="inline-flex items-center gap-1.5">
-                <Database className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+                <Database size={14} className="shrink-0 text-muted-foreground" aria-hidden />
                 {doc.data_source.name}
               </span>
             ) : (
@@ -358,25 +360,25 @@ export function DocumentDetailClient({ documentId }: { documentId: string }) {
           </Fact>
           <Fact label="URI">
             {doc.uri ? (
-              <span className="inline-flex items-center gap-1.5 break-all">
-                <Link2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+              <span className="inline-flex items-start gap-1.5 break-all">
+                <Link2 size={14} className="mt-0.5 shrink-0 text-muted-foreground" aria-hidden />
                 {doc.uri}
               </span>
             ) : (
               <span className="text-muted-foreground">—</span>
             )}
           </Fact>
-          <Fact label="Content hash" className="sm:col-span-2">
+          <Fact label="Content hash">
             {doc.content_hash ? (
-              <code className="break-all rounded bg-surface-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+              <code className="break-all rounded-md bg-surface-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
                 {doc.content_hash}
               </code>
             ) : (
               <span className="text-muted-foreground">—</span>
             )}
           </Fact>
-        </CardContent>
-      </Card>
+        </dl>
+      </SectionCard>
 
       {/* Processing pipeline */}
       <PipelineStrip doc={doc} chunks={chunks} />
@@ -395,61 +397,33 @@ export function DocumentDetailClient({ documentId }: { documentId: string }) {
       />
 
       {/* Delete confirm */}
-      <Dialog
+      <ConfirmDialog
         open={deleteOpen}
-        onClose={() => (busy === "deleting" ? undefined : setDeleteOpen(false))}
+        tone="danger"
         title="Delete document?"
         description={`“${doc.title || "Untitled"}” and its ${doc.chunk_count} chunk${
           doc.chunk_count === 1 ? "" : "s"
         } will be permanently removed. This cannot be undone.`}
-        footer={
-          <>
-            <Button
-              variant="outline"
-              onClick={() => setDeleteOpen(false)}
-              disabled={busy === "deleting"}
-            >
-              Cancel
-            </Button>
-            <Button variant="danger" onClick={confirmDelete} disabled={busy === "deleting"}>
-              {busy === "deleting" ? (
-                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <Trash2 className="h-4 w-4" aria-hidden="true" />
-              )}
-              {busy === "deleting" ? "Deleting…" : "Delete"}
-            </Button>
-          </>
-        }
-      >
-        {deleteOpen && actionError && (
-          <div className="py-1">
-            <Alert tone="danger">{actionError}</Alert>
-          </div>
-        )}
-      </Dialog>
+        confirmLabel="Delete"
+        busy={busy === "deleting"}
+        error={deleteOpen ? actionError : null}
+        onConfirm={confirmDelete}
+        onCancel={() => {
+          if (busy !== "deleting") setDeleteOpen(false);
+        }}
+      />
     </div>
   );
 }
 
 // ---- header fact ---------------------------------------------------------------
 
-function Fact({
-  label,
-  children,
-  className,
-}: {
-  label: string;
-  children: React.ReactNode;
-  className?: string;
-}) {
+function Fact({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className={cn("min-w-0", className)}>
-      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        {label}
-      </div>
-      <div className="mt-1 text-sm text-foreground">{children}</div>
-    </div>
+    <>
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 text-foreground">{children}</dd>
+    </>
   );
 }
 
@@ -464,7 +438,7 @@ function PipelineStrip({ doc, chunks }: { doc: DocumentDetail; chunks: ChunkDTO[
     {
       icon: FileText,
       title: "Raw file",
-      sub: sourceLabel(doc.source_type),
+      sub: sourceTypeLabel(doc.source_type),
       done: true,
     },
     {
@@ -491,41 +465,41 @@ function PipelineStrip({ doc, chunks }: { doc: DocumentDetail; chunks: ChunkDTO[
   ];
 
   return (
-    <Card className="mb-4">
-      <CardHeader>
-        <CardTitle>Processing pipeline</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <ol className="flex flex-wrap items-stretch gap-2">
-          {steps.map((step, i) => (
+    <SectionCard icon={Workflow} title="Processing pipeline" className="mb-4">
+      <ol className="flex flex-wrap items-stretch gap-2">
+        {steps.map((step, i) => {
+          const tone = statusTone(step.done ? "done" : "pending");
+          return (
             <React.Fragment key={step.title}>
-              <li className="flex min-w-[9rem] flex-1 items-start gap-3 rounded-lg border border-border bg-surface-muted/40 p-3">
-                <div
+              <li className="flex min-w-[10rem] flex-1 items-start gap-2.5 rounded-xl border border-border bg-surface p-3">
+                <span
+                  aria-hidden
                   className={cn(
-                    "flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
+                    "grid h-8 w-8 shrink-0 place-items-center rounded-full",
                     step.done ? "bg-success/10 text-success" : "bg-surface-muted text-muted-foreground"
                   )}
                 >
-                  <step.icon className="h-4 w-4" aria-hidden="true" />
-                </div>
+                  <step.icon size={16} />
+                </span>
                 <div className="min-w-0">
-                  <div className="flex items-center gap-1 text-sm font-medium">
-                    {step.title}
-                    {step.done && <Check className="h-3.5 w-3.5 text-success" aria-hidden="true" />}
-                  </div>
+                  <div className="text-[13px] font-medium text-foreground">{step.title}</div>
                   <div className="text-xs text-muted-foreground">{step.sub}</div>
+                  <Badge tone={tone} className="mt-1.5">
+                    {step.done && <Check size={12} aria-hidden />}
+                    {step.done ? "Done" : "Pending"}
+                  </Badge>
                 </div>
               </li>
               {i < steps.length - 1 && (
-                <li aria-hidden="true" className="hidden items-center sm:flex">
-                  <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                <li aria-hidden="true" className="hidden items-center text-muted-foreground sm:flex">
+                  <ChevronRight size={16} />
                 </li>
               )}
             </React.Fragment>
-          ))}
-        </ol>
-      </CardContent>
-    </Card>
+          );
+        })}
+      </ol>
+    </SectionCard>
   );
 }
 
@@ -558,53 +532,48 @@ function ChunkInspector({ doc, chunks }: { doc: DocumentDetail; chunks: ChunkDTO
 
   if (chunks.length === 0) {
     return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Chunks</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <EmptyState
-            icon={Layers}
-            title="No chunks"
-            description="This document produced no chunks. Re-ingest it, or re-upload the source file."
-          />
-        </CardContent>
-      </Card>
+      <SectionCard id="chunks" icon={Layers} title="Chunks" className="scroll-mt-4">
+        <EmptyState
+          variant="plain"
+          title="No chunks"
+          description="This document produced no chunks. Re-ingest it, or re-upload the source file."
+          className="py-4"
+        />
+      </SectionCard>
     );
   }
 
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between gap-3">
-        <CardTitle>Chunk inspector</CardTitle>
-        <span className="text-xs text-muted-foreground">
-          {doc.chunk_count} chunk{doc.chunk_count === 1 ? "" : "s"} · {doc.embedded_count} embedded
-        </span>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {topLevel.map((chunk) => {
-          const kids = childrenByParent[chunk.id] ?? [];
-          return (
-            <div key={chunk.id} className="space-y-2">
-              <ChunkCard chunk={chunk} index={indexById.get(chunk.id) ?? 0} nameFor={nameFor} />
-              {kids.length > 0 && (
-                <div className="space-y-2 border-l-2 border-border pl-3 sm:pl-4">
-                  {kids.map((kid) => (
-                    <ChunkCard
-                      key={kid.id}
-                      chunk={kid}
-                      index={indexById.get(kid.id) ?? 0}
-                      nameFor={nameFor}
-                      nested
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </CardContent>
-    </Card>
+    <SectionCard
+      id="chunks"
+      icon={Layers}
+      title="Chunk inspector"
+      description={`${plural(doc.chunk_count, "chunk")} · ${fmtInt(doc.embedded_count)} embedded`}
+      className="scroll-mt-4"
+      bodyClassName="space-y-3"
+    >
+      {topLevel.map((chunk) => {
+        const kids = childrenByParent[chunk.id] ?? [];
+        return (
+          <div key={chunk.id} className="space-y-2">
+            <ChunkCard chunk={chunk} index={indexById.get(chunk.id) ?? 0} nameFor={nameFor} />
+            {kids.length > 0 && (
+              <div className="space-y-2 border-l-2 border-border pl-3 sm:pl-4">
+                {kids.map((kid) => (
+                  <ChunkCard
+                    key={kid.id}
+                    chunk={kid}
+                    index={indexById.get(kid.id) ?? 0}
+                    nameFor={nameFor}
+                    nested
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </SectionCard>
   );
 }
 
@@ -620,6 +589,7 @@ function ChunkCard({
   nested?: boolean;
 }) {
   const [open, setOpen] = React.useState(false);
+  const contentId = React.useId();
 
   const kind = chunk.is_parent ? "Parent section" : nested ? "Child chunk" : "Chunk";
   const tokens =
@@ -630,28 +600,23 @@ function ChunkCard({
         : null;
 
   return (
-    <div
-      className={cn(
-        "rounded-lg border border-border p-3",
-        nested ? "bg-surface" : "bg-surface-muted/30"
-      )}
-    >
+    <div className="rounded-xl border border-border bg-surface p-3">
       {/* Labels row */}
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
-        <span className="font-mono text-xs font-semibold text-muted-foreground">#{index}</span>
-        <Badge tone={chunk.is_parent ? "accent" : "neutral"}>{kind}</Badge>
+        <span className="font-mono text-xs font-medium text-muted-foreground">#{index}</span>
+        <Badge tone={chunk.is_parent ? "strong" : "neutral"}>{kind}</Badge>
 
         {chunk.heading && (
-          <Badge tone="neutral" className="max-w-[16rem] truncate">
-            <Hash className="mr-1 h-3 w-3 shrink-0" aria-hidden="true" />
-            {chunk.heading.replace(/^#+\s*/, "")}
+          <Badge tone="neutral" className="max-w-[16rem]">
+            <Hash size={12} className="shrink-0" aria-hidden />
+            <span className="min-w-0 truncate">{chunk.heading.replace(/^#+\s*/, "")}</span>
           </Badge>
         )}
 
         {chunk.has_embedding ? (
           <Badge tone="success">
-            <Check className="mr-1 h-3 w-3" aria-hidden="true" />
-            embedding: 1024-d
+            <Check size={12} aria-hidden />
+            Embedded · 1024-d
           </Badge>
         ) : (
           <Badge tone="warning">No embedding</Badge>
@@ -662,7 +627,7 @@ function ChunkCard({
         {chunk.collection_ids.length > 0 && (
           <span className="flex flex-wrap gap-1">
             {chunk.collection_ids.map((cid) => (
-              <Badge key={cid} tone="neutral" className="opacity-80">
+              <Badge key={cid} tone="neutral">
                 {nameFor(cid)}
               </Badge>
             ))}
@@ -672,9 +637,10 @@ function ChunkCard({
 
       {/* Content — collapsed to a preview, expandable to a scrollable block */}
       <div
+        id={contentId}
         className={cn(
-          "whitespace-pre-wrap break-words text-sm text-foreground",
-          open ? "max-h-72 overflow-y-auto rounded-md bg-surface p-2" : "line-clamp-3"
+          "whitespace-pre-wrap break-words text-[13px] leading-relaxed text-foreground",
+          open ? "max-h-72 overflow-y-auto rounded-lg bg-surface-muted p-2.5" : "line-clamp-3"
         )}
       >
         {chunk.content}
@@ -683,15 +649,17 @@ function ChunkCard({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline"
+        aria-expanded={open}
+        aria-controls={contentId}
+        className="mt-1.5 inline-flex items-center gap-1 rounded-md text-xs font-medium text-accent-strong hover:underline"
       >
         {open ? (
           <>
-            <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" /> Show less
+            <ChevronUp size={14} aria-hidden /> Show less
           </>
         ) : (
           <>
-            <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" /> Show full chunk
+            <ChevronDown size={14} aria-hidden /> Show full chunk
           </>
         )}
       </button>
@@ -729,24 +697,22 @@ function RenameDialog({
       onClose={onClose}
       title="Edit title"
       description="Rename this document. Leave empty to clear the title."
+      size="sm"
+      closeOnBackdrop={false}
+      dismissible={!saving}
       footer={
         <>
-          <Button variant="outline" onClick={onClose} disabled={saving}>
+          <Button variant="secondary" size="toolbar" onClick={onClose} disabled={saving}>
             Cancel
           </Button>
-          <Button onClick={() => onSave(value)} disabled={saving}>
-            {saving ? (
-              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-            ) : (
-              <Check className="h-4 w-4" aria-hidden="true" />
-            )}
+          <Button size="toolbar" onClick={() => onSave(value)} loading={saving}>
+            {!saving && <Check size={14} aria-hidden />}
             {saving ? "Saving…" : "Save"}
           </Button>
         </>
       }
     >
-      <div className="space-y-2 py-1">
-        <Label htmlFor="doc-title">Title</Label>
+      <Field label="Title" error={error}>
         <Input
           id="doc-title"
           value={value}
@@ -757,8 +723,7 @@ function RenameDialog({
             if (e.key === "Enter" && !saving) onSave(value);
           }}
         />
-        {error && <Alert tone="danger">{error}</Alert>}
-      </div>
+      </Field>
     </Dialog>
   );
 }

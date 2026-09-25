@@ -1,5 +1,8 @@
 import { requireAdmin } from "@/lib/auth/admin";
 import { ObjectDetailClient } from "./ObjectDetailClient";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Knowledge object" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

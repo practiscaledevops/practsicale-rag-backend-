@@ -1,6 +1,11 @@
+import { Suspense } from "react";
 import { requireAdmin } from "@/lib/auth/admin";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { Spinner } from "@/components/ui/Loading";
 import { EntitiesClient } from "./EntitiesClient";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Entities" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,9 +17,12 @@ export default async function EntitiesPage() {
     <div>
       <PageHeader
         title="Entities"
-        description="Metadata says what an object is; entities say who and what live inside it. Extracted automatically at ingest."
+        description="The people, teams, clients, offers and frameworks mentioned inside your knowledge. Extracted automatically when knowledge is added."
       />
-      <EntitiesClient />
+      {/* The client reads the ?id= deep link with useSearchParams, which needs a Suspense boundary. */}
+      <Suspense fallback={<Spinner label="Loading entities…" />}>
+        <EntitiesClient />
+      </Suspense>
     </div>
   );
 }

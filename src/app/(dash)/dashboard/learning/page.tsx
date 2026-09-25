@@ -1,6 +1,9 @@
 import { requireAdmin } from "@/lib/auth/admin";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { LearningLabClient } from "./LearningLabClient";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Learning Lab" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,7 +19,7 @@ export default async function LearningLabPage() {
     <div>
       <PageHeader
         title="Learning Lab"
-        description="Decision → implementation → experiment → result → learning → adaptation → PractiScale standard. Reality stores the evidence; this stores the interpretation."
+        description="Decisions, experiments and lessons the team records, and what they prove."
       />
       <LearningLabClient />
     </div>

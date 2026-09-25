@@ -16,14 +16,40 @@ import {
   CartesianGrid,
   Tooltip,
 } from "recharts";
-import { Activity, ArrowDownToLine, ArrowUpFromLine, DollarSign, BarChart3 } from "lucide-react";
-import { PageHeader } from "@/components/ui/PageHeader";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
-import { Table, THead, TBody, Tr, Th, Td } from "@/components/ui/Table";
-import { Badge } from "@/components/ui/Badge";
-import { Alert } from "@/components/ui/Alert";
-import { EmptyState } from "@/components/ui/EmptyState";
-import { cn } from "@/lib/utils";
+import { Activity, ArrowDownToLine, ArrowUpFromLine, CircleDollarSign, BarChart3 } from "lucide-react";
+import {
+  Alert,
+  EmptyState,
+  PageHeader,
+  SectionCard,
+  Segmented,
+  Skeleton,
+  StatGrid,
+  StatTile,
+  Table,
+  TableCard,
+  TableEmptyRow,
+  TableSkeletonRows,
+  Tag,
+  TBody,
+  Td,
+  Th,
+  THead,
+  Tr,
+  type SegmentedOption,
+} from "@/components/ui";
+import { CHART } from "@/lib/chart-theme";
+import { DASH, fmtCompact, fmtInt, humanize } from "@/lib/format";
+import { TIER_LABELS } from "@/lib/ui-labels";
+
+/** LLM cost at 4 decimals on this page, so per-model and per-key rows add up to the total. */
+const costFmt = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 4,
+  maximumFractionDigits: 4,
+});
+const fmtCost = (usd: number) => (Number.isFinite(usd) ? costFmt.format(usd) : DASH);
 
 interface Bucket {
   requests: number;
@@ -40,17 +66,22 @@ interface UsageResponse {
 }
 
 const RANGES = [7, 30, 90] as const;
+const RANGE_OPTIONS: SegmentedOption<string>[] = RANGES.map((r) => ({ value: String(r), label: `${r} days` }));
 
-function fmtInt(n: number): string {
-  return Math.round(n).toLocaleString();
-}
-function fmtUsd(n: number): string {
-  return `$${n.toFixed(4)}`;
-}
+const dayShort = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+const dayLong = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+
+/** "2026-07-29" -> "Jul 29" (UTC: the series is bucketed by UTC day). */
 function fmtDay(d: string): string {
-  // "2026-07-29" -> "Jul 29"
-  const dt = new Date(d + "T00:00:00Z");
-  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+  return dayShort.format(new Date(d + "T00:00:00Z"));
+}
+/** "2026-07-29" -> "Wed, Jul 29" for the tooltip. */
+function fmtDayLong(d: string): string {
+  return dayLong.format(new Date(d + "T00:00:00Z"));
+}
+
+function tierLabel(tier: string): string {
+  return (TIER_LABELS as Record<string, string>)[tier] ?? humanize(tier);
 }
 
 export default function AnalyticsPage() {
@@ -84,212 +115,199 @@ export default function AnalyticsPage() {
   }, [days]);
 
   const totals = data?.totals;
-  const stats = [
-    { label: "Requests", value: totals ? fmtInt(totals.requests) : "—", icon: Activity },
-    { label: "Input tokens", value: totals ? fmtInt(totals.input_tokens) : "—", icon: ArrowDownToLine },
-    { label: "Output tokens", value: totals ? fmtInt(totals.output_tokens) : "—", icon: ArrowUpFromLine },
-    { label: "Est. cost", value: totals ? fmtUsd(totals.cost_usd) : "—", icon: DollarSign },
-  ];
-
   const hasSeriesData = !!data && data.series.some((d) => d.requests > 0);
+  const rangeLabel = `${days} days`;
 
   return (
     <div>
       <PageHeader
         title="Analytics"
-        description="Token usage, estimated cost, and request volume across the org."
+        description="Requests, tokens and cost across every app that uses the Brain."
         actions={
-          <div
-            className="inline-flex rounded-lg border border-border bg-surface p-0.5"
-            role="group"
-            aria-label="Time range"
-          >
-            {RANGES.map((r) => (
-              <button
-                key={r}
-                type="button"
-                onClick={() => setDays(r)}
-                aria-pressed={days === r}
-                className={cn(
-                  "rounded-md px-3 py-1 text-sm font-medium transition-colors",
-                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                  days === r
-                    ? "bg-accent/10 text-accent"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
-              >
-                {r}d
-              </button>
-            ))}
-          </div>
+          <Segmented
+            label="Date range"
+            value={String(days)}
+            options={RANGE_OPTIONS}
+            onChange={(v) => setDays(Number(v))}
+          />
         }
       />
 
-      {error && (
-        <Alert tone="danger" title="Could not load analytics" className="mb-6">
-          {error}
-        </Alert>
-      )}
+      <div className="space-y-4">
+        {error && (
+          <Alert tone="danger" title="Couldn't load analytics">
+            <span className="text-danger">{error}</span>
+          </Alert>
+        )}
 
-      {/* Totals */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {stats.map(({ label, value, icon: Icon }) => (
-          <Card key={label}>
-            <CardContent className="flex items-center justify-between p-5">
-              <div className="min-w-0">
-                <p className="text-sm text-muted-foreground">{label}</p>
-                <p className="mt-1 text-2xl font-semibold tabular-nums">{loading ? "…" : value}</p>
-              </div>
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-surface-muted text-muted-foreground">
-                <Icon className="h-5 w-5" aria-hidden="true" />
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+        {/* Totals */}
+        <section aria-label="Totals">
+          <StatGrid cols={4}>
+            <StatTile
+              icon={Activity}
+              label="Requests"
+              value={totals ? fmtInt(totals.requests) : "—"}
+              hint={`Last ${rangeLabel}`}
+              loading={loading}
+            />
+            <StatTile
+              icon={ArrowDownToLine}
+              label="Input tokens"
+              value={totals ? fmtCompact(totals.input_tokens) : "—"}
+              title={totals ? fmtInt(totals.input_tokens) : undefined}
+              hint={totals ? `${fmtInt(totals.input_tokens)} total` : undefined}
+              loading={loading}
+            />
+            <StatTile
+              icon={ArrowUpFromLine}
+              label="Output tokens"
+              value={totals ? fmtCompact(totals.output_tokens) : "—"}
+              title={totals ? fmtInt(totals.output_tokens) : undefined}
+              hint={totals ? `${fmtInt(totals.output_tokens)} total` : undefined}
+              loading={loading}
+            />
+            <StatTile
+              icon={CircleDollarSign}
+              label="Est. cost"
+              value={totals ? fmtCost(totals.cost_usd) : "—"}
+              hint="Estimated (USD)"
+              loading={loading}
+            />
+          </StatGrid>
+        </section>
 
-      {/* Time series */}
-      <Card className="mt-6">
-        <CardHeader>
-          <CardTitle>Requests over time</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {loading ? (
-            <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">
-              Loading…
-            </div>
-          ) : hasSeriesData ? (
-            <div className="h-64 w-full">
+        {/* Time series */}
+        <SectionCard icon={BarChart3} title="Requests over time" description={`Daily · last ${rangeLabel}`}>
+          <div className="h-64 w-full">
+            {loading ? (
+              <Skeleton className="h-full w-full rounded-xl" />
+            ) : hasSeriesData ? (
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={data!.series} margin={{ top: 8, right: 8, bottom: 0, left: -12 }}>
                   <defs>
-                    <linearGradient id="reqFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="rgb(var(--accent))" stopOpacity={0.35} />
-                      <stop offset="100%" stopColor="rgb(var(--accent))" stopOpacity={0} />
+                    <linearGradient id="analytics-requests-fill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={CHART.primary} stopOpacity={0.35} />
+                      <stop offset="100%" stopColor={CHART.primary} stopOpacity={0} />
                     </linearGradient>
                   </defs>
-                  <CartesianGrid stroke="rgb(var(--border))" strokeDasharray="3 3" vertical={false} />
+                  <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" vertical={false} />
                   <XAxis
                     dataKey="date"
                     tickFormatter={fmtDay}
-                    tick={{ fill: "rgb(var(--muted-foreground))", fontSize: 12 }}
-                    stroke="rgb(var(--border))"
+                    tick={CHART.tick}
+                    axisLine={false}
+                    tickLine={false}
                     minTickGap={24}
                   />
-                  <YAxis
-                    allowDecimals={false}
-                    tick={{ fill: "rgb(var(--muted-foreground))", fontSize: 12 }}
-                    stroke="rgb(var(--border))"
-                    width={40}
-                  />
+                  <YAxis allowDecimals={false} tick={CHART.tick} axisLine={false} tickLine={false} width={40} />
                   <Tooltip
-                    labelFormatter={(l) => fmtDay(String(l))}
+                    labelFormatter={(l) => fmtDayLong(String(l))}
                     formatter={(v) => [fmtInt(Number(v)), "Requests"] as [string, string]}
-                    contentStyle={{
-                      background: "rgb(var(--surface))",
-                      border: "1px solid rgb(var(--border))",
-                      borderRadius: 8,
-                      color: "rgb(var(--foreground))",
-                      fontSize: 12,
-                    }}
+                    contentStyle={CHART.tooltip.contentStyle}
+                    labelStyle={CHART.tooltip.labelStyle}
+                    itemStyle={CHART.tooltip.itemStyle}
+                    cursor={{ stroke: CHART.axis, strokeOpacity: 0.35 }}
                   />
                   <Area
                     type="monotone"
                     dataKey="requests"
-                    stroke="rgb(var(--accent))"
+                    stroke={CHART.primary}
                     strokeWidth={2}
-                    fill="url(#reqFill)"
+                    fill="url(#analytics-requests-fill)"
+                    activeDot={{ r: 4, fill: CHART.primary, stroke: "rgb(var(--surface))", strokeWidth: 2 }}
                   />
                 </AreaChart>
               </ResponsiveContainer>
-            </div>
-          ) : (
-            <EmptyState
-              icon={BarChart3}
-              title="No usage yet"
-              description="Once the API and playground log requests, they will appear here."
-            />
-          )}
-        </CardContent>
-      </Card>
+            ) : (
+              <EmptyState
+                variant="plain"
+                className="h-full justify-center"
+                icon={BarChart3}
+                title="No usage yet"
+                description="Once the API and playground log requests, they will appear here."
+              />
+            )}
+          </div>
+        </SectionCard>
 
-      {/* Breakdowns */}
-      <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>By model &amp; tier</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {loading ? (
-              <p className="text-sm text-muted-foreground">Loading…</p>
-            ) : data && data.byModel.length > 0 ? (
-              <Table>
-                <THead>
-                  <tr>
-                    <Th>Model</Th>
-                    <Th>Tier</Th>
-                    <Th className="text-right">Reqs</Th>
-                    <Th className="text-right">Tokens</Th>
-                    <Th className="text-right">Cost</Th>
-                  </tr>
-                </THead>
-                <TBody>
-                  {data.byModel.map((m) => (
+        {/* Breakdowns */}
+        <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
+          <TableCard
+            title="By model and tier"
+            meta={data && !loading ? `${data.byModel.length} model${data.byModel.length === 1 ? "" : "s"}` : undefined}
+          >
+            <Table minWidth={0} caption="Usage by model and tier">
+              <THead>
+                <tr>
+                  <Th>Model</Th>
+                  <Th>Tier</Th>
+                  <Th numeric>Requests</Th>
+                  <Th numeric>Tokens</Th>
+                  <Th numeric>Cost</Th>
+                </tr>
+              </THead>
+              <TBody>
+                {loading ? (
+                  <TableSkeletonRows rows={3} cols={5} />
+                ) : data && data.byModel.length > 0 ? (
+                  data.byModel.map((m) => (
                     <Tr key={`${m.model}|${m.tier}`}>
                       <Td className="font-medium">{m.model}</Td>
                       <Td>
-                        <Badge tone="neutral">{m.tier}</Badge>
+                        <Tag>{tierLabel(m.tier)}</Tag>
                       </Td>
-                      <Td className="text-right tabular-nums">{fmtInt(m.requests)}</Td>
-                      <Td className="text-right tabular-nums">
-                        {fmtInt(m.input_tokens + m.output_tokens)}
+                      <Td numeric>{fmtInt(m.requests)}</Td>
+                      <Td numeric title={fmtInt(m.input_tokens + m.output_tokens)}>
+                        {fmtCompact(m.input_tokens + m.output_tokens)}
                       </Td>
-                      <Td className="text-right tabular-nums">{fmtUsd(m.cost_usd)}</Td>
+                      <Td numeric className="font-medium">
+                        {fmtCost(m.cost_usd)}
+                      </Td>
                     </Tr>
-                  ))}
-                </TBody>
-              </Table>
-            ) : (
-              <p className="text-sm text-muted-foreground">No data.</p>
-            )}
-          </CardContent>
-        </Card>
+                  ))
+                ) : (
+                  <TableEmptyRow colSpan={5}>No usage in this range.</TableEmptyRow>
+                )}
+              </TBody>
+            </Table>
+          </TableCard>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>By API key</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {loading ? (
-              <p className="text-sm text-muted-foreground">Loading…</p>
-            ) : data && data.byKey.length > 0 ? (
-              <Table>
-                <THead>
-                  <tr>
-                    <Th>Key</Th>
-                    <Th className="text-right">Reqs</Th>
-                    <Th className="text-right">Tokens</Th>
-                    <Th className="text-right">Cost</Th>
-                  </tr>
-                </THead>
-                <TBody>
-                  {data.byKey.map((k) => (
+          <TableCard
+            title="By API key"
+            meta={data && !loading ? `${data.byKey.length} key${data.byKey.length === 1 ? "" : "s"}` : undefined}
+          >
+            <Table minWidth={0} caption="Usage by API key">
+              <THead>
+                <tr>
+                  <Th>Key</Th>
+                  <Th numeric>Requests</Th>
+                  <Th numeric>Tokens</Th>
+                  <Th numeric>Cost</Th>
+                </tr>
+              </THead>
+              <TBody>
+                {loading ? (
+                  <TableSkeletonRows rows={3} cols={4} />
+                ) : data && data.byKey.length > 0 ? (
+                  data.byKey.map((k) => (
                     <Tr key={k.api_key_id ?? "internal"}>
                       <Td className="font-medium">{k.name}</Td>
-                      <Td className="text-right tabular-nums">{fmtInt(k.requests)}</Td>
-                      <Td className="text-right tabular-nums">
-                        {fmtInt(k.input_tokens + k.output_tokens)}
+                      <Td numeric>{fmtInt(k.requests)}</Td>
+                      <Td numeric title={fmtInt(k.input_tokens + k.output_tokens)}>
+                        {fmtCompact(k.input_tokens + k.output_tokens)}
                       </Td>
-                      <Td className="text-right tabular-nums">{fmtUsd(k.cost_usd)}</Td>
+                      <Td numeric className="font-medium">
+                        {fmtCost(k.cost_usd)}
+                      </Td>
                     </Tr>
-                  ))}
-                </TBody>
-              </Table>
-            ) : (
-              <p className="text-sm text-muted-foreground">No data.</p>
-            )}
-          </CardContent>
-        </Card>
+                  ))
+                ) : (
+                  <TableEmptyRow colSpan={4}>No usage in this range.</TableEmptyRow>
+                )}
+              </TBody>
+            </Table>
+          </TableCard>
+        </div>
       </div>
     </div>
   );

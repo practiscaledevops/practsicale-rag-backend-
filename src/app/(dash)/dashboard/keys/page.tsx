@@ -1,8 +1,8 @@
 "use client";
 
-// API Keys — list, mint, and revoke scoped keys for consumer apps.
+// API keys — list, mint, and revoke scoped keys for consumer apps.
 //
-// A key is scoped by capability (chat / retrieve / generate), by data type
+// A key is scoped by capability (chat / retrieve / generate), by source type
 // (source_type), and optionally down to named data sources and collections. The
 // plaintext secret is returned by the server exactly ONCE at creation and shown
 // here in a reveal step; it is never retrievable again.
@@ -11,17 +11,20 @@
 // admin API (/api/admin/keys), which enforces the session + org server-side.
 
 import * as React from "react";
-import { KeyRound, Plus, Copy, Check, ShieldAlert } from "lucide-react";
+import { Check, Copy, KeyRound, Plus, ShieldAlert } from "lucide-react";
 import { PageHeader } from "@/components/ui/PageHeader";
-import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
-import { Label } from "@/components/ui/Label";
+import { Field } from "@/components/ui/Field";
+import { Checkbox } from "@/components/ui/Checkbox";
 import { Badge } from "@/components/ui/Badge";
 import { Alert } from "@/components/ui/Alert";
 import { Dialog } from "@/components/ui/Dialog";
+import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { Table, THead, TBody, Tr, Th, Td } from "@/components/ui/Table";
+import { Table, THead, TBody, Tr, Th, Td, TableCard, TableSkeletonRows } from "@/components/ui/Table";
+import { fmtDate, fmtInt } from "@/lib/format";
+import { sourceTypeLabel } from "@/lib/ui-labels";
 
 // ---------------------------------------------------------------------------
 // Types + labels
@@ -61,32 +64,35 @@ const CAPABILITY_LABELS: Record<string, string> = {
   retrieve: "Retrieve",
   generate: "Generate",
 };
-const SOURCE_TYPE_LABELS: Record<string, string> = {
-  call_score: "Call scores",
-  coaching: "Coaching",
-  document: "Documents",
-  transcript: "Transcripts",
-};
-
-function formatDate(iso: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-}
 
 type Status = { label: string; tone: "success" | "danger" | "warning" | "neutral" };
 function keyStatus(k: ApiKey): Status {
-  if (k.revoked_at) return { label: "Revoked", tone: "danger" };
+  // Revoked is a normal, historical admin state (neutral), not a failure.
+  if (k.revoked_at) return { label: "Revoked", tone: "neutral" };
   if (k.expires_at && new Date(k.expires_at) <= new Date())
     return { label: "Expired", tone: "warning" };
   return { label: "Active", tone: "success" };
 }
 
+const plural = (n: number, one: string, many: string) => `${fmtInt(n)} ${n === 1 ? one : many}`;
+
+/** "All data sources" or "2 data sources", with the names for a tooltip. */
+function scopeLimit(
+  ids: string[],
+  lookup: Map<string, string>,
+  one: string,
+  many: string
+): { text: string; title?: string } {
+  if (ids.length === 0) return { text: `All ${many}` };
+  const names = ids.map((id) => lookup.get(id) ?? "Unknown");
+  return { text: plural(ids.length, one, many), title: names.join(", ") };
+}
+
 // ---------------------------------------------------------------------------
-// A labelled checkbox used across the scope pickers.
+// Scope picker pieces
 // ---------------------------------------------------------------------------
 
+/** A labelled checkbox row (the chatbot checklist recipe). */
 function CheckRow({
   id,
   checked,
@@ -101,23 +107,89 @@ function CheckRow({
   return (
     <label
       htmlFor={id}
-      className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm hover:bg-surface-muted"
+      className="flex h-8 cursor-pointer items-center gap-2 rounded-lg px-2 text-[13px] text-foreground transition-colors hover:bg-surface-muted"
     >
-      <input
-        id={id}
-        type="checkbox"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        className="h-4 w-4 rounded border-border text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      />
-      <span className="min-w-0">{children}</span>
+      <Checkbox id={id} checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span className="min-w-0 truncate">{children}</span>
     </label>
   );
 }
 
+/** A group of scope checkboxes with a legend and a hint. */
+function ScopeFieldset({
+  legend,
+  hint,
+  children,
+}: {
+  legend: string;
+  hint: string;
+  children: React.ReactNode;
+}) {
+  const hintId = React.useId();
+  return (
+    <fieldset aria-describedby={hintId} className="min-w-0">
+      <legend className="text-xs font-medium text-muted-foreground">{legend}</legend>
+      <p id={hintId} className="mb-1 mt-0.5 text-xs text-muted-foreground">
+        {hint}
+      </p>
+      {children}
+    </fieldset>
+  );
+}
+
+/** Copy button with brief "Copied" feedback (the chatbot CopyButton behaviour). */
+const CopyButton = React.forwardRef<HTMLButtonElement, { value: string; label: string }>(
+  function CopyButton({ value, label }, ref) {
+    const [state, setState] = React.useState<"idle" | "copied" | "failed">("idle");
+    const timer = React.useRef<number | null>(null);
+    React.useEffect(
+      () => () => {
+        if (timer.current) window.clearTimeout(timer.current);
+      },
+      []
+    );
+
+    async function copy() {
+      let ok = false;
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(value);
+          ok = true;
+        }
+      } catch {
+        // Clipboard blocked — the secret stays visible for a manual copy.
+      }
+      setState(ok ? "copied" : "failed");
+      if (timer.current) window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => setState("idle"), 1500);
+    }
+
+    const text = state === "copied" ? "Copied" : state === "failed" ? "Copy failed" : "Copy";
+    return (
+      <Button
+        ref={ref}
+        variant="secondary"
+        size="toolbar"
+        onClick={() => void copy()}
+        aria-label={state === "idle" ? label : text}
+        className="shrink-0"
+      >
+        {state === "copied" ? (
+          <Check size={14} className="text-success" aria-hidden />
+        ) : (
+          <Copy size={14} aria-hidden />
+        )}
+        <span aria-live="polite">{text}</span>
+      </Button>
+    );
+  }
+);
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
+
+const COLS = 8;
 
 export default function KeysPage() {
   const [keys, setKeys] = React.useState<ApiKey[]>([]);
@@ -128,6 +200,9 @@ export default function KeysPage() {
 
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [revokingId, setRevokingId] = React.useState<string | null>(null);
+  const [revokeError, setRevokeError] = React.useState<string | null>(null);
+  const { confirm, dialog } = useConfirm();
+  const newKeyRef = React.useRef<HTMLButtonElement>(null);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -151,7 +226,14 @@ export default function KeysPage() {
   }, [load]);
 
   async function revoke(id: string) {
-    if (!window.confirm("Revoke this key? Apps using it will immediately lose access.")) return;
+    const ok = await confirm({
+      title: "Revoke this key?",
+      description: "Apps using it will immediately lose access.",
+      tone: "danger",
+      confirmLabel: "Revoke key",
+    });
+    if (!ok) return;
+    setRevokeError(null);
     setRevokingId(id);
     try {
       const res = await fetch(`/api/admin/keys?id=${encodeURIComponent(id)}`, {
@@ -163,76 +245,106 @@ export default function KeysPage() {
       setKeys((prev) =>
         prev.map((k) => (k.id === id ? { ...k, revoked_at: new Date().toISOString() } : k))
       );
+      // The row's Revoke button is replaced by "—": move focus to a stable control.
+      newKeyRef.current?.focus();
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : "Revoke failed");
+      setRevokeError(e instanceof Error ? e.message : "Revoke failed");
     } finally {
       setRevokingId(null);
     }
   }
 
+  const dsNames = React.useMemo(() => new Map(dataSources.map((d) => [d.id, d.name])), [dataSources]);
+  const colNames = React.useMemo(() => new Map(collections.map((c) => [c.id, c.name])), [collections]);
+  const activeCount = keys.filter((k) => keyStatus(k).tone === "success").length;
+
+  const head = (
+    <THead>
+      <tr>
+        <Th>Name</Th>
+        <Th>Capabilities</Th>
+        <Th>Scope</Th>
+        <Th numeric>Requests</Th>
+        <Th numeric>Rate limit</Th>
+        <Th>Last used</Th>
+        <Th>Status</Th>
+        <Th className="text-right">
+          <span className="sr-only">Actions</span>
+        </Th>
+      </tr>
+    </THead>
+  );
+
   return (
     <div>
       <PageHeader
-        title="API Keys"
-        description="Scoped secret keys that consumer apps use to read the Brain through its public API."
+        title="API keys"
+        description="Scoped keys that apps like the chatbot use to read the Brain."
         actions={
-          <Button onClick={() => setDialogOpen(true)}>
-            <Plus className="h-4 w-4" aria-hidden="true" />
-            Create key
+          <Button ref={newKeyRef} size="toolbar" onClick={() => setDialogOpen(true)}>
+            <Plus size={14} aria-hidden />
+            New key
           </Button>
         }
       />
 
       {loadError && (
-        <Alert tone="danger" title="Couldn't load keys" className="mb-4">
-          {loadError}
+        <Alert tone="danger" className="mb-4">
+          <span className="font-medium">Couldn&apos;t load keys.</span> {loadError}
+        </Alert>
+      )}
+
+      {revokeError && (
+        <Alert tone="danger" className="mb-4" onDismiss={() => setRevokeError(null)}>
+          <span className="font-medium">Couldn&apos;t revoke the key.</span> {revokeError}
         </Alert>
       )}
 
       {loading ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
+        <TableCard>
+          <Table minWidth={960} caption="API keys" aria-busy="true">
+            {head}
+            <TBody>
+              <TableSkeletonRows rows={4} cols={COLS} />
+            </TBody>
+          </Table>
+        </TableCard>
       ) : keys.length === 0 ? (
-        <EmptyState
-          icon={KeyRound}
-          title="No API keys yet"
-          description="Create a scoped key to let a consumer app read the Brain."
-          action={
-            <Button onClick={() => setDialogOpen(true)}>
-              <Plus className="h-4 w-4" aria-hidden="true" />
-              Create key
-            </Button>
-          }
-        />
+        loadError ? null : (
+          <EmptyState
+            icon={KeyRound}
+            title="No API keys yet"
+            description="Create a scoped key to let a consumer app read the Brain."
+            action={
+              <Button size="toolbar" onClick={() => setDialogOpen(true)}>
+                <Plus size={14} aria-hidden />
+                New key
+              </Button>
+            }
+          />
+        )
       ) : (
-        <Card>
-          <Table>
-            <THead>
-              <tr>
-                <Th>Name</Th>
-                <Th>Key</Th>
-                <Th>Capabilities</Th>
-                <Th>Data types</Th>
-                <Th>Created</Th>
-                <Th>Last used</Th>
-                <Th>Status</Th>
-                <Th className="text-right">Actions</Th>
-              </tr>
-            </THead>
+        <TableCard
+          title="Keys"
+          meta={`${fmtInt(activeCount)} active · ${plural(keys.length, "key", "keys")} in total`}
+        >
+          <Table minWidth={960} caption="API keys">
+            {head}
             <TBody>
               {keys.map((k) => {
                 const status = keyStatus(k);
+                const ds = scopeLimit(k.data_source_ids, dsNames, "data source", "data sources");
+                const cols = scopeLimit(k.collection_ids, colNames, "collection", "collections");
                 return (
                   <Tr key={k.id}>
-                    <Td className="font-medium">{k.name ?? "Untitled"}</Td>
                     <Td>
-                      <code className="rounded bg-surface-muted px-1.5 py-0.5 font-mono text-xs">
-                        {k.key_prefix ?? "—"}…
-                      </code>
+                      <div className="font-medium">{k.name ?? "Untitled"}</div>
+                      <code className="font-mono text-xs text-muted-foreground">{k.key_prefix ?? "—"}…</code>
                     </Td>
                     <Td>
                       <div className="flex flex-wrap gap-1">
                         {k.capabilities.map((c) => (
-                          <Badge key={c} tone="accent">
+                          <Badge key={c} tone="neutral">
                             {CAPABILITY_LABELS[c] ?? c}
                           </Badge>
                         ))}
@@ -240,35 +352,46 @@ export default function KeysPage() {
                     </Td>
                     <Td>
                       {k.source_types.length === 0 ? (
-                        <span className="text-xs text-muted-foreground">All types</span>
+                        <span className="text-[13px] text-foreground">All source types</span>
                       ) : (
                         <div className="flex flex-wrap gap-1">
                           {k.source_types.map((s) => (
-                            <Badge key={s}>{SOURCE_TYPE_LABELS[s] ?? s}</Badge>
+                            <Badge key={s} tone="neutral">
+                              {sourceTypeLabel(s)}
+                            </Badge>
                           ))}
                         </div>
                       )}
+                      <div className="mt-0.5 text-xs text-muted-foreground">
+                        <span title={ds.title}>{ds.text}</span> · <span title={cols.title}>{cols.text}</span>
+                      </div>
                     </Td>
-                    <Td className="whitespace-nowrap text-muted-foreground">
-                      {formatDate(k.created_at)}
+                    <Td numeric>{fmtInt(k.request_count)}</Td>
+                    <Td numeric>{fmtInt(k.rate_limit_per_min)}/min</Td>
+                    <Td className="whitespace-nowrap">
+                      <div>{k.last_used_at ? fmtDate(k.last_used_at) : "Never"}</div>
+                      <div className="text-xs text-muted-foreground">Created {fmtDate(k.created_at)}</div>
                     </Td>
-                    <Td className="whitespace-nowrap text-muted-foreground">
-                      {formatDate(k.last_used_at)}
-                    </Td>
-                    <Td>
+                    <Td className="whitespace-nowrap">
                       <Badge tone={status.tone}>{status.label}</Badge>
+                      {k.expires_at && !k.revoked_at && (
+                        <div className="mt-0.5 text-xs text-muted-foreground">
+                          {status.label === "Expired" ? "Expired" : "Expires"} {fmtDate(k.expires_at)}
+                        </div>
+                      )}
                     </Td>
                     <Td className="text-right">
                       {k.revoked_at ? (
                         <span className="text-xs text-muted-foreground">—</span>
                       ) : (
                         <Button
-                          variant="outline"
+                          variant="danger-secondary"
                           size="sm"
-                          onClick={() => revoke(k.id)}
-                          disabled={revokingId === k.id}
+                          onClick={() => void revoke(k.id)}
+                          loading={revokingId === k.id}
                         >
                           {revokingId === k.id ? "Revoking…" : "Revoke"}
+                          <span className="sr-only"> {k.name ?? "key"}</span>
                         </Button>
                       )}
                     </Td>
@@ -277,7 +400,7 @@ export default function KeysPage() {
               })}
             </TBody>
           </Table>
-        </Card>
+        </TableCard>
       )}
 
       {dialogOpen && (
@@ -286,8 +409,11 @@ export default function KeysPage() {
           collections={collections}
           onClose={() => setDialogOpen(false)}
           onCreated={(key) => setKeys((prev) => [key, ...prev])}
+          returnFocus={() => newKeyRef.current}
         />
       )}
+
+      {dialog}
     </div>
   );
 }
@@ -301,11 +427,13 @@ function CreateKeyDialog({
   collections,
   onClose,
   onCreated,
+  returnFocus,
 }: {
   dataSources: DataSource[];
   collections: Collection[];
   onClose: () => void;
   onCreated: (key: ApiKey) => void;
+  returnFocus?: () => HTMLElement | null;
 }) {
   const [name, setName] = React.useState("");
   const [caps, setCaps] = React.useState<Set<string>>(new Set(["chat"]));
@@ -317,7 +445,7 @@ function CreateKeyDialog({
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [secret, setSecret] = React.useState<string | null>(null);
-  const [copied, setCopied] = React.useState(false);
+  const copyRef = React.useRef<HTMLButtonElement>(null);
 
   function toggle(setter: React.Dispatch<React.SetStateAction<Set<string>>>, value: string) {
     setter((prev) => {
@@ -363,42 +491,30 @@ function CreateKeyDialog({
     }
   }
 
-  async function copy() {
-    if (!secret) return;
-    try {
-      await navigator.clipboard.writeText(secret);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard blocked — the secret is visible for manual copy.
-    }
-  }
-
-  // ---- Reveal step: the secret is shown once, then unrecoverable. ----
+  // ---- Reveal step: the secret is shown once, then unrecoverable. It can't be
+  // dismissed by Escape, a backdrop click or an X — only "I've copied it". ----
   if (secret) {
     return (
       <Dialog
+        key="reveal"
         open
         onClose={onClose}
-        title="Copy your key now"
+        dismissible={false}
+        closeOnBackdrop={false}
+        title="Copy your new key"
         description="This is the only time the full secret is shown. Store it somewhere safe."
-        footer={<Button onClick={onClose}>Done</Button>}
+        initialFocusRef={copyRef}
+        returnFocus={returnFocus}
+        footer={<Button onClick={onClose}>I&apos;ve copied it</Button>}
       >
-        <div className="space-y-3 pb-2">
-          <div className="flex items-center gap-2">
-            <code className="min-w-0 flex-1 overflow-x-auto rounded-lg border border-border bg-surface-muted px-3 py-2 font-mono text-xs">
+        <div className="space-y-3">
+          <div className="flex items-start gap-2">
+            <code className="min-w-0 flex-1 break-all rounded-xl border border-border bg-surface-muted px-3 py-2 font-mono text-[13px]">
               {secret}
             </code>
-            <Button variant="outline" size="sm" onClick={copy} aria-label="Copy key">
-              {copied ? (
-                <Check className="h-4 w-4 text-success" aria-hidden="true" />
-              ) : (
-                <Copy className="h-4 w-4" aria-hidden="true" />
-              )}
-              {copied ? "Copied" : "Copy"}
-            </Button>
+            <CopyButton ref={copyRef} value={secret} label="Copy key" />
           </div>
-          <Alert tone="warning" title="Store it securely">
+          <Alert tone="warning" title="You won't be able to see this key again.">
             The Brain keeps only a hash of this key. If you lose it, revoke it and create a new one.
           </Alert>
         </div>
@@ -409,27 +525,30 @@ function CreateKeyDialog({
   // ---- Form step. ----
   return (
     <Dialog
+      key="form"
       open
       onClose={onClose}
       title="Create API key"
       description="Grant only the capabilities and data this app needs."
-      className="max-w-xl"
+      size="lg"
+      closeOnBackdrop={false}
+      dismissible={!submitting}
+      returnFocus={returnFocus}
       footer={
         <>
-          <Button variant="outline" onClick={onClose} disabled={submitting}>
+          <Button variant="secondary" onClick={onClose} disabled={submitting}>
             Cancel
           </Button>
-          <Button onClick={submit} disabled={submitting}>
+          <Button onClick={() => void submit()} loading={submitting}>
             {submitting ? "Creating…" : "Create key"}
           </Button>
         </>
       }
     >
-      <div className="max-h-[60vh] space-y-5 overflow-y-auto pb-2">
+      <div className="space-y-5">
         {error && <Alert tone="danger">{error}</Alert>}
 
-        <div className="space-y-1.5">
-          <Label htmlFor="key-name">Name</Label>
+        <Field label="Name">
           <Input
             id="key-name"
             value={name}
@@ -437,51 +556,37 @@ function CreateKeyDialog({
             placeholder="e.g. Chatbot (production)"
             autoFocus
           />
-        </div>
+        </Field>
 
-        <fieldset className="space-y-1.5">
-          <legend className="text-sm font-medium">Capabilities</legend>
-          <p className="text-xs text-muted-foreground">What this key is allowed to do.</p>
+        <ScopeFieldset legend="Capabilities" hint="What this key is allowed to do.">
           <div className="grid grid-cols-1 gap-0.5 sm:grid-cols-3">
             {CAPABILITIES.map((c) => (
-              <CheckRow
-                key={c}
-                id={`cap-${c}`}
-                checked={caps.has(c)}
-                onChange={() => toggle(setCaps, c)}
-              >
+              <CheckRow key={c} id={`cap-${c}`} checked={caps.has(c)} onChange={() => toggle(setCaps, c)}>
                 {CAPABILITY_LABELS[c]}
               </CheckRow>
             ))}
           </div>
-        </fieldset>
+        </ScopeFieldset>
 
-        <fieldset className="space-y-1.5">
-          <legend className="text-sm font-medium">Data types</legend>
-          <p className="text-xs text-muted-foreground">
-            Restrict to specific source types. Leave all unchecked to allow every type.
-          </p>
+        <ScopeFieldset
+          legend="Source types"
+          hint="Restrict to specific source types. Leave all unchecked to allow every type."
+        >
           <div className="grid grid-cols-1 gap-0.5 sm:grid-cols-2">
             {SOURCE_TYPES.map((s) => (
-              <CheckRow
-                key={s}
-                id={`type-${s}`}
-                checked={types.has(s)}
-                onChange={() => toggle(setTypes, s)}
-              >
-                {SOURCE_TYPE_LABELS[s]}
+              <CheckRow key={s} id={`type-${s}`} checked={types.has(s)} onChange={() => toggle(setTypes, s)}>
+                {sourceTypeLabel(s)}
               </CheckRow>
             ))}
           </div>
-        </fieldset>
+        </ScopeFieldset>
 
-        <fieldset className="space-y-1.5">
-          <legend className="text-sm font-medium">Data sources</legend>
-          <p className="text-xs text-muted-foreground">
-            Optionally limit to specific registered sources. None selected = all in scope.
-          </p>
+        <ScopeFieldset
+          legend="Data sources"
+          hint="Optionally limit to specific registered sources. None selected = all in scope."
+        >
           {dataSources.length === 0 ? (
-            <p className="text-xs text-muted-foreground">No data sources registered yet.</p>
+            <p className="px-2 text-[13px] text-muted-foreground">No data sources registered yet.</p>
           ) : (
             <div className="grid grid-cols-1 gap-0.5 sm:grid-cols-2">
               {dataSources.map((d) => (
@@ -491,23 +596,19 @@ function CreateKeyDialog({
                   checked={dsIds.has(d.id)}
                   onChange={() => toggle(setDsIds, d.id)}
                 >
-                  {d.name}{" "}
-                  <span className="text-xs text-muted-foreground">
-                    ({SOURCE_TYPE_LABELS[d.source_type] ?? d.source_type})
-                  </span>
+                  {d.name} <span className="text-xs text-muted-foreground">({sourceTypeLabel(d.source_type)})</span>
                 </CheckRow>
               ))}
             </div>
           )}
-        </fieldset>
+        </ScopeFieldset>
 
-        <fieldset className="space-y-1.5">
-          <legend className="text-sm font-medium">Collections</legend>
-          <p className="text-xs text-muted-foreground">
-            Optionally limit to specific collections. None selected = all in scope.
-          </p>
+        <ScopeFieldset
+          legend="Collections"
+          hint="Optionally limit to specific collections. None selected = all in scope."
+        >
           {collections.length === 0 ? (
-            <p className="text-xs text-muted-foreground">No collections created yet.</p>
+            <p className="px-2 text-[13px] text-muted-foreground">No collections created yet.</p>
           ) : (
             <div className="grid grid-cols-1 gap-0.5 sm:grid-cols-2">
               {collections.map((c) => (
@@ -522,26 +623,23 @@ function CreateKeyDialog({
               ))}
             </div>
           )}
-        </fieldset>
+        </ScopeFieldset>
 
-        <div className="space-y-1.5">
-          <Label htmlFor="key-expiry">Expiry (optional)</Label>
+        <Field label="Expiry (optional)" hint="Leave blank for a key that never expires.">
           <Input
             id="key-expiry"
             type="date"
             value={expiresAt}
             onChange={(e) => setExpiresAt(e.target.value)}
+            className="sm:w-56"
           />
-          <p className="text-xs text-muted-foreground">
-            Leave blank for a key that never expires.
-          </p>
-        </div>
+        </Field>
 
         {caps.size === 0 && (
-          <div className="flex items-center gap-2 text-xs text-warning">
-            <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
+          <p className="flex items-center gap-2 text-xs text-warning">
+            <ShieldAlert size={14} className="shrink-0" aria-hidden />
             A key with no capability can&apos;t do anything.
-          </div>
+          </p>
         )}
       </div>
     </Dialog>

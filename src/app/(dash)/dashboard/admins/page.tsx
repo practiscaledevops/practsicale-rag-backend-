@@ -7,17 +7,21 @@
 // with 'members' access can edit permission grants and (de)activate members.
 
 import * as React from "react";
-import { UserPlus, Users, Pencil } from "lucide-react";
+import { Pencil, UserPlus, Users } from "lucide-react";
 import { PageHeader } from "@/components/ui/PageHeader";
-import { Card, CardContent } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
-import { Label } from "@/components/ui/Label";
-import { Badge } from "@/components/ui/Badge";
+import { Select, type SelectProps } from "@/components/ui/Select";
+import { Field } from "@/components/ui/Field";
+import { SwitchRow } from "@/components/ui/Switch";
+import { Checkbox } from "@/components/ui/Checkbox";
+import { Badge, Tag } from "@/components/ui/Badge";
 import { Alert } from "@/components/ui/Alert";
 import { Dialog } from "@/components/ui/Dialog";
+import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { Table, THead, TBody, Tr, Th, Td } from "@/components/ui/Table";
+import { Table, THead, TBody, Tr, Th, Td, TableCard, TableSkeletonRows } from "@/components/ui/Table";
+import { fmtInt, humanize } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 type Role = "admin" | "super_admin";
@@ -38,6 +42,18 @@ interface Viewer {
 }
 
 const ROLE_LABEL: Record<Role, string> = { admin: "Admin", super_admin: "Super admin" };
+const ROLE_OPTIONS = [
+  { value: "admin", label: ROLE_LABEL.admin },
+  { value: "super_admin", label: ROLE_LABEL.super_admin },
+];
+
+/** Resource names that humanize() would get wrong. */
+const RESOURCE_LABELS: Record<string, string> = { api_keys: "API keys" };
+const resourceLabel = (r: string) => RESOURCE_LABELS[r] ?? humanize(r);
+
+/** "Documents: Read, Write". */
+const permissionSummary = (resource: string, actions: string[]) =>
+  `${resourceLabel(resource)}: ${actions.map(humanize).join(", ")}`;
 
 /** Add/remove an action for a resource, pruning empty resources. */
 function togglePermission(
@@ -88,15 +104,29 @@ export default function AdminsPage() {
 
   const isSuper = viewer?.role === "super_admin";
 
+  const head = (
+    <THead>
+      <tr>
+        <Th>Email</Th>
+        <Th>Role</Th>
+        <Th>Permissions</Th>
+        <Th>Status</Th>
+        <Th className="text-right">
+          <span className="sr-only">Actions</span>
+        </Th>
+      </tr>
+    </THead>
+  );
+
   return (
     <div>
       <PageHeader
         title="Admins"
-        description="People with access to this Brain and what each of them can do."
+        description="Who can sign in to the Brain and what each person can change."
         actions={
           isSuper ? (
-            <Button onClick={() => setInviteOpen(true)}>
-              <UserPlus className="h-4 w-4" aria-hidden="true" />
+            <Button size="toolbar" onClick={() => setInviteOpen(true)}>
+              <UserPlus size={14} aria-hidden />
               Invite admin
             </Button>
           ) : undefined
@@ -104,67 +134,62 @@ export default function AdminsPage() {
       />
 
       {error && (
-        <Alert tone="danger" title="Couldn't load admins" className="mb-6">
-          {error}
+        <Alert tone="danger" className="mb-4">
+          <span className="font-medium">Couldn&apos;t load admins.</span> {error}
         </Alert>
       )}
 
-      <Card>
-        <CardContent className="p-0">
-          {loading ? (
-            <p className="p-6 text-sm text-muted-foreground">Loading…</p>
-          ) : members.length === 0 ? (
-            <div className="p-6">
-              <EmptyState
-                icon={Users}
-                title="No admins yet"
-                description={isSuper ? "Invite your first admin to get started." : "No members to show."}
-                action={
-                  isSuper ? (
-                    <Button onClick={() => setInviteOpen(true)}>
-                      <UserPlus className="h-4 w-4" aria-hidden="true" />
-                      Invite admin
-                    </Button>
-                  ) : undefined
-                }
-              />
-            </div>
-          ) : (
-            <Table>
-              <THead>
-                <tr>
-                  <Th>Email</Th>
-                  <Th>Role</Th>
-                  <Th>Permissions</Th>
-                  <Th>Status</Th>
-                  <Th className="text-right">Actions</Th>
-                </tr>
-              </THead>
-              <TBody>
-                {members.map((m) => (
+      {loading ? (
+        <TableCard>
+          <Table minWidth={720} caption="Admins" aria-busy="true">
+            {head}
+            <TBody>
+              <TableSkeletonRows rows={4} cols={5} />
+            </TBody>
+          </Table>
+        </TableCard>
+      ) : members.length === 0 ? (
+        <EmptyState
+          icon={Users}
+          title="No admins yet"
+          description={isSuper ? "Invite your first admin to get started." : "No members to show."}
+          action={
+            isSuper ? (
+              <Button size="toolbar" onClick={() => setInviteOpen(true)}>
+                <UserPlus size={14} aria-hidden />
+                Invite admin
+              </Button>
+            ) : undefined
+          }
+        />
+      ) : (
+        <TableCard
+          title="Members"
+          meta={`${fmtInt(members.length)} ${members.length === 1 ? "person" : "people"}`}
+        >
+          <Table minWidth={720} caption="Admins">
+            {head}
+            <TBody>
+              {members.map((m) => {
+                const grants = Object.entries(m.permissions ?? {}).filter(([, actions]) => actions.length > 0);
+                return (
                   <Tr key={m.id}>
                     <Td className="font-medium">
-                      {m.email}
-                      {viewer?.memberId === m.id && (
-                        <span className="ml-2 text-xs text-muted-foreground">(you)</span>
-                      )}
+                      <span className="break-all">{m.email}</span>
+                      {viewer?.memberId === m.id && <Tag className="ml-2 align-middle">You</Tag>}
                     </Td>
                     <Td>
-                      <Badge tone={m.role === "super_admin" ? "accent" : "neutral"}>
-                        {ROLE_LABEL[m.role]}
-                      </Badge>
+                      <Badge tone={m.role === "super_admin" ? "accent" : "neutral"}>{ROLE_LABEL[m.role]}</Badge>
                     </Td>
                     <Td>
                       {m.role === "super_admin" ? (
-                        <span className="text-sm text-muted-foreground">All access</span>
-                      ) : Object.keys(m.permissions ?? {}).length === 0 ? (
-                        <span className="text-sm text-muted-foreground">None</span>
+                        <span className="text-muted-foreground">All access</span>
+                      ) : grants.length === 0 ? (
+                        <span className="text-muted-foreground">None</span>
                       ) : (
                         <div className="flex flex-wrap gap-1">
-                          {Object.keys(m.permissions).map((r) => (
-                            <Badge key={r} tone="neutral">
-                              {r.replace(/_/g, " ")}
-                            </Badge>
+                          {grants.map(([resource, actions]) => (
+                            <Tag key={resource}>{permissionSummary(resource, actions)}</Tag>
                           ))}
                         </div>
                       )}
@@ -173,22 +198,23 @@ export default function AdminsPage() {
                       {m.is_active ? (
                         <Badge tone="success">Active</Badge>
                       ) : (
-                        <Badge tone="warning">Inactive</Badge>
+                        <Badge tone="neutral">Inactive</Badge>
                       )}
                     </Td>
                     <Td className="text-right">
-                      <Button variant="outline" size="sm" onClick={() => setEditing(m)}>
-                        <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                      <Button variant="secondary" size="sm" onClick={() => setEditing(m)}>
+                        <Pencil size={14} aria-hidden />
                         Edit
+                        <span className="sr-only"> {m.email}</span>
                       </Button>
                     </Td>
                   </Tr>
-                ))}
-              </TBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+                );
+              })}
+            </TBody>
+          </Table>
+        </TableCard>
+      )}
 
       {inviteOpen && (
         <InviteDialog
@@ -217,7 +243,7 @@ export default function AdminsPage() {
   );
 }
 
-/** Checkbox grid for granting resource:action permissions. */
+/** Checkbox groups for granting resource:action permissions: one fieldset per resource. */
 function PermissionEditor({
   allowed,
   value,
@@ -231,65 +257,70 @@ function PermissionEditor({
 }) {
   const resources = Object.keys(allowed);
   return (
-    <div className="space-y-3">
+    <div className="grid gap-x-4 gap-y-2.5 rounded-xl border border-border p-3 sm:grid-cols-2">
       {resources.map((resource) => (
-        <div key={resource} className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:justify-between">
-          <span className="text-sm font-medium capitalize">{resource.replace(/_/g, " ")}</span>
-          <div className="flex flex-wrap gap-3">
+        <fieldset key={resource} disabled={disabled} className="min-w-0">
+          <legend className="px-2 text-xs font-medium text-muted-foreground">{resourceLabel(resource)}</legend>
+          <div className="flex flex-wrap gap-x-1">
             {allowed[resource].map((action) => {
               const checked = value[resource]?.includes(action) ?? false;
               return (
                 <label
                   key={action}
                   className={cn(
-                    "inline-flex items-center gap-1.5 text-sm text-muted-foreground",
-                    disabled && "opacity-60"
+                    "flex h-8 cursor-pointer items-center gap-2 rounded-lg px-2 text-[13px] text-foreground transition-colors hover:bg-surface-muted",
+                    disabled && "cursor-not-allowed opacity-60"
                   )}
                 >
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 rounded border-border accent-accent"
+                  <Checkbox
                     checked={checked}
                     disabled={disabled}
                     onChange={(e) => onChange(togglePermission(value, resource, action, e.target.checked))}
                   />
-                  {action}
+                  {humanize(action)}
                 </label>
               );
             })}
           </div>
-        </div>
+        </fieldset>
       ))}
     </div>
   );
 }
 
-function RoleSelect({
+/** The whole permission picker, as a labelled group. */
+function PermissionsField({
+  allowed,
   value,
   onChange,
-  disabled,
-  id,
 }: {
-  value: Role;
-  onChange: (r: Role) => void;
-  disabled?: boolean;
-  id?: string;
+  allowed: Permissions;
+  value: Permissions;
+  onChange: (next: Permissions) => void;
 }) {
   return (
-    <select
-      id={id}
+    <fieldset className="min-w-0 space-y-1.5">
+      <legend className="text-xs font-medium text-muted-foreground">Permissions</legend>
+      <PermissionEditor allowed={allowed} value={value} onChange={onChange} />
+    </fieldset>
+  );
+}
+
+type RoleSelectProps = Omit<SelectProps, "value" | "onChange" | "options"> & {
+  value: Role;
+  onChange: (r: Role) => void;
+};
+
+/** Labelled by its Field (which passes id and aria-describedby through). */
+function RoleSelect({ value, onChange, ...props }: RoleSelectProps) {
+  return (
+    <Select
+      {...props}
       value={value}
-      disabled={disabled}
       onChange={(e) => onChange(e.target.value as Role)}
-      className={cn(
-        "h-9 w-full rounded-lg border border-border bg-surface px-3 text-sm",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
-        "disabled:cursor-not-allowed disabled:opacity-50"
-      )}
-    >
-      <option value="admin">Admin</option>
-      <option value="super_admin">Super admin</option>
-    </select>
+      options={ROLE_OPTIONS}
+      className="sm:w-56"
+    />
   );
 }
 
@@ -333,22 +364,24 @@ function InviteDialog({
       onClose={onClose}
       title="Invite an admin"
       description="They receive an email invite to set a password, then can sign in with the access you grant."
+      size="lg"
+      closeOnBackdrop={false}
+      dismissible={!saving}
       footer={
         <>
-          <Button variant="outline" onClick={onClose} disabled={saving}>
+          <Button variant="secondary" onClick={onClose} disabled={saving}>
             Cancel
           </Button>
-          <Button onClick={() => void submit()} disabled={saving || !email.trim()}>
+          <Button onClick={() => void submit()} disabled={!email.trim()} loading={saving}>
             {saving ? "Inviting…" : "Send invite"}
           </Button>
         </>
       }
     >
-      <div className="space-y-4 py-2">
+      <div className="space-y-4">
         {err && <Alert tone="danger">{err}</Alert>}
 
-        <div className="space-y-1.5">
-          <Label htmlFor="invite-email">Email</Label>
+        <Field label="Email">
           <Input
             id="invite-email"
             type="email"
@@ -357,24 +390,20 @@ function InviteDialog({
             onChange={(e) => setEmail(e.target.value)}
             autoFocus
           />
-        </div>
+        </Field>
 
-        <div className="space-y-1.5">
-          <Label htmlFor="invite-role">Role</Label>
+        <Field
+          label="Role"
+          hint={
+            role === "super_admin"
+              ? "Super admins have full access, so individual permissions don't apply."
+              : undefined
+          }
+        >
           <RoleSelect id="invite-role" value={role} onChange={setRole} />
-          {role === "super_admin" && (
-            <p className="text-xs text-muted-foreground">
-              Super admins have full access; individual permissions below are ignored.
-            </p>
-          )}
-        </div>
+        </Field>
 
-        {role === "admin" && (
-          <div className="space-y-2">
-            <Label>Permissions</Label>
-            <PermissionEditor allowed={allowed} value={permissions} onChange={setPermissions} />
-          </div>
-        )}
+        {role === "admin" && <PermissionsField allowed={allowed} value={permissions} onChange={setPermissions} />}
       </div>
     </Dialog>
   );
@@ -398,6 +427,7 @@ function EditDialog({
   const [isActive, setIsActive] = React.useState(member.is_active);
   const [saving, setSaving] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
+  const { confirm, dialog } = useConfirm();
 
   const isSelf = viewer.memberId === member.id;
   const canChangeRole = viewer.role === "super_admin" && !isSelf;
@@ -425,59 +455,76 @@ function EditDialog({
     }
   }
 
-  return (
-    <Dialog
-      open
-      onClose={onClose}
-      title={`Edit ${member.email}`}
-      description="Adjust role, permissions, and access."
-      footer={
-        <>
-          <Button variant="outline" onClick={onClose} disabled={saving}>
-            Cancel
-          </Button>
-          <Button onClick={() => void submit()} disabled={saving}>
-            {saving ? "Saving…" : "Save changes"}
-          </Button>
-        </>
-      }
-    >
-      <div className="space-y-4 py-2">
-        {err && <Alert tone="danger">{err}</Alert>}
+  /** Deactivating someone asks first; everything else saves straight away. */
+  async function requestSubmit() {
+    if (!isSelf && member.is_active && !isActive) {
+      const ok = await confirm({
+        title: `Deactivate ${member.email}?`,
+        description: "They won't be able to sign in to the Brain until an admin reactivates them.",
+        tone: "danger",
+        confirmLabel: "Deactivate",
+      });
+      if (!ok) return;
+    }
+    await submit();
+  }
 
-        <div className="space-y-1.5">
-          <Label htmlFor="edit-role">Role</Label>
-          <RoleSelect id="edit-role" value={role} onChange={setRole} disabled={!canChangeRole} />
-          {!canChangeRole && (
-            <p className="text-xs text-muted-foreground">
-              {isSelf ? "You cannot change your own role." : "Only a super admin can change roles."}
+  return (
+    <>
+      <Dialog
+        open
+        onClose={onClose}
+        title={`Edit ${member.email}`}
+        description="Adjust role, permissions, and access."
+        size="lg"
+        closeOnBackdrop={false}
+        dismissible={!saving}
+        footer={
+          <>
+            <Button variant="secondary" onClick={onClose} disabled={saving}>
+              Cancel
+            </Button>
+            <Button onClick={() => void requestSubmit()} loading={saving}>
+              {saving ? "Saving…" : "Save changes"}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          {err && <Alert tone="danger">{err}</Alert>}
+
+          <Field
+            label="Role"
+            hint={
+              canChangeRole
+                ? undefined
+                : isSelf
+                  ? "You can't change your own role."
+                  : "Only a super admin can change roles."
+            }
+          >
+            <RoleSelect id="edit-role" value={role} onChange={setRole} disabled={!canChangeRole} />
+          </Field>
+
+          {role === "admin" ? (
+            <PermissionsField allowed={allowed} value={permissions} onChange={setPermissions} />
+          ) : (
+            <p className="text-[13px] text-muted-foreground">
+              Super admins have full access; individual permissions don&apos;t apply.
             </p>
           )}
-        </div>
 
-        {role === "admin" ? (
-          <div className="space-y-2">
-            <Label>Permissions</Label>
-            <PermissionEditor allowed={allowed} value={permissions} onChange={setPermissions} />
-          </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">
-            Super admins have full access; individual permissions do not apply.
-          </p>
-        )}
-
-        {!isSelf && (
-          <label className="inline-flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              className="h-4 w-4 rounded border-border accent-accent"
+          {!isSelf && (
+            <SwitchRow
+              title="Account active"
+              hint="Inactive admins can't sign in to the Brain."
               checked={isActive}
-              onChange={(e) => setIsActive(e.target.checked)}
+              onChange={setIsActive}
             />
-            Active (can sign in)
-          </label>
-        )}
-      </div>
-    </Dialog>
+          )}
+        </div>
+      </Dialog>
+      {dialog}
+    </>
   );
 }

@@ -1,47 +1,101 @@
 "use client";
 
-// Shared primitives for the Operating Intelligence screens (green control-center
-// style, self-contained palette so these pages match the Collections workspace).
+// Legacy primitives for the Operating Intelligence screens. Every export keeps
+// its name and props, but each one is now a thin wrapper over the shared,
+// token-styled primitives (Button, Input, Select, Badge, EmptyState, ...), so
+// these pages follow the chatbot palette in Light and Dark. New code should
+// import the primitives from "@/components/ui" directly.
 
 import * as React from "react";
-import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Button, type ButtonSize, type ButtonVariant } from "./Button";
+import { Input } from "./Input";
+import { Textarea } from "./Textarea";
+import { Select, type SelectOption } from "./Select";
+import { FilterTabs } from "./Tabs";
+import { EmptyState } from "./EmptyState";
+import { Spinner as LoadingSpinner, Skeleton as LoadingSkeleton } from "./Loading";
 
+export type { SelectOption } from "./Select";
+export { fmtDate, humanize } from "@/lib/format";
+export { CLASS_LABEL } from "@/lib/ui-labels";
+
+/**
+ * @deprecated Inline-style palette kept only so older screens keep compiling.
+ * The values are theme tokens (CSS variables), so they already follow Light /
+ * Dark. Use token classes instead (text-muted-foreground, bg-surface, ...);
+ * this export is deleted once no screen reads it.
+ */
 export const C = {
-  bg: "#06100D",
-  sidebar: "#091914",
-  surface: "#0D1E18",
-  raised: "#122B23",
-  border: "#204438",
-  text: "#EDF7F2",
-  muted: "#91AAA0",
-  green: "#00BFAE",
-  restricted: "#94DCA7",
-  amber: "#F3B661",
-  red: "#FF7B75",
-  info: "#75BFFF",
-  violet: "#B6A4FF",
+  bg: "rgb(var(--background))",
+  sidebar: "rgb(var(--sidebar))",
+  surface: "rgb(var(--surface))",
+  raised: "rgb(var(--surface-muted))",
+  border: "rgb(var(--border))",
+  text: "rgb(var(--foreground))",
+  muted: "rgb(var(--muted-foreground))",
+  green: "rgb(var(--accent-strong))",
+  restricted: "rgb(var(--success))",
+  amber: "rgb(var(--warning))",
+  red: "rgb(var(--danger))",
+  info: "rgb(var(--info))",
+  violet: "rgb(var(--muted-foreground))",
 };
 
 export type Tone = "green" | "amber" | "red" | "muted" | "info" | "violet" | "mint";
 
-const TONE: Record<Tone, { fg: string; bg: string; bd: string }> = {
-  green: { fg: C.green, bg: "rgba(0,191,174,0.12)", bd: "rgba(0,191,174,0.35)" },
-  mint: { fg: C.restricted, bg: "rgba(148,220,167,0.12)", bd: "rgba(148,220,167,0.35)" },
-  amber: { fg: C.amber, bg: "rgba(243,182,97,0.12)", bd: "rgba(243,182,97,0.35)" },
-  red: { fg: C.red, bg: "rgba(255,123,117,0.12)", bd: "rgba(255,123,117,0.35)" },
-  info: { fg: C.info, bg: "rgba(117,191,255,0.12)", bd: "rgba(117,191,255,0.35)" },
-  violet: { fg: C.violet, bg: "rgba(182,164,255,0.12)", bd: "rgba(182,164,255,0.35)" },
-  muted: { fg: C.muted, bg: "rgba(145,170,160,0.10)", bd: "rgba(145,170,160,0.30)" },
+/** Chip classes per legacy tone (the Badge recipe). */
+export const TONE_CLASS: Record<Tone, string> = {
+  green: "border-transparent bg-accent-soft text-accent-strong",
+  mint: "border-transparent bg-success/10 text-success-ink",
+  amber: "border-transparent bg-warning/10 text-warning-ink",
+  red: "border-transparent bg-danger/10 text-danger-ink",
+  info: "border-transparent bg-info/10 text-info-ink",
+  violet: "border-border bg-surface text-foreground",
+  muted: "border-transparent bg-surface-muted text-muted-foreground",
 };
 
-export function Chip({ tone = "muted", children, title, className }: { tone?: Tone; children: React.ReactNode; title?: string; className?: string }) {
-  const t = TONE[tone];
+/** Text colour per legacy tone. */
+export const TONE_TEXT: Record<Tone, string> = {
+  green: "text-accent-strong",
+  mint: "text-success",
+  amber: "text-warning",
+  red: "text-danger",
+  info: "text-info",
+  violet: "text-foreground",
+  muted: "text-muted-foreground",
+};
+
+const TONE_DOT: Partial<Record<Tone, string>> = {
+  mint: "bg-success",
+  amber: "bg-warning",
+  red: "bg-danger",
+  info: "bg-info",
+  violet: "bg-foreground/60",
+};
+
+/** Row hover wash for clickable table rows. */
+export const ROW_HOVER = "transition-colors hover:bg-surface-muted/60";
+
+export function Chip({
+  tone = "muted",
+  children,
+  title,
+  className,
+}: {
+  tone?: Tone;
+  children: React.ReactNode;
+  title?: string;
+  className?: string;
+}) {
   return (
     <span
       title={title}
-      className={cn("inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium leading-4 whitespace-nowrap", className)}
-      style={{ color: t.fg, background: t.bg, border: `1px solid ${t.bd}` }}
+      className={cn(
+        "inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-medium leading-4",
+        TONE_CLASS[tone],
+        className
+      )}
     >
       {children}
     </span>
@@ -64,12 +118,12 @@ export function Panel({
   padded?: boolean;
 }) {
   return (
-    <section className={cn("rounded-xl", className)} style={{ background: C.surface, border: `1px solid ${C.border}` }}>
+    <section className={cn("rounded-2xl border border-border bg-surface shadow-soft", className)}>
       {(title || actions) && (
-        <header className="flex items-center justify-between gap-3 px-4 py-3" style={{ borderBottom: `1px solid ${C.border}` }}>
+        <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
           <div className="min-w-0">
-            {title && <h2 className="truncate text-sm font-semibold" style={{ color: C.text }}>{title}</h2>}
-            {subtitle && <p className="truncate text-xs" style={{ color: C.muted }}>{subtitle}</p>}
+            {title && <h2 className="truncate text-sm font-semibold text-foreground">{title}</h2>}
+            {subtitle && <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p>}
           </div>
           {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
         </header>
@@ -79,148 +133,111 @@ export function Panel({
   );
 }
 
+const KBTN_VARIANT: Record<"primary" | "outline" | "ghost" | "danger", ButtonVariant> = {
+  primary: "primary",
+  outline: "secondary",
+  ghost: "ghost",
+  danger: "danger-secondary",
+};
+const KBTN_SIZE: Record<"sm" | "md" | "xs", ButtonSize> = { xs: "sm", sm: "toolbar", md: "md" };
+
 export function KBtn({
   variant = "outline",
   size = "sm",
-  className,
-  children,
   loading,
   ...rest
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "outline" | "ghost" | "danger"; size?: "sm" | "md" | "xs"; loading?: boolean }) {
-  const base = "inline-flex items-center justify-center gap-1.5 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2";
-  const sz = size === "xs" ? "h-7 px-2 text-[11px]" : size === "md" ? "h-10 px-4 text-sm" : "h-8 px-3 text-xs";
-  const style: React.CSSProperties =
-    variant === "primary"
-      ? { background: C.green, color: "#04211D", border: `1px solid ${C.green}` }
-      : variant === "danger"
-        ? { background: "rgba(255,123,117,0.12)", color: C.red, border: `1px solid rgba(255,123,117,0.4)` }
-        : variant === "ghost"
-          ? { background: "transparent", color: C.muted, border: "1px solid transparent" }
-          : { background: C.raised, color: C.text, border: `1px solid ${C.border}` };
-  return (
-    <button className={cn(base, sz, className)} style={style} disabled={loading || rest.disabled} {...rest}>
-      {loading && <Loader2 size={13} className="animate-spin" />}
-      {children}
-    </button>
-  );
+}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: "primary" | "outline" | "ghost" | "danger";
+  size?: "sm" | "md" | "xs";
+  loading?: boolean;
+}) {
+  return <Button variant={KBTN_VARIANT[variant]} size={KBTN_SIZE[size]} loading={loading} {...rest} />;
 }
 
-const fieldStyle: React.CSSProperties = { background: C.bg, color: C.text, border: `1px solid ${C.border}` };
-
 export function KInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
-  return <input {...props} className={cn("h-9 w-full rounded-lg px-3 text-sm outline-none placeholder:opacity-50 focus:ring-2", props.className)} style={{ ...fieldStyle, ...(props.style ?? {}) }} />;
+  return <Input {...props} />;
 }
 
 export function KTextarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  return <textarea {...props} className={cn("w-full rounded-lg px-3 py-2 text-sm outline-none placeholder:opacity-50 focus:ring-2", props.className)} style={{ ...fieldStyle, ...(props.style ?? {}) }} />;
+  return <Textarea {...props} />;
 }
 
-export interface SelectOption {
-  value: string;
-  label: string;
-  disabled?: boolean;
+export function KSelect(
+  props: React.SelectHTMLAttributes<HTMLSelectElement> & {
+    options?: SelectOption[];
+    /** Grouped options (rendered as <optgroup>); used with or instead of `options`. */
+    groups?: { label: string; options: SelectOption[] }[];
+    placeholder?: string;
+  }
+) {
+  return <Select {...props} />;
 }
 
-export function KSelect({
-  options,
-  groups,
-  placeholder,
-  ...props
-}: React.SelectHTMLAttributes<HTMLSelectElement> & {
-  options?: SelectOption[];
-  /** Grouped options (rendered as <optgroup>); used with or instead of `options`. */
-  groups?: { label: string; options: SelectOption[] }[];
-  placeholder?: string;
+export function Field({
+  label,
+  hint,
+  children,
+  className,
+}: {
+  label: React.ReactNode;
+  hint?: React.ReactNode;
+  children: React.ReactNode;
+  className?: string;
 }) {
-  const render = (o: SelectOption) => (
-    <option key={o.value} value={o.value} disabled={o.disabled}>
-      {o.label}
-    </option>
-  );
   return (
-    <select {...props} className={cn("h-9 w-full rounded-lg px-2.5 text-sm outline-none focus:ring-2", props.className)} style={{ ...fieldStyle, ...(props.style ?? {}) }}>
-      {placeholder !== undefined && <option value="">{placeholder}</option>}
-      {(options ?? []).map(render)}
-      {(groups ?? []).filter((g) => g.options.length).map((g) => (
-        <optgroup key={g.label} label={g.label}>
-          {g.options.map(render)}
-        </optgroup>
-      ))}
-    </select>
-  );
-}
-
-export function Field({ label, hint, children, className }: { label: React.ReactNode; hint?: React.ReactNode; children: React.ReactNode; className?: string }) {
-  return (
-    <label className={cn("block", className)}>
-      <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider" style={{ color: C.muted }}>{label}</span>
+    <label className={cn("block space-y-1.5", className)}>
+      <span className="block text-xs font-medium text-muted-foreground">{label}</span>
       {children}
-      {hint && <span className="mt-1 block text-xs" style={{ color: C.muted }}>{hint}</span>}
+      {hint && <span className="block text-xs text-muted-foreground">{hint}</span>}
     </label>
   );
 }
 
-export function KTabs<T extends string>({ tabs, value, onChange }: { tabs: { id: T; label: string; count?: number }[]; value: T; onChange: (v: T) => void }) {
-  return (
-    <div className="flex flex-wrap gap-1 rounded-lg p-1" style={{ background: C.bg, border: `1px solid ${C.border}` }}>
-      {tabs.map((t) => {
-        const active = t.id === value;
-        return (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => onChange(t.id)}
-            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors"
-            style={active ? { background: "rgba(0,191,174,0.14)", color: C.green, border: "1px solid rgba(0,191,174,0.35)" } : { color: C.muted, border: "1px solid transparent" }}
-          >
-            {t.label}
-            {typeof t.count === "number" && (
-              <span className="rounded px-1 text-[10px]" style={{ background: active ? "rgba(0,191,174,0.2)" : C.raised, color: active ? C.green : C.muted }}>
-                {t.count}
-              </span>
-            )}
-          </button>
-        );
-      })}
-    </div>
-  );
+export function KTabs<T extends string>({
+  tabs,
+  value,
+  onChange,
+}: {
+  tabs: { id: T; label: string; count?: number }[];
+  value: T;
+  onChange: (v: T) => void;
+}) {
+  return <FilterTabs label="Filter" tabs={tabs} value={value} onChange={onChange} />;
 }
 
 export function Empty({ title, hint, action }: { title: string; hint?: string; action?: React.ReactNode }) {
-  return (
-    <div className="flex flex-col items-center justify-center gap-2 rounded-lg px-6 py-10 text-center" style={{ border: `1px dashed ${C.border}` }}>
-      <p className="text-sm font-medium" style={{ color: C.text }}>{title}</p>
-      {hint && <p className="max-w-md text-xs" style={{ color: C.muted }}>{hint}</p>}
-      {action}
-    </div>
-  );
+  return <EmptyState variant="dashed" title={title} description={hint} action={action} />;
 }
 
 export function Spinner({ label }: { label?: string }) {
-  return (
-    <div className="flex items-center gap-2 py-6 text-sm" style={{ color: C.muted }}>
-      <Loader2 size={16} className="animate-spin" /> {label ?? "Loading…"}
-    </div>
-  );
+  return <LoadingSpinner label={label} />;
 }
 
-/** Loading placeholder: a subtle shimmering block sized by className (e.g. "h-4 w-24"). */
+/** Loading placeholder block, sized by className (e.g. "h-4 w-24"). */
 export function Skeleton({ className, style }: { className?: string; style?: React.CSSProperties }) {
-  return (
-    <div
-      aria-hidden
-      className={cn("animate-pulse rounded-md motion-reduce:animate-none", className)}
-      style={{ background: "linear-gradient(90deg, rgba(145,170,160,0.08) 0%, rgba(145,170,160,0.16) 50%, rgba(145,170,160,0.08) 100%)", ...style }}
-    />
-  );
+  return <LoadingSkeleton className={className} style={style} />;
 }
 
-export function StatBox({ label, value, hint, tone = "green" }: { label: string; value: React.ReactNode; hint?: string; tone?: Tone }) {
+export function StatBox({
+  label,
+  value,
+  hint,
+  tone = "green",
+}: {
+  label: string;
+  value: React.ReactNode;
+  hint?: string;
+  tone?: Tone;
+}) {
+  const dot = TONE_DOT[tone];
   return (
-    <div className="rounded-xl px-4 py-3" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
-      <p className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: C.muted }}>{label}</p>
-      <p className="mt-1 text-2xl font-semibold" style={{ color: TONE[tone].fg }}>{value}</p>
-      {hint && <p className="text-xs" style={{ color: C.muted }}>{hint}</p>}
+    <div className="rounded-xl border border-border bg-surface p-4 shadow-soft">
+      <p className="flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground">
+        {dot && <span aria-hidden className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dot)} />}
+        <span className="truncate">{label}</span>
+      </p>
+      <p className="mt-1 text-[22px] font-semibold leading-7 tracking-tight tabular-nums text-foreground">{value}</p>
+      {hint && <p className="mt-0.5 text-xs text-muted-foreground">{hint}</p>}
     </div>
   );
 }
@@ -228,18 +245,26 @@ export function StatBox({ label, value, hint, tone = "green" }: { label: string;
 export function ErrorNote({ message }: { message: string | null }) {
   if (!message) return null;
   return (
-    <p className="rounded-lg px-3 py-2 text-xs" style={{ color: C.red, background: "rgba(255,123,117,0.10)", border: "1px solid rgba(255,123,117,0.35)" }}>
+    <p role="alert" className="rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-[13px] text-danger-ink">
       {message}
     </p>
   );
 }
 
 /** Table shell: fixed header, scrolling body. */
-export function KTable({ head, children, className }: { head: React.ReactNode; children: React.ReactNode; className?: string }) {
+export function KTable({
+  head,
+  children,
+  className,
+}: {
+  head: React.ReactNode;
+  children: React.ReactNode;
+  className?: string;
+}) {
   return (
-    <div className={cn("overflow-auto rounded-lg", className)} style={{ border: `1px solid ${C.border}` }}>
-      <table className="w-full border-collapse text-left text-sm">
-        <thead className="sticky top-0 z-10" style={{ background: C.raised }}>
+    <div className={cn("overflow-auto rounded-xl border border-border bg-surface", className)}>
+      <table className="w-full border-collapse text-left text-[13px]">
+        <thead className="sticky top-0 z-10 bg-surface">
           <tr>{head}</tr>
         </thead>
         <tbody>{children}</tbody>
@@ -248,32 +273,35 @@ export function KTable({ head, children, className }: { head: React.ReactNode; c
   );
 }
 
-export function Th({ children, className }: { children?: React.ReactNode; className?: string }) {
+export function Th({ children, className, ...props }: React.ThHTMLAttributes<HTMLTableCellElement>) {
   return (
-    <th className={cn("px-3 py-2 text-[11px] font-semibold uppercase tracking-wider", className)} style={{ color: C.muted, borderBottom: `1px solid ${C.border}` }}>
+    <th
+      scope="col"
+      className={cn("border-b border-border px-4 py-2 text-xs font-medium text-muted-foreground", className)}
+      {...props}
+    >
       {children}
     </th>
   );
 }
 
-export function Td({ children, className, onClick, title }: { children?: React.ReactNode; className?: string; onClick?: () => void; title?: string }) {
+export function Td({
+  children,
+  className,
+  onClick,
+  title,
+  ...props
+}: React.TdHTMLAttributes<HTMLTableCellElement> & { onClick?: () => void }) {
   return (
-    <td className={cn("px-3 py-2 align-top text-sm", className)} style={{ color: C.text, borderBottom: `1px solid ${C.border}` }} onClick={onClick} title={title}>
+    <td
+      className={cn("border-t border-border px-4 py-2 align-top text-[13px] text-foreground", className)}
+      onClick={onClick}
+      title={title}
+      {...props}
+    >
       {children}
     </td>
   );
-}
-
-export function fmtDate(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
-}
-
-export function humanize(s: string | null | undefined): string {
-  if (!s) return "—";
-  const t = s.replace(/[_-]+/g, " ");
-  return t.charAt(0).toUpperCase() + t.slice(1);
 }
 
 /** Tone for governance values. */
@@ -284,20 +312,23 @@ export function authorityTone(v: string | null | undefined): Tone {
   if (!v) return "muted";
   return v.startsWith("A") ? "green" : v.startsWith("B") ? "info" : "amber";
 }
+/** Lifecycle status: active is green, draft needs attention, historical and archived are neutral. */
 export function statusTone(v: string | null | undefined): Tone {
-  return v === "active" ? "green" : v === "draft" ? "amber" : v === "historical" ? "muted" : v === "archived" ? "red" : "muted";
+  return v === "active" ? "green" : v === "draft" ? "amber" : "muted";
 }
 export function classTone(v: string | null | undefined): Tone {
-  return v === "business_reality" ? "green" : v === "playbook" ? "info" : v === "organizational_learning" ? "violet" : v === "platform_intelligence" ? "mint" : v === "performance_memory" ? "amber" : "muted";
+  return v === "business_reality"
+    ? "green"
+    : v === "playbook"
+      ? "info"
+      : v === "organizational_learning"
+        ? "violet"
+        : v === "platform_intelligence"
+          ? "mint"
+          : v === "performance_memory"
+            ? "amber"
+            : "muted";
 }
-export const CLASS_LABEL: Record<string, string> = {
-  business_reality: "Business Reality",
-  playbook: "Playbook",
-  organizational_learning: "Org Learning",
-  platform_intelligence: "Platform Intel",
-  performance_memory: "Performance",
-  raw_archive: "Raw",
-};
 
 /** Small fetch helper with JSON + error surfacing. */
 export async function api<T = unknown>(url: string, init?: RequestInit): Promise<T> {
