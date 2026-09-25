@@ -2,19 +2,18 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Loader2 } from "lucide-react";
+import { Loader2, LogIn } from "lucide-react";
 import { supabaseBrowser } from "@/lib/supabase-server";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/Button";
-import { Input } from "@/components/ui/Input";
-import { Label } from "@/components/ui/Label";
-import { Alert } from "@/components/ui/Alert";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/Card";
+import { inputClass } from "@/components/ui/Input";
+import { ThemedLogo } from "@/components/ui/Brand";
+
+/** The shared field recipe at the chatbot login's 40px height. */
+const fieldClass = cn(inputClass, "h-10");
+
+/** Inline error callout. */
+const alertClass = "rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-[13px] text-danger-ink";
 
 /**
  * Only honor a `redirectTo` that is a same-origin, absolute PATH. Anything else
@@ -73,74 +72,66 @@ function LoginForm() {
   }
 
   return (
-    <main className="relative flex min-h-screen items-center justify-center bg-background px-4">
-      {/* Soft brand wash behind the card */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-x-0 top-0 h-64 bg-brand-gradient opacity-[0.06]"
-      />
-      <div className="relative w-full max-w-sm">
-        <div className="mb-6 flex flex-col items-center gap-3 text-center">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/logo-white.png" alt="Practiscale" className="h-8 w-auto" />
-          <span className="rounded-full bg-accent/10 px-2.5 py-0.5 text-xs font-semibold text-accent">
-            Brain · Back office
-          </span>
-        </div>
+    <main className="flex min-h-app flex-col items-center justify-center bg-background bg-[radial-gradient(1200px_600px_at_50%_-10%,rgb(var(--accent-soft)),transparent_60%)] px-4 py-10">
+      <div className="w-full max-w-[380px] rounded-2xl border border-border bg-surface p-5 shadow-float">
+        {/* Dark wordmark in light, white wordmark in dark. */}
+        <ThemedLogo className="mx-auto block h-5" />
 
-        <Card className="shadow-soft-lg">
-          <CardHeader>
-            <CardTitle>Sign in</CardTitle>
-            <CardDescription>
-              {demo
-                ? "Demo mode — any credentials work. Just press Sign in."
-                : "Admin access to the back office."}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form onSubmit={onSubmit} className="space-y-4">
-              {error && <Alert tone="danger">{error}</Alert>}
+        <h1 className="mt-4 text-center text-xl font-semibold tracking-tight">Sign in to the Brain</h1>
+        <p className="mt-1 text-center text-[13px] text-muted-foreground">
+          {demo
+            ? "Demo mode — any credentials work. Just press Sign in."
+            : "Admin access to the back office."}
+        </p>
 
-              <div className="space-y-1.5">
-                <Label htmlFor="email">Email</Label>
-                <Input
-                  id="email"
-                  type="email"
-                  autoComplete="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@practiscale.co"
-                />
-              </div>
+        <form onSubmit={onSubmit} className="mt-5 space-y-3.5">
+          <div className="space-y-1.5">
+            <label htmlFor="email" className="block text-xs font-medium text-muted-foreground">
+              Email
+            </label>
+            <input
+              id="email"
+              type="email"
+              autoComplete="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@practiscale.co"
+              className={fieldClass}
+            />
+          </div>
 
-              <div className="space-y-1.5">
-                <Label htmlFor="password">Password</Label>
-                <Input
-                  id="password"
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                />
-              </div>
+          <div className="space-y-1.5">
+            <label htmlFor="password" className="block text-xs font-medium text-muted-foreground">
+              Password
+            </label>
+            <input
+              id="password"
+              type="password"
+              autoComplete="current-password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              className={fieldClass}
+            />
+          </div>
 
-              <Button
-                type="submit"
-                size="lg"
-                className="w-full"
-                disabled={loading}
-              >
-                {loading && (
-                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                )}
-                {loading ? "Signing in…" : "Sign in"}
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
+          {error && (
+            <p role="alert" className={alertClass}>
+              {error}
+            </p>
+          )}
+
+          <Button type="submit" size="lg" className="mt-1 w-full" disabled={loading}>
+            {loading ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <LogIn className="h-4 w-4" aria-hidden="true" />
+            )}
+            {loading ? "Signing in…" : "Sign in"}
+          </Button>
+        </form>
       </div>
     </main>
   );

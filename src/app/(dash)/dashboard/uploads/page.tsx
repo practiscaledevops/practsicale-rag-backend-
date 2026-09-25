@@ -1,7 +1,10 @@
 import { requireAdmin } from "@/lib/auth/admin";
 import { supabaseAdmin } from "@/lib/supabase";
-import { PageHeader } from "@/components/ui/PageHeader";
+import { PageHeader } from "@/components/ui";
 import { UploadsClient, type CollectionOption } from "./UploadsClient";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Bulk upload" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,8 +28,8 @@ export default async function UploadsPage() {
   return (
     <div>
       <PageHeader
-        title="Upload & ingest"
-        description="Classify knowledge, then add files. Each file is extracted, redacted, chunked, embedded, and indexed for retrieval."
+        title="Bulk upload"
+        description="Upload Markdown, text or PDF files in bulk and tag them for retrieval."
       />
       <UploadsClient collections={collections} />
     </div>

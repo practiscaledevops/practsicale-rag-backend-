@@ -24,8 +24,12 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { AlertTriangle, BookOpen, Check, ChevronDown, ChevronRight, ListTree, Loader2, Pause, Play, RotateCcw } from "lucide-react";
-import { C, Chip, KBtn, KInput, KSelect, Field, ErrorNote, Spinner, api, fmtDate, type Tone } from "@/components/ui/brain-ui";
+import { AlertTriangle, BookOpen, Check, ExternalLink, ListTree, Loader2, Pause, Play, RotateCcw, Undo2 } from "lucide-react";
+import { Alert, Badge, Button, buttonClass, Checkbox, Field, Input, Meter, Select, Spinner, type BadgeTone } from "@/components/ui";
+import { api } from "@/components/ui/brain-ui";
+import { cn } from "@/lib/utils";
+import { fmtDate } from "@/lib/format";
+import { dedupTone, statusTone } from "@/lib/ui-labels";
 import {
   headingCandidates,
   outlineCandidates,
@@ -145,16 +149,22 @@ const KIND_OPTIONS = [
   { value: "other", label: "Other" },
 ];
 
-const STATUS_CHIP: Record<SectionStatus, { tone: Tone; label: string }> = {
-  idle: { tone: "muted", label: "" },
-  queued: { tone: "muted", label: "queued" },
-  compiling: { tone: "info", label: "compiling…" },
-  new: { tone: "green", label: "NEW" },
-  enriched: { tone: "info", label: "ENRICHED" },
-  duplicate: { tone: "amber", label: "DUPLICATE" },
-  conflict: { tone: "red", label: "CONFLICT" },
-  blocked: { tone: "amber", label: "BLOCKED" },
-  failed: { tone: "red", label: "failed" },
+/**
+ * Section outcome → badge. Queued / compiling use the shared statusTone
+ * (neutral / accent). Outcomes use dedupTone, the same colours as the wizard and
+ * the Decisions log: new = success, enriched = info, duplicate = neutral,
+ * conflict / blocked (needs review) = warning, failed = danger.
+ */
+const STATUS_BADGE: Record<SectionStatus, { tone: BadgeTone; label: string }> = {
+  idle: { tone: statusTone(null), label: "" },
+  queued: { tone: statusTone("queued"), label: "Queued" },
+  compiling: { tone: statusTone("compiling"), label: "Compiling…" },
+  new: { tone: dedupTone("new"), label: "New" },
+  enriched: { tone: dedupTone("enriched"), label: "Enriched" },
+  duplicate: { tone: dedupTone("duplicate"), label: "Duplicate" },
+  conflict: { tone: dedupTone("conflict"), label: "Conflict" },
+  blocked: { tone: dedupTone("blocked"), label: "Blocked" },
+  failed: { tone: dedupTone("failed"), label: "Failed" },
 };
 
 export function LongSourcePanel({
@@ -421,7 +431,7 @@ export function LongSourcePanel({
 
   // ---- render -------------------------------------------------------------
 
-  const box: React.CSSProperties = { background: C.bg, border: `1px solid ${C.border}` };
+  const box = "space-y-3 rounded-xl border border-border bg-surface-muted/40 p-3";
   const count = (st: SectionStatus) => sections.filter((s) => s.status === st).length;
   const toCompile = sections.filter((s) => s.checked && s.status === "idle");
   const inBatch = sections.filter((s) => s.status !== "idle");
@@ -433,35 +443,37 @@ export function LongSourcePanel({
   if (!outlined) {
     const savedDone = saved ? Object.values(saved.sections).filter((s) => FINISHED.includes(s.status)).length : 0;
     return (
-      <div className="space-y-3 rounded-lg p-3" style={box}>
-        <div className="flex items-start gap-2">
-          <BookOpen size={16} className="mt-0.5 shrink-0" style={{ color: C.green }} />
-          <div className="min-w-0 text-xs" style={{ color: C.muted }}>
-            <p className="text-sm font-semibold" style={{ color: C.text }}>Long source</p>
+      <div className={box}>
+        <div className="flex items-start gap-2.5">
+          <span aria-hidden className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-accent-soft text-accent">
+            <BookOpen size={16} />
+          </span>
+          <div className="min-w-0 text-xs text-muted-foreground">
+            <p className="text-sm font-semibold text-foreground">Long source</p>
             <p className="mt-0.5">
               This looks like a long source ({Math.round(text.length / 1000).toLocaleString()}k characters). The Brain can split it into chapters and compile each one as its own object — one framework per object, de-duplicated against what it already knows.
             </p>
           </div>
         </div>
         {saved && savedDone > 0 && (
-          <div className="flex flex-wrap items-center gap-2 rounded-lg px-3 py-2 text-xs" style={{ background: "rgba(117,191,255,0.08)", border: "1px solid rgba(117,191,255,0.35)", color: C.text }}>
-            <RotateCcw size={13} style={{ color: C.info }} />
-            <span>
+          <div role="status" className="flex flex-wrap items-center gap-2 rounded-xl border border-info/30 bg-info/10 px-3 py-2 text-xs text-foreground">
+            <RotateCcw size={14} aria-hidden className="shrink-0 text-info" />
+            <span className="min-w-0 flex-1">
               You already started on this source ({fmtDate(saved.savedAt)}): {savedDone} of {Object.keys(saved.sections).length} sections compiled.
             </span>
-            <KBtn size="xs" variant="primary" disabled={outlining || busy} onClick={resumeSaved}>Resume where you left off</KBtn>
-            <KBtn size="xs" variant="ghost" disabled={outlining || busy} onClick={() => { clearSaved(key); setSaved(null); }}>Start over</KBtn>
+            <Button size="sm" disabled={outlining || busy} onClick={resumeSaved}>Resume where you left off</Button>
+            <Button size="sm" variant="ghost" disabled={outlining || busy} onClick={() => { clearSaved(key); setSaved(null); }}>Start over</Button>
           </div>
         )}
         <div className="flex flex-wrap items-center gap-2">
-          <KBtn variant="primary" loading={outlining} disabled={outlining || busy} onClick={runOutline}><ListTree size={14} /> Outline it</KBtn>
-          <KBtn loading={busy} disabled={outlining || busy} onClick={onSingle}>Compile as one object anyway</KBtn>
-          <span className="text-[11px]" style={{ color: C.muted }}>
+          <Button size="toolbar" loading={outlining} disabled={outlining || busy} onClick={runOutline}>{!outlining && <ListTree size={14} aria-hidden />} Outline it</Button>
+          <Button size="toolbar" variant="secondary" loading={busy} disabled={outlining || busy} onClick={onSingle}>Compile as one object anyway</Button>
+          <span className="text-xs text-muted-foreground">
             {text.length > MAX_TEXT_CHARS ? `One object uses only the first ${MAX_TEXT_CHARS.toLocaleString()} characters — the rest is dropped.` : "One object reads the whole source at once."}
           </span>
         </div>
-        <div aria-live="polite">{outlining && <Spinner label="Finding the chapters… (about 10–20 s)" />}</div>
-        <ErrorNote message={error} />
+        <div aria-live="polite">{outlining && <Spinner label="Finding the chapters… (about 10–20 s)" className="py-1" />}</div>
+        {error && <Alert tone="danger">{error}</Alert>}
       </div>
     );
   }
@@ -477,119 +489,128 @@ export function LongSourcePanel({
   ].filter(Boolean).join(" · ");
 
   return (
-    <div className="space-y-3 rounded-lg p-3" style={box}>
+    <div className={box}>
       <div className="flex flex-wrap items-center gap-2">
-        <BookOpen size={16} style={{ color: C.green }} />
-        <span className="text-sm font-semibold" style={{ color: C.text }}>{sections.length} sections</span>
-        <Chip tone={outlined.via === "model" ? "green" : "amber"}>{outlined.via === "model" ? "Outlined by the Brain" : "Split by size"}</Chip>
-        <span className="text-xs" style={{ color: C.muted }}>{Math.round(text.length / 1000).toLocaleString()}k characters</span>
+        <BookOpen size={16} aria-hidden className="text-accent" />
+        <span className="text-sm font-semibold text-foreground">{sections.length} sections</span>
+        <Badge tone={outlined.via === "model" ? "accent" : "neutral"}>{outlined.via === "model" ? "Outlined by the Brain" : "Split by size"}</Badge>
+        <span className="text-xs text-muted-foreground">{Math.round(text.length / 1000).toLocaleString()}k characters</span>
         {!locked && !inFlight && (
-          <button type="button" className="ml-auto text-xs underline" style={{ color: C.muted }} onClick={discardOutline}>discard outline · back to the text</button>
+          <Button size="sm" variant="ghost" className="ml-auto" onClick={discardOutline}><Undo2 size={12} aria-hidden /> Discard outline</Button>
         )}
       </div>
-      {notice && <p className="text-xs" style={{ color: C.amber }}>{notice}</p>}
+      {notice && <Alert tone="warning" role="status">{notice}</Alert>}
 
       <div className="grid gap-3 sm:grid-cols-3">
-        <Field label="Work title"><KInput value={workTitle} disabled={locked} onChange={(e) => setWorkTitle(e.target.value)} placeholder="The book / course / report" /></Field>
-        <Field label="Author"><KInput value={author} disabled={locked} onChange={(e) => setAuthor(e.target.value)} placeholder="Who wrote or taught it" /></Field>
-        <Field label="Kind of source"><KSelect value={kind} disabled={locked} onChange={(e) => setKind(e.target.value)} options={KIND_OPTIONS} /></Field>
+        <Field label="Work title"><Input value={workTitle} disabled={locked} onChange={(e) => setWorkTitle(e.target.value)} placeholder="The book / course / report" /></Field>
+        <Field label="Author"><Input value={author} disabled={locked} onChange={(e) => setAuthor(e.target.value)} placeholder="Who wrote or taught it" /></Field>
+        <Field label="Kind of source"><Select value={kind} disabled={locked} onChange={(e) => setKind(e.target.value)} options={KIND_OPTIONS} /></Field>
       </div>
 
       {!started && (
-        <div className="flex flex-wrap items-center gap-2 text-[11px]" style={{ color: C.muted }}>
-          <button type="button" className="underline" onClick={() => commitSections(secRef.current.map((s) => ({ ...s, checked: true })))}>select all</button>
-          <button type="button" className="underline" onClick={() => commitSections(secRef.current.map((s) => ({ ...s, checked: false })))}>none</button>
-          <span>Each ticked section becomes its own {humanize(cls).toLowerCase()} object — or enriches one the Brain already has.</span>
+        <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+          <Button size="sm" variant="ghost" onClick={() => commitSections(secRef.current.map((s) => ({ ...s, checked: true })))}>Select all</Button>
+          <Button size="sm" variant="ghost" onClick={() => commitSections(secRef.current.map((s) => ({ ...s, checked: false })))}>Select none</Button>
+          <span className="pl-1">Each ticked section becomes its own {humanize(cls).toLowerCase()} object — or enriches one the Brain already has.</span>
         </div>
       )}
 
-      <ul className="max-h-[28rem] space-y-1 overflow-auto pr-1">
+      <ul className="max-h-[28rem] space-y-1 overflow-auto p-0.5" aria-label="Sections">
         {sections.map((s) => {
-          const chip = STATUS_CHIP[s.status];
+          const badge = STATUS_BADGE[s.status];
           const editable = s.status === "idle" && !locked;
           return (
-            <li key={s.index} className="rounded-lg px-2 py-1.5" style={{ background: C.surface, border: `1px solid ${C.border}`, opacity: s.status === "idle" && !s.checked ? 0.6 : 1 }}>
+            <li key={s.index} className={cn("rounded-lg border border-border bg-surface px-2.5 py-1.5", s.status === "idle" && !s.checked && "opacity-60")}>
               <div className="flex flex-wrap items-center gap-2">
-                <input type="checkbox" aria-label={`Include ${s.title}`} checked={s.checked} disabled={!editable} onChange={(e) => patch(s.index, { checked: e.target.checked })} />
-                <button type="button" aria-label={s.open ? "Hide preview" : "Show preview"} aria-expanded={s.open} onClick={() => patch(s.index, { open: !s.open })} style={{ color: C.muted }}>
-                  {s.open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                </button>
-                <span className="w-6 text-right text-[11px]" style={{ color: C.muted }}>{s.index + 1}</span>
-                <div className="min-w-[10rem] flex-1" title={s.preview}>
-                  <KInput value={s.title} disabled={!editable} onChange={(e) => patch(s.index, { title: e.target.value })} className="h-7 text-xs" aria-label={`Title of section ${s.index + 1}`} />
+                <Checkbox aria-label={`Include ${s.title}`} checked={s.checked} disabled={!editable} onChange={(e) => patch(s.index, { checked: e.target.checked })} />
+                <span className="w-6 text-right text-xs tabular-nums text-muted-foreground">{s.index + 1}</span>
+                <div className="min-w-[10rem] flex-1">
+                  <Input density="compact" value={s.title} disabled={!editable} onChange={(e) => patch(s.index, { title: e.target.value })} aria-label={`Title of section ${s.index + 1}`} />
                 </div>
-                <span className="text-[11px]" style={{ color: C.muted }}>{s.chars.toLocaleString()} chars</span>
+                <span className="text-xs tabular-nums text-muted-foreground">{s.chars.toLocaleString()} chars</span>
                 {s.status !== "idle" && (
-                  <Chip tone={chip.tone} title={s.note}>
-                    {s.status === "compiling" && <Loader2 size={11} className="animate-spin" />}
-                    {FINISHED.includes(s.status) && <Check size={11} />}
-                    {chip.label}
+                  <Badge tone={badge.tone} title={s.note}>
+                    {s.status === "compiling" && <Loader2 size={12} aria-hidden className="animate-spin" />}
+                    {FINISHED.includes(s.status) && <Check size={12} aria-hidden />}
+                    {badge.label}
                     {s.ref && s.status !== "duplicate" ? <span className="font-mono">{s.ref}</span> : null}
-                  </Chip>
+                  </Badge>
                 )}
                 {s.id && (
-                  <Link href={`/dashboard/knowledge/${s.id}`} target="_blank" className="font-mono text-[11px] underline" style={{ color: C.green }}>
-                    {s.status === "duplicate" ? `${s.ref ?? "open"}` : "open"}
+                  <Link
+                    href={`/dashboard/knowledge/${s.id}`}
+                    target="_blank"
+                    className="inline-flex items-center gap-1 rounded-md font-mono text-xs text-accent-strong underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {s.status === "duplicate" ? `${s.ref ?? "Open"}` : "Open"}
+                    <ExternalLink size={12} aria-hidden />
+                    <span className="sr-only"> (opens in a new tab)</span>
                   </Link>
                 )}
                 {(s.status === "failed" || s.status === "blocked") && (
-                  <KBtn size="xs" onClick={() => enqueue((x) => x.index === s.index)}><RotateCcw size={11} /> Retry</KBtn>
+                  <Button size="sm" variant="secondary" aria-label={`Retry ${s.title}`} onClick={() => enqueue((x) => x.index === s.index)}><RotateCcw size={12} aria-hidden /> Retry</Button>
                 )}
               </div>
               {s.note && (s.status === "failed" || s.status === "blocked") && (
-                <p className="mt-1 flex items-start gap-1 pl-12 text-[11px]" style={{ color: s.status === "failed" ? C.red : C.amber }}>
-                  <AlertTriangle size={11} className="mt-0.5 shrink-0" /> {s.note}
+                <p className={cn("mt-1 flex items-start gap-1.5 pl-8 text-xs", s.status === "failed" ? "text-danger" : "text-foreground")}>
+                  <AlertTriangle size={12} aria-hidden className={cn("mt-0.5 shrink-0", s.status === "failed" ? "text-danger" : "text-warning")} /> {s.note}
                 </p>
               )}
-              {s.open && <p className="mt-1 pl-12 text-[11px]" style={{ color: C.muted }}>{s.preview || "(no preview)"}</p>}
+              <details
+                open={s.open}
+                onToggle={(e) => { const o = e.currentTarget.open; if (o !== s.open) patch(s.index, { open: o }); }}
+                className="mt-1 pl-8"
+              >
+                <summary className="w-fit cursor-pointer rounded-md text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                  Preview<span className="sr-only"> of {s.title}</span>
+                </summary>
+                <p className="mt-1 whitespace-pre-line text-xs text-muted-foreground">{s.preview || "(no preview)"}</p>
+              </details>
             </li>
           );
         })}
       </ul>
 
       {started && (
-        <div aria-live="polite">
-          <div className="h-1.5 overflow-hidden rounded-full" style={{ background: C.raised }} role="progressbar" aria-valuemin={0} aria-valuemax={inBatch.length} aria-valuenow={settled.length}>
-            <div className="h-full rounded-full transition-all" style={{ width: `${inBatch.length ? (settled.length / inBatch.length) * 100 : 0}%`, background: C.green }} />
-          </div>
-          <p className="mt-1 text-xs" style={{ color: C.text }}>
+        <div aria-live="polite" className="space-y-1.5">
+          <Meter value={settled.length} max={inBatch.length} label="Sections processed" tone="accent" />
+          <p className="text-xs tabular-nums text-foreground">
             {settled.length} / {inBatch.length}{summary ? ` · ${summary}` : ""}
-            {paused && queued ? <span style={{ color: C.amber }}> · paused{inFlight ? " (finishing the sections in flight)" : ""}</span> : null}
+            {paused && queued ? <span className="text-muted-foreground"> · paused{inFlight ? " (finishing the sections in flight)" : ""}</span> : null}
           </p>
         </div>
       )}
 
-      <ErrorNote message={error} />
+      {error && <Alert tone="danger">{error}</Alert>}
 
       <div className="flex flex-wrap items-center gap-2">
         {!locked && toCompile.length > 0 && (
-          <KBtn variant="primary" onClick={() => enqueue((s) => s.checked && s.status === "idle")}>
-            <Play size={14} /> Compile {toCompile.length} {started ? "more " : ""}section{toCompile.length === 1 ? "" : "s"}
-          </KBtn>
+          <Button size="toolbar" onClick={() => enqueue((s) => s.checked && s.status === "idle")}>
+            <Play size={14} aria-hidden /> Compile {toCompile.length} {started ? "more " : ""}section{toCompile.length === 1 ? "" : "s"}
+          </Button>
         )}
-        {running && <KBtn onClick={pause}><Pause size={14} /> Pause</KBtn>}
-        {paused && queued && <KBtn variant="primary" onClick={resume}><Play size={14} /> Resume</KBtn>}
-        {!running && failed > 0 && <KBtn onClick={() => enqueue((s) => s.status === "failed")}><RotateCcw size={14} /> Retry failed ({failed})</KBtn>}
-        {!locked && toCompile.length > 0 && (
-          <span className="text-[11px]" style={{ color: C.muted }}>
-            ~45–60 s per section, two at a time — about {minutes(45)}–{minutes(60)} min. Keep this tab open; progress is saved in this browser, and re-running a source is safe (the Brain answers DUPLICATE / ENRICH for what it already holds).
-          </span>
-        )}
+        {running && <Button size="toolbar" variant="secondary" onClick={pause}><Pause size={14} aria-hidden /> Pause</Button>}
+        {paused && queued && <Button size="toolbar" onClick={resume}><Play size={14} aria-hidden /> Resume</Button>}
+        {!running && failed > 0 && <Button size="toolbar" variant="secondary" onClick={() => enqueue((s) => s.status === "failed")}><RotateCcw size={14} aria-hidden /> Retry failed ({failed})</Button>}
       </div>
+      {!locked && toCompile.length > 0 && (
+        <Alert tone="warning" role="note" title="Keep this tab open">
+          ~45–60 s per section, two at a time — about {minutes(45)}–{minutes(60)} min. Progress is saved in this browser, and re-running a source is safe (the Brain answers Duplicate / Enrich for what it already holds).
+        </Alert>
+      )}
 
       {done && (
-        <div className="space-y-2 rounded-lg p-3 text-xs" style={{ background: "rgba(0,191,174,0.08)", border: "1px solid rgba(0,191,174,0.35)", color: C.text }}>
+        <Alert tone="success">
           <p>
-            <Check size={13} className="mr-1 inline" style={{ color: C.green }} />
             {workTitle ? <span className="font-semibold">{workTitle}</span> : "The source"}: {settled.length} section{settled.length === 1 ? "" : "s"} processed{summary ? ` — ${summary}` : ""}.
             {failed > 0 ? " Retry the failed ones above — the rest is already in the Brain." : ""}
           </p>
-          <div className="flex flex-wrap items-center gap-2">
-            <Link href="/dashboard/knowledge"><KBtn variant="primary">Open Knowledge objects</KBtn></Link>
-            <Link href="/dashboard/taxonomy"><KBtn>Review taxonomy proposals{proposals ? ` (${proposals})` : ""}</KBtn></Link>
-            <KBtn variant="ghost" onClick={onReset}>Add another</KBtn>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Link href="/dashboard/knowledge" className={buttonClass({ size: "toolbar" })}>Open Knowledge objects</Link>
+            <Link href="/dashboard/taxonomy" className={buttonClass({ variant: "secondary", size: "toolbar" })}>Review taxonomy proposals{proposals ? ` (${proposals})` : ""}</Link>
+            <Button size="toolbar" variant="ghost" onClick={onReset}>Add another</Button>
           </div>
-        </div>
+        </Alert>
       )}
     </div>
   );

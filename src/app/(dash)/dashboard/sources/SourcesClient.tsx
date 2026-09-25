@@ -3,15 +3,28 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Activity, Database, Loader2, Plus, RefreshCw } from "lucide-react";
-import { Button } from "@/components/ui/Button";
-import { Input } from "@/components/ui/Input";
-import { Label } from "@/components/ui/Label";
-import { Alert } from "@/components/ui/Alert";
-import { Badge } from "@/components/ui/Badge";
-import { EmptyState } from "@/components/ui/EmptyState";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/Card";
-import { Table, THead, TBody, Tr, Th, Td } from "@/components/ui/Table";
+import { Activity, Database, Plus, RefreshCw } from "lucide-react";
+import {
+  Alert,
+  Badge,
+  Button,
+  Dialog,
+  EmptyState,
+  Field,
+  Input,
+  Notice,
+  Select,
+  Table,
+  TableCard,
+  TBody,
+  Td,
+  Th,
+  THead,
+  Tr,
+  buttonClass,
+} from "@/components/ui";
+import { fmtDateTime, humanize, relTime } from "@/lib/format";
+import { sourceTypeLabel, statusTone } from "@/lib/ui-labels";
 
 /** One data source, as returned by /api/admin/sources and the sources page. */
 export interface DataSource {
@@ -46,20 +59,44 @@ const AUTH_TYPES: { value: string; label: string }[] = [
   { value: "api_key", label: "API key" },
   { value: "basic", label: "Basic" },
 ];
+const HTTP_METHODS: { value: string; label: string }[] = [
+  { value: "GET", label: "GET" },
+  { value: "POST", label: "POST" },
+];
 
-const sourceTypeLabel = (v: string) =>
-  SOURCE_TYPES.find((s) => s.value === v)?.label ?? v;
+const authLabel = (v: string | null) => AUTH_TYPES.find((a) => a.value === (v ?? "none"))?.label ?? humanize(v);
 
-function StatusBadge({ status }: { status: string | null }) {
-  if (!status) return <span className="text-muted-foreground">—</span>;
-  const tone = status === "success" ? "success" : status === "error" ? "danger" : "neutral";
-  return <Badge tone={tone}>{status}</Badge>;
+/** Last-run status in words (the column used to show the raw lowercase value). */
+const SYNC_STATUS_LABELS: Record<string, string> = {
+  success: "Succeeded",
+  error: "Failed",
+  running: "Syncing",
+};
+
+/** Table links: foreground text, accent on hover. */
+const tableLink = "font-medium text-foreground hover:text-accent-strong hover:underline";
+
+// true only after hydration, so locale-dependent strings never mismatch the server HTML.
+const noopSubscribe = () => () => {};
+function useHydrated() {
+  return React.useSyncExternalStore(noopSubscribe, () => true, () => false);
 }
 
-const fieldClass =
-  "flex h-9 w-full rounded-lg border border-border bg-surface px-3 py-1 text-sm " +
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring " +
-  "focus-visible:ring-offset-1 focus-visible:ring-offset-background";
+/** Relative time ("5m ago") with the exact local date and time in its tooltip. */
+function TimeAgo({ iso, never = "Never" }: { iso: string | null; never?: string }) {
+  const hydrated = useHydrated();
+  if (!iso) return <span className="text-muted-foreground">{never}</span>;
+  return (
+    <time dateTime={iso} title={hydrated ? fmtDateTime(iso) : undefined} suppressHydrationWarning>
+      {relTime(iso, { never, absolute: hydrated })}
+    </time>
+  );
+}
+
+function StatusBadge({ status }: { status: string | null }) {
+  if (!status) return <Badge tone="neutral">Never synced</Badge>;
+  return <Badge tone={statusTone(status)}>{SYNC_STATUS_LABELS[status] ?? humanize(status)}</Badge>;
+}
 
 export function SourcesClient({ sources }: { sources: DataSource[] }) {
   const router = useRouter();
@@ -78,6 +115,7 @@ export function SourcesClient({ sources }: { sources: DataSource[] }) {
   const [creating, setCreating] = React.useState(false);
   const [formError, setFormError] = React.useState<string | null>(null);
   const [formOk, setFormOk] = React.useState<string | null>(null);
+  const [createOpen, setCreateOpen] = React.useState(false);
 
   // Per-row sync state.
   const [syncingId, setSyncingId] = React.useState<string | null>(null);
@@ -95,6 +133,11 @@ export function SourcesClient({ sources }: { sources: DataSource[] }) {
     setRecordsPath("");
     setCursorField("");
     setScheduleCron("");
+  }
+
+  function openCreate() {
+    setFormError(null);
+    setCreateOpen(true);
   }
 
   async function onCreate(e: React.FormEvent) {
@@ -123,8 +166,9 @@ export function SourcesClient({ sources }: { sources: DataSource[] }) {
         setFormError(json.error ?? `Request failed (${res.status})`);
         return;
       }
-      setFormOk(`Created data source “${json.source?.name ?? name}”.`);
+      setFormOk(`Created source “${json.source?.name ?? name}”.`);
       resetForm();
+      setCreateOpen(false);
       router.refresh(); // re-run the server component to show the new row
     } catch {
       setFormError("Network error — please try again.");
@@ -161,252 +205,231 @@ export function SourcesClient({ sources }: { sources: DataSource[] }) {
     }
   }
 
+  const newSourceButton = (
+    <Button size="toolbar" onClick={openCreate}>
+      <Plus size={14} aria-hidden />
+      New source
+    </Button>
+  );
+
   return (
-    <div className="space-y-6">
-      {/* Create a pull data source */}
-      <Card>
-        <CardHeader>
-          <CardTitle>New pull data source</CardTitle>
-          <CardDescription>
-            The Brain will call this GET/POST endpoint and ingest the records it returns.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={onCreate} className="space-y-4">
-            {formError && <Alert tone="danger">{formError}</Alert>}
-            {formOk && <Alert tone="success">{formOk}</Alert>}
+    <div className="space-y-4">
+      {formOk && <Notice message={formOk} onDone={() => setFormOk(null)} />}
+      {syncMsg && (
+        <Alert tone={syncMsg.tone} onDismiss={() => setSyncMsg(null)}>
+          {syncMsg.text}
+        </Alert>
+      )}
 
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label htmlFor="ds-name">Name</Label>
-                <Input
-                  id="ds-name"
-                  required
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Call scoring API"
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <Label htmlFor="ds-type">Source type</Label>
-                <select
-                  id="ds-type"
-                  className={fieldClass}
-                  value={sourceType}
-                  onChange={(e) => setSourceType(e.target.value)}
-                >
-                  {SOURCE_TYPES.map((t) => (
-                    <option key={t.value} value={t.value}>
-                      {t.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="space-y-1.5 sm:col-span-2">
-                <Label htmlFor="ds-url">Endpoint URL</Label>
-                <Input
-                  id="ds-url"
-                  type="url"
-                  required
-                  value={endpointUrl}
-                  onChange={(e) => setEndpointUrl(e.target.value)}
-                  placeholder="https://scoring.internal/api/records"
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <Label htmlFor="ds-method">Method</Label>
-                <select
-                  id="ds-method"
-                  className={fieldClass}
-                  value={httpMethod}
-                  onChange={(e) => setHttpMethod(e.target.value)}
-                >
-                  <option value="GET">GET</option>
-                  <option value="POST">POST</option>
-                </select>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label htmlFor="ds-auth">Auth type</Label>
-                <select
-                  id="ds-auth"
-                  className={fieldClass}
-                  value={authType}
-                  onChange={(e) => setAuthType(e.target.value)}
-                >
-                  {AUTH_TYPES.map((t) => (
-                    <option key={t.value} value={t.value}>
-                      {t.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {authType !== "none" && (
-                <div className="space-y-1.5 sm:col-span-2">
-                  <Label htmlFor="ds-secret">Auth secret reference</Label>
-                  <Input
-                    id="ds-secret"
-                    value={authSecretRef}
-                    onChange={(e) => setAuthSecretRef(e.target.value)}
-                    placeholder="SCORING_API_TOKEN"
-                    aria-describedby="ds-secret-help"
-                  />
-                  <p id="ds-secret-help" className="text-xs text-muted-foreground">
-                    Enter the <strong>name of a server environment variable</strong> that
-                    holds the secret — never the secret itself. The value is read
-                    server-side at sync time.
-                  </p>
-                </div>
-              )}
-
-              <div className="space-y-1.5">
-                <Label htmlFor="ds-records">Records path</Label>
-                <Input
-                  id="ds-records"
-                  value={recordsPath}
-                  onChange={(e) => setRecordsPath(e.target.value)}
-                  placeholder="data.records"
-                  aria-describedby="ds-records-help"
-                />
-                <p id="ds-records-help" className="text-xs text-muted-foreground">
-                  Dot path to the array in the response. Leave blank if the response is
-                  the array (or a single object).
-                </p>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label htmlFor="ds-cursor">Cursor field</Label>
-                <Input
-                  id="ds-cursor"
-                  value={cursorField}
-                  onChange={(e) => setCursorField(e.target.value)}
-                  placeholder="updated_at"
-                  aria-describedby="ds-cursor-help"
-                />
-                <p id="ds-cursor-help" className="text-xs text-muted-foreground">
-                  Field used as the incremental watermark (optional).
-                </p>
-              </div>
-
-              <div className="space-y-1.5 sm:col-span-2">
-                <Label htmlFor="ds-cron">Schedule (cron)</Label>
-                <Input
-                  id="ds-cron"
-                  value={scheduleCron}
-                  onChange={(e) => setScheduleCron(e.target.value)}
-                  placeholder="0 * * * *"
-                  aria-describedby="ds-cron-help"
-                />
-                <p id="ds-cron-help" className="text-xs text-muted-foreground">
-                  Optional. Stored for scheduled syncs; you can also trigger a sync
-                  manually below.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex justify-end">
-              <Button type="submit" disabled={creating}>
-                {creating ? (
-                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                ) : (
-                  <Plus className="h-4 w-4" aria-hidden="true" />
-                )}
-                {creating ? "Creating…" : "Create data source"}
-              </Button>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
-
-      {/* Existing sources */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Data sources</CardTitle>
-          <CardDescription>Registered pull endpoints for your org.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {syncMsg && (
-            <div className="mb-4">
-              <Alert tone={syncMsg.tone}>{syncMsg.text}</Alert>
-            </div>
-          )}
-
-          {sources.length === 0 ? (
-            <EmptyState
-              icon={Database}
-              title="No data sources yet"
-              description="Register a pull endpoint above to start ingesting records automatically."
-            />
-          ) : (
-            <Table>
-              <THead>
-                <Tr>
-                  <Th>Name</Th>
-                  <Th>Type</Th>
-                  <Th>Endpoint</Th>
-                  <Th>Auth</Th>
-                  <Th>Last status</Th>
-                  <Th>Last run</Th>
-                  <Th className="text-right">Actions</Th>
-                </Tr>
-              </THead>
-              <TBody>
-                {sources.map((s) => (
-                  <Tr key={s.id}>
-                    <Td className="font-medium">
-                      <Link href={`/dashboard/sources/${s.id}`} className="text-accent hover:underline">
-                        {s.name}
-                      </Link>
-                    </Td>
-                    <Td>
-                      <Badge tone="accent">{sourceTypeLabel(s.source_type)}</Badge>
-                    </Td>
-                    <Td className="max-w-[22ch] truncate text-muted-foreground" title={s.endpoint_url ?? ""}>
-                      {s.http_method ?? "GET"} {s.endpoint_url ?? "—"}
-                    </Td>
-                    <Td className="text-muted-foreground">{s.auth_type ?? "none"}</Td>
-                    <Td>
+      <TableCard
+        title="All sources"
+        meta={sources.length > 0 ? `${sources.length} ${sources.length === 1 ? "source" : "sources"}` : undefined}
+        actions={sources.length > 0 ? newSourceButton : undefined}
+      >
+        {sources.length === 0 ? (
+          <EmptyState
+            variant="plain"
+            icon={Database}
+            title="No sources yet"
+            description="Add a pull endpoint and the Brain will ingest the records it returns."
+            action={newSourceButton}
+          />
+        ) : (
+          <Table minWidth={800} caption="Sources">
+            <THead>
+              <tr>
+                <Th>Name</Th>
+                <Th>Type</Th>
+                <Th>Endpoint</Th>
+                <Th>Auth</Th>
+                <Th>Status</Th>
+                <Th>Last sync</Th>
+                <Th className="text-right">
+                  <span className="sr-only">Actions</span>
+                </Th>
+              </tr>
+            </THead>
+            <TBody>
+              {sources.map((s) => (
+                <Tr key={s.id}>
+                  <Td>
+                    <Link href={`/dashboard/sources/${s.id}`} className={tableLink}>
+                      {s.name}
+                    </Link>
+                  </Td>
+                  <Td>
+                    <Badge tone="neutral">{sourceTypeLabel(s.source_type)}</Badge>
+                  </Td>
+                  <Td className="max-w-[22ch] truncate text-muted-foreground" title={s.endpoint_url ?? ""}>
+                    <span className="font-mono text-xs">{s.http_method ?? "GET"}</span> {s.endpoint_url ?? "—"}
+                  </Td>
+                  <Td className="whitespace-nowrap text-muted-foreground">{authLabel(s.auth_type)}</Td>
+                  <Td>
+                    <div className="flex flex-wrap items-center gap-1">
                       <StatusBadge status={s.last_status} />
-                    </Td>
-                    <Td className="text-muted-foreground">
-                      {s.last_run_at ? new Date(s.last_run_at).toLocaleString() : "Never"}
-                    </Td>
-                    <Td className="text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <Link
-                          href={`/dashboard/sources/${s.id}`}
-                          className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-surface-muted hover:text-foreground"
-                        >
-                          <Activity className="h-4 w-4" aria-hidden="true" />
-                          Health
-                        </Link>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => onSync(s)}
-                          disabled={syncingId === s.id}
-                          aria-label={`Sync ${s.name} now`}
-                        >
-                          {syncingId === s.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                          ) : (
-                            <RefreshCw className="h-4 w-4" aria-hidden="true" />
-                          )}
-                          {syncingId === s.id ? "Syncing…" : "Sync now"}
-                        </Button>
-                      </div>
-                    </Td>
-                  </Tr>
-                ))}
-              </TBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+                      {!s.is_active && <Badge tone="neutral">Paused</Badge>}
+                    </div>
+                  </Td>
+                  <Td className="whitespace-nowrap text-muted-foreground">
+                    <TimeAgo iso={s.last_run_at} />
+                  </Td>
+                  <Td className="py-1 text-right">
+                    <div className="flex items-center justify-end gap-2">
+                      <Link
+                        href={`/dashboard/sources/${s.id}`}
+                        aria-label={`${s.name} health`}
+                        className={buttonClass({ variant: "secondary", size: "toolbar" })}
+                      >
+                        <Activity size={14} aria-hidden />
+                        Health
+                      </Link>
+                      <Button
+                        variant="secondary"
+                        size="toolbar"
+                        onClick={() => onSync(s)}
+                        loading={syncingId === s.id}
+                        aria-label={`Sync ${s.name}`}
+                      >
+                        {syncingId !== s.id && <RefreshCw size={14} aria-hidden />}
+                        {syncingId === s.id ? "Syncing…" : "Sync"}
+                      </Button>
+                    </div>
+                  </Td>
+                </Tr>
+              ))}
+            </TBody>
+          </Table>
+        )}
+      </TableCard>
+
+      <Dialog
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        title="New source"
+        description="The Brain calls this GET or POST endpoint and ingests the records it returns."
+        size="lg"
+        closeOnBackdrop={false}
+        dismissible={!creating}
+        footer={
+          <>
+            <Button variant="secondary" size="toolbar" onClick={() => setCreateOpen(false)} disabled={creating}>
+              Cancel
+            </Button>
+            <Button type="submit" form="new-source-form" size="toolbar" loading={creating}>
+              {!creating && <Plus size={14} aria-hidden />}
+              {creating ? "Creating…" : "Create source"}
+            </Button>
+          </>
+        }
+      >
+        <form id="new-source-form" onSubmit={onCreate} className="space-y-4">
+          {formError && <Alert tone="danger">{formError}</Alert>}
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Field label="Name" required>
+              <Input
+                id="ds-name"
+                required
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Call scoring API"
+              />
+            </Field>
+
+            <Field label="Source type">
+              <Select
+                id="ds-type"
+                value={sourceType}
+                onChange={(e) => setSourceType(e.target.value)}
+                options={SOURCE_TYPES}
+              />
+            </Field>
+
+            <Field label="Endpoint URL" required className="sm:col-span-2">
+              <Input
+                id="ds-url"
+                type="url"
+                required
+                value={endpointUrl}
+                onChange={(e) => setEndpointUrl(e.target.value)}
+                placeholder="https://scoring.internal/api/records"
+              />
+            </Field>
+
+            <Field label="Method">
+              <Select
+                id="ds-method"
+                value={httpMethod}
+                onChange={(e) => setHttpMethod(e.target.value)}
+                options={HTTP_METHODS}
+              />
+            </Field>
+
+            <Field label="Auth type">
+              <Select
+                id="ds-auth"
+                value={authType}
+                onChange={(e) => setAuthType(e.target.value)}
+                options={AUTH_TYPES}
+              />
+            </Field>
+
+            {authType !== "none" && (
+              <Field
+                label="Auth secret reference"
+                className="sm:col-span-2"
+                hint={
+                  <>
+                    Enter the <strong className="font-medium text-foreground">name of a server environment variable</strong>{" "}
+                    that holds the secret, never the secret itself. The value is read server-side at sync time.
+                  </>
+                }
+              >
+                <Input
+                  id="ds-secret"
+                  value={authSecretRef}
+                  onChange={(e) => setAuthSecretRef(e.target.value)}
+                  placeholder="SCORING_API_TOKEN"
+                />
+              </Field>
+            )}
+
+            <Field
+              label="Records path"
+              hint="Dot path to the array in the response. Leave blank if the response is the array (or a single object)."
+            >
+              <Input
+                id="ds-records"
+                value={recordsPath}
+                onChange={(e) => setRecordsPath(e.target.value)}
+                placeholder="data.records"
+              />
+            </Field>
+
+            <Field label="Cursor field" hint="Field used as the incremental watermark (optional).">
+              <Input
+                id="ds-cursor"
+                value={cursorField}
+                onChange={(e) => setCursorField(e.target.value)}
+                placeholder="updated_at"
+              />
+            </Field>
+
+            <Field
+              label="Schedule (cron)"
+              className="sm:col-span-2"
+              hint="Optional. Stored for scheduled syncs; you can also sync manually from the list."
+            >
+              <Input
+                id="ds-cron"
+                value={scheduleCron}
+                onChange={(e) => setScheduleCron(e.target.value)}
+                placeholder="0 * * * *"
+              />
+            </Field>
+          </div>
+        </form>
+      </Dialog>
     </div>
   );
 }

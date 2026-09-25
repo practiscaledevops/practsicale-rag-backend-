@@ -1,5 +1,8 @@
 import { requireAdmin } from "@/lib/auth/admin";
 import { DocumentDetailClient } from "./DocumentDetailClient";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Document" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic"; // always reflect the current document + chunks

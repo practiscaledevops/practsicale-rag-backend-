@@ -1,27 +1,22 @@
 "use client";
 
 import * as React from "react";
+import { flushSync } from "react-dom";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import {
-  FileText,
-  Loader2,
-  Trash2,
-  Search,
-  MoreHorizontal,
-  Eye,
-  RefreshCw,
-  Layers,
-  Lock,
-} from "lucide-react";
-import { Button } from "@/components/ui/Button";
-import { Alert } from "@/components/ui/Alert";
-import { Badge } from "@/components/ui/Badge";
-import { Dialog } from "@/components/ui/Dialog";
+import { Eye, FileText, Folder, Layers, Loader2, Lock, Plus, RefreshCw, Trash2, Upload } from "lucide-react";
+import { Alert, Notice } from "@/components/ui/Alert";
+import { Badge, type BadgeTone } from "@/components/ui/Badge";
+import { Button, buttonClass } from "@/components/ui/Button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { Card, CardContent } from "@/components/ui/Card";
-import { Table, THead, TBody, Tr, Th, Td } from "@/components/ui/Table";
-import { cn } from "@/lib/utils";
+import { SearchInput } from "@/components/ui/Input";
+import { Menu, type MenuItem } from "@/components/ui/Menu";
+import { useHydrated } from "@/components/ui/RelTime";
+import { FilterTabs } from "@/components/ui/Tabs";
+import { Table, TableCard, TableEmptyRow, TBody, Td, Th, THead, Tr } from "@/components/ui/Table";
+import { fmtDate, fmtDateTime, fmtInt } from "@/lib/format";
+import { ACCESS_LABELS, sourceTypeLabel, statusTone } from "@/lib/ui-labels";
 
 /** One document row for the list; enriched with collection/category/access/etc. */
 export interface DocumentRow {
@@ -39,61 +34,78 @@ export interface DocumentRow {
   review_date: string | null;
 }
 
-const SOURCE_LABELS: Record<string, string> = {
-  document: "Document",
-  call_score: "Call score",
-  coaching: "Coaching",
-  transcript: "Transcript",
-};
-const sourceLabel = (v: string) => SOURCE_LABELS[v] ?? v;
-
 const SOURCE_FILTERS = ["all", "document", "call_score", "coaching", "transcript"] as const;
+type SourceFilter = (typeof SOURCE_FILTERS)[number];
 
-/** Freshness from the review date (if any) else the last-updated age. */
-function freshness(updatedAt: string, reviewDate: string | null): { label: string; tone: "success" | "warning" | "danger" } {
+/** Freshness from the review date (if any) else the last-updated age. Overdue and stale need attention (warning), not danger. */
+function freshness(updatedAt: string, reviewDate: string | null): { label: string; tone: BadgeTone } {
   if (reviewDate) {
     const r = new Date(reviewDate).getTime();
-    if (!Number.isNaN(r) && r < Date.now()) return { label: "Review due", tone: "danger" };
+    if (!Number.isNaN(r) && r < Date.now()) return { label: "Review due", tone: statusTone("needs_review") };
   }
   const days = Math.floor((Date.now() - new Date(updatedAt).getTime()) / 86_400_000);
-  if (Number.isNaN(days)) return { label: "—", tone: "warning" };
+  if (Number.isNaN(days)) return { label: "—", tone: "neutral" };
   if (days < 30) return { label: "Fresh", tone: "success" };
   if (days < 90) return { label: "Aging", tone: "warning" };
-  return { label: "Stale", tone: "danger" };
+  return { label: "Stale", tone: statusTone("stale") };
 }
 
-const ACCESS_LABEL: Record<string, string> = {
-  restricted: "Restricted",
-  confidential: "Confidential",
-  ceo_only: "CEO only",
-  team: "Team",
-  public: "Public",
-};
+/** Date text, with the exact local date and time in a tooltip that is set only after hydration. */
+function UpdatedDate({ iso }: { iso: string }) {
+  const hydrated = useHydrated();
+  return <span title={hydrated ? fmtDateTime(iso) : undefined}>{fmtDate(iso)}</span>;
+}
+
 function accessLabel(v: string | null, sourceType: string): string {
-  if (v) return ACCESS_LABEL[v.toLowerCase()] ?? v;
+  if (v) return ACCESS_LABELS[v.toLowerCase()] ?? v;
   return sourceType === "call_score" ? "Restricted" : "Team";
 }
 
-export function DocumentsClient({ documents }: { documents: DocumentRow[] }) {
+const docName = (d: DocumentRow) => d.title || "Untitled";
+
+export function DocumentsClient({
+  documents,
+  truncated = false,
+}: {
+  documents: DocumentRow[];
+  /** The server list hit its row cap, so older documents are not shown. */
+  truncated?: boolean;
+}) {
   const router = useRouter();
   const [target, setTarget] = React.useState<DocumentRow | null>(null);
   const [deleting, setDeleting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [notice, setNotice] = React.useState<string | null>(null);
   const [query, setQuery] = React.useState("");
-  const [filter, setFilter] = React.useState<(typeof SOURCE_FILTERS)[number]>("all");
+  const [filter, setFilter] = React.useState<SourceFilter>("all");
   const [reprocessing, setReprocessing] = React.useState<string | null>(null);
-  const [menuFor, setMenuFor] = React.useState<string | null>(null);
+  const searchRef = React.useRef<HTMLInputElement>(null);
 
-  const filtered = React.useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return documents.filter((d) => {
-      if (filter !== "all" && d.source_type !== filter) return false;
-      if (!q) return true;
-      return `${d.title ?? ""} ${d.collection ?? ""} ${d.category ?? ""} ${d.owner ?? ""}`
-        .toLowerCase()
-        .includes(q);
-    });
-  }, [documents, query, filter]);
+  // Typing stays responsive on a 1,000-row list: filtering follows a deferred copy.
+  const deferredQuery = React.useDeferredValue(query);
+
+  const searched = React.useMemo(() => {
+    const q = deferredQuery.trim().toLowerCase();
+    if (!q) return documents;
+    return documents.filter((d) =>
+      `${d.title ?? ""} ${d.collection ?? ""} ${d.category ?? ""} ${d.owner ?? ""}`.toLowerCase().includes(q)
+    );
+  }, [documents, deferredQuery]);
+
+  const filtered = React.useMemo(
+    () => (filter === "all" ? searched : searched.filter((d) => d.source_type === filter)),
+    [searched, filter]
+  );
+
+  const filterTabs = React.useMemo(
+    () =>
+      SOURCE_FILTERS.map((f) => ({
+        id: f,
+        label: f === "all" ? "All" : sourceTypeLabel(f),
+        count: f === "all" ? searched.length : searched.filter((d) => d.source_type === f).length,
+      })),
+    [searched]
+  );
 
   async function confirmDelete() {
     if (!target) return;
@@ -108,7 +120,10 @@ export function DocumentsClient({ documents }: { documents: DocumentRow[] }) {
         setError(json.error ?? `Delete failed (${res.status})`);
         return;
       }
-      setTarget(null);
+      // Close now so the dialog hands focus back to the row's trigger, then move
+      // focus off the row that the refresh is about to remove.
+      flushSync(() => setTarget(null));
+      searchRef.current?.focus();
       router.refresh();
     } catch {
       setError("Network error — please try again.");
@@ -118,9 +133,9 @@ export function DocumentsClient({ documents }: { documents: DocumentRow[] }) {
   }
 
   async function reprocess(id: string) {
-    setMenuFor(null);
     setReprocessing(id);
     setError(null);
+    setNotice(null);
     try {
       const res = await fetch(`/api/admin/documents/${encodeURIComponent(id)}/reingest`, {
         method: "POST",
@@ -130,6 +145,8 @@ export function DocumentsClient({ documents }: { documents: DocumentRow[] }) {
         setError(json.error ?? `Reprocess failed (${res.status})`);
         return;
       }
+      const doc = documents.find((d) => d.id === id);
+      setNotice(`Reprocessed “${doc ? docName(doc) : "document"}”.`);
       router.refresh();
     } catch {
       setError("Network error — please try again.");
@@ -143,243 +160,214 @@ export function DocumentsClient({ documents }: { documents: DocumentRow[] }) {
       <EmptyState
         icon={FileText}
         title="No documents yet"
-        description="Upload a file or sync a data source to populate the knowledge base."
+        description="Add knowledge or bulk-upload files, or sync a data source, to populate the Brain."
+        action={
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <Link href="/dashboard/knowledge/add" className={buttonClass({ variant: "primary", size: "toolbar" })}>
+              <Plus size={14} aria-hidden />
+              Add knowledge
+            </Link>
+            <Link href="/dashboard/uploads" className={buttonClass({ variant: "secondary", size: "toolbar" })}>
+              <Upload size={14} aria-hidden />
+              Bulk upload
+            </Link>
+          </div>
+        }
       />
     );
   }
 
+  const menuItems = (d: DocumentRow): MenuItem[] => [
+    { label: "Open", icon: Eye, href: `/dashboard/documents/${d.id}` },
+    { label: "View chunks", icon: Layers, href: `/dashboard/documents/${d.id}#chunks` },
+    {
+      label: "Reprocess",
+      icon: RefreshCw,
+      disabled: reprocessing === d.id,
+      onSelect: () => reprocess(d.id),
+    },
+    {
+      label: "Delete permanently",
+      icon: Trash2,
+      danger: true,
+      separatorBefore: true,
+      onSelect: () => {
+        setError(null);
+        setTarget(d);
+      },
+    },
+  ];
+
+  const filtersActive = query.trim() !== "" || filter !== "all";
+
   return (
     <>
-      {error && (
-        <div className="mb-4">
-          <Alert tone="danger">{error}</Alert>
-        </div>
+      {/* A failed delete shows inside its dialog; everything else shows here. */}
+      {error && !target && (
+        <Alert tone="danger" className="mb-3" onDismiss={() => setError(null)}>
+          {error}
+        </Alert>
       )}
+      {notice && <Notice className="mb-3" message={notice} onDone={() => setNotice(null)} />}
 
       {/* Toolbar: search + type filter */}
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-lg border border-border bg-surface px-3">
-          <Search className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search by title, collection, category, owner…"
-            className="w-full bg-transparent py-2 text-sm outline-none placeholder:text-muted-foreground"
-          />
-        </div>
-        <div className="flex flex-wrap items-center gap-1">
-          {SOURCE_FILTERS.map((f) => (
-            <button
-              key={f}
-              type="button"
-              onClick={() => setFilter(f)}
-              className={cn(
-                "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
-                filter === f
-                  ? "border-accent bg-accent/10 text-accent"
-                  : "border-border text-muted-foreground hover:bg-surface-muted"
-              )}
-            >
-              {f === "all" ? "All" : sourceLabel(f)}
-            </button>
-          ))}
-        </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <SearchInput
+          ref={searchRef}
+          aria-label="Search documents"
+          placeholder="Search by title, collection, category, owner…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          wrapperClassName="w-full sm:w-80"
+        />
+        <FilterTabs label="Filter by type" value={filter} tabs={filterTabs} onChange={setFilter} />
       </div>
 
-      <Card>
-        <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <Table>
-              <THead>
-                <Tr>
-                  <Th>Title</Th>
-                  <Th>Collection</Th>
-                  <Th>Category</Th>
-                  <Th>Type</Th>
-                  <Th>Access</Th>
-                  <Th>Status</Th>
-                  <Th className="text-right">Chunks</Th>
-                  <Th>Freshness</Th>
-                  <Th>Updated</Th>
-                  <Th className="text-right">Actions</Th>
-                </Tr>
-              </THead>
-              <TBody>
-                {filtered.map((d) => {
-                  const fresh = freshness(d.updated_at, d.review_date);
-                  const indexed = d.chunk_count > 0;
-                  return (
-                    <Tr key={d.id}>
-                      <Td className="font-medium">
-                        <Link href={`/dashboard/documents/${d.id}`} className="text-accent hover:underline">
-                          {d.title || <span className="italic text-muted-foreground">Untitled</span>}
-                        </Link>
-                      </Td>
-                      <Td className="text-muted-foreground">{d.collection || "—"}</Td>
-                      <Td className="text-muted-foreground">{d.category || "—"}</Td>
-                      <Td>
-                        <Badge tone="accent">{sourceLabel(d.source_type)}</Badge>
-                      </Td>
-                      <Td>
-                        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                          {(d.source_type === "call_score" || (d.access ?? "").toLowerCase().includes("restrict")) && (
-                            <Lock className="h-3 w-3" aria-hidden />
+      <TableCard
+        className="mt-3"
+        footer={
+          <span>
+            {fmtInt(filtered.length)} of {fmtInt(documents.length)} documents
+            {truncated &&
+              ` · Showing the first ${fmtInt(documents.length)} — use search or filters to narrow the list.`}
+          </span>
+        }
+      >
+        <Table minWidth={960} caption="Documents">
+          <THead>
+            <Tr>
+              <Th>Title</Th>
+              <Th>Type</Th>
+              <Th>Access</Th>
+              <Th>Status</Th>
+              <Th numeric>Chunks</Th>
+              <Th>Freshness</Th>
+              <Th>Updated</Th>
+              <Th className="w-12">
+                <span className="sr-only">Actions</span>
+              </Th>
+            </Tr>
+          </THead>
+          <TBody>
+            {filtered.map((d) => {
+              const fresh = freshness(d.updated_at, d.review_date);
+              const indexed = d.chunk_count > 0;
+              const restricted =
+                d.source_type === "call_score" || (d.access ?? "").toLowerCase().includes("restrict");
+              return (
+                <Tr key={d.id} interactive>
+                  <Td>
+                    <div className="max-w-[26rem]">
+                      <Link
+                        href={`/dashboard/documents/${d.id}`}
+                        title={docName(d)}
+                        className="block truncate font-medium text-foreground hover:text-accent-strong hover:underline"
+                      >
+                        {d.title || <span className="italic text-muted-foreground">Untitled</span>}
+                      </Link>
+                      {(d.category || d.collection) && (
+                        <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                          {d.category && (
+                            <span className="truncate">
+                              <span className="sr-only">Category: </span>
+                              {d.category}
+                            </span>
                           )}
-                          {accessLabel(d.access, d.source_type)}
-                        </span>
-                      </Td>
-                      <Td>
-                        <Badge tone={indexed ? "success" : "warning"}>
-                          {indexed ? "Indexed" : "Pending"}
-                        </Badge>
-                      </Td>
-                      <Td className="text-right tabular-nums">{d.chunk_count.toLocaleString()}</Td>
-                      <Td>
-                        <Badge tone={fresh.tone}>{fresh.label}</Badge>
-                      </Td>
-                      <Td className="whitespace-nowrap text-muted-foreground">
-                        {new Date(d.updated_at).toLocaleDateString()}
-                      </Td>
-                      <Td className="text-right">
-                        <RowMenu
-                          open={menuFor === d.id}
-                          onToggle={() => setMenuFor((m) => (m === d.id ? null : d.id))}
-                          onClose={() => setMenuFor(null)}
-                          docId={d.id}
-                          reprocessing={reprocessing === d.id}
-                          onReprocess={() => reprocess(d.id)}
-                          onDelete={() => {
-                            setMenuFor(null);
-                            setError(null);
-                            setTarget(d);
-                          }}
-                        />
-                      </Td>
-                    </Tr>
-                  );
-                })}
-                {filtered.length === 0 && (
-                  <Tr>
-                    <Td className="py-8 text-center text-muted-foreground" colSpan={10}>
-                      No documents match your filters.
-                    </Td>
-                  </Tr>
-                )}
-              </TBody>
-            </Table>
-          </div>
-        </CardContent>
-      </Card>
+                          {d.category && d.collection && <span aria-hidden>·</span>}
+                          {d.collection && (
+                            <span className="inline-flex min-w-0 items-center gap-1">
+                              <Folder size={12} aria-hidden className="shrink-0" />
+                              <span className="sr-only">Collection: </span>
+                              <span className="truncate">{d.collection}</span>
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </Td>
+                  <Td>
+                    <Badge tone="neutral">{sourceTypeLabel(d.source_type)}</Badge>
+                  </Td>
+                  <Td>
+                    <span className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-muted-foreground">
+                      {restricted && <Lock size={12} aria-hidden />}
+                      {accessLabel(d.access, d.source_type)}
+                    </span>
+                  </Td>
+                  <Td>
+                    <Badge tone={statusTone(indexed ? "indexed" : "pending")}>
+                      {indexed ? "Indexed" : "Pending"}
+                    </Badge>
+                  </Td>
+                  <Td numeric>{fmtInt(d.chunk_count)}</Td>
+                  <Td>
+                    {fresh.tone === "warning" ? (
+                      <Badge tone={fresh.tone}>{fresh.label}</Badge>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">{fresh.label}</span>
+                    )}
+                  </Td>
+                  <Td className="whitespace-nowrap text-muted-foreground">
+                    <UpdatedDate iso={d.updated_at} />
+                  </Td>
+                  <Td className="text-right">
+                    <Menu
+                      label={`Actions for ${docName(d)}`}
+                      items={menuItems(d)}
+                      trigger={
+                        reprocessing === d.id ? (
+                          <Loader2 size={16} aria-hidden className="animate-spin" />
+                        ) : undefined
+                      }
+                    />
+                  </Td>
+                </Tr>
+              );
+            })}
+            {filtered.length === 0 && (
+              <TableEmptyRow colSpan={8}>
+                <span className="inline-flex flex-wrap items-center justify-center gap-2">
+                  No documents match your search or filter.
+                  {filtersActive && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setQuery("");
+                        setFilter("all");
+                        searchRef.current?.focus();
+                      }}
+                    >
+                      Clear filters
+                    </Button>
+                  )}
+                </span>
+              </TableEmptyRow>
+            )}
+          </TBody>
+        </Table>
+      </TableCard>
 
-      <p className="mt-3 text-xs text-muted-foreground">
-        {filtered.length.toLocaleString()} of {documents.length.toLocaleString()} documents
-      </p>
-
-      <Dialog
+      <ConfirmDialog
         open={target !== null}
-        onClose={() => (deleting ? undefined : setTarget(null))}
+        tone="danger"
         title="Delete document?"
         description={
           target
-            ? `“${target.title || "Untitled"}” will be permanently removed, taking ${target.chunk_count} chunk${
+            ? `“${docName(target)}” will be permanently removed, taking ${target.chunk_count} chunk${
                 target.chunk_count === 1 ? "" : "s"
               } out of retrieval. This cannot be undone.`
             : undefined
         }
-        footer={
-          <>
-            <Button variant="outline" onClick={() => setTarget(null)} disabled={deleting}>
-              Cancel
-            </Button>
-            <Button variant="danger" onClick={confirmDelete} disabled={deleting}>
-              {deleting ? (
-                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <Trash2 className="h-4 w-4" aria-hidden="true" />
-              )}
-              {deleting ? "Deleting…" : "Delete"}
-            </Button>
-          </>
-        }
+        confirmLabel="Delete"
+        busy={deleting}
+        error={target ? error : null}
+        onConfirm={confirmDelete}
+        onCancel={() => {
+          if (!deleting) setTarget(null);
+        }}
+        returnFocus={() => searchRef.current}
       />
     </>
-  );
-}
-
-/** Three-dot row action menu (replaces the bare red Delete). */
-function RowMenu({
-  open,
-  onToggle,
-  onClose,
-  docId,
-  reprocessing,
-  onReprocess,
-  onDelete,
-}: {
-  open: boolean;
-  onToggle: () => void;
-  onClose: () => void;
-  docId: string;
-  reprocessing: boolean;
-  onReprocess: () => void;
-  onDelete: () => void;
-}) {
-  const ref = React.useRef<HTMLDivElement>(null);
-  React.useEffect(() => {
-    if (!open) return;
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    }
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [open, onClose]);
-
-  return (
-    <div className="relative inline-flex" ref={ref}>
-      <Button variant="ghost" size="sm" onClick={onToggle} aria-label="Document actions" aria-haspopup="menu" aria-expanded={open}>
-        {reprocessing ? <Loader2 className="h-4 w-4 animate-spin" /> : <MoreHorizontal className="h-4 w-4" />}
-      </Button>
-      {open && (
-        <div
-          role="menu"
-          className="absolute right-0 top-full z-30 mt-1 w-52 rounded-xl border border-border bg-surface p-1 text-left shadow-lg"
-        >
-          <MenuItem icon={Eye} label="View details" href={`/dashboard/documents/${docId}`} />
-          <MenuItem icon={Layers} label="View chunks" href={`/dashboard/documents/${docId}`} />
-          <button
-            type="button"
-            role="menuitem"
-            onClick={onReprocess}
-            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm text-foreground transition-colors hover:bg-surface-muted"
-          >
-            <RefreshCw className="h-4 w-4 text-muted-foreground" aria-hidden />
-            Reprocess
-          </button>
-          <div className="my-1 border-t border-border" />
-          <button
-            type="button"
-            role="menuitem"
-            onClick={onDelete}
-            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm text-danger transition-colors hover:bg-danger/10"
-          >
-            <Trash2 className="h-4 w-4" aria-hidden />
-            Delete permanently
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function MenuItem({ icon: Icon, label, href }: { icon: typeof Eye; label: string; href: string }) {
-  return (
-    <Link
-      href={href}
-      role="menuitem"
-      className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm text-foreground transition-colors hover:bg-surface-muted"
-    >
-      <Icon className="h-4 w-4 text-muted-foreground" aria-hidden />
-      {label}
-    </Link>
   );
 }

@@ -13,5 +13,9 @@ export default async function DashboardLayout({
   const admin = await getAdmin();
   if (!admin) redirect("/login");
 
-  return <AppShell email={admin.email}>{children}</AppShell>;
+  return (
+    <AppShell email={admin.email} role={admin.role}>
+      {children}
+    </AppShell>
+  );
 }

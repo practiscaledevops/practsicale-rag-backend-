@@ -1,7 +1,10 @@
 import { requireAdmin } from "@/lib/auth/admin";
 import { getDataQuality } from "@/lib/data-quality";
-import { PageHeader } from "@/components/ui/PageHeader";
+import { PageHeader } from "@/components/ui";
 import { DataQualityClient } from "./DataQualityClient";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Data quality" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,10 +20,7 @@ export default async function DataQualityPage() {
 
   return (
     <div>
-      <PageHeader
-        title="Data quality"
-        description="Freshness, ownership, and processing health across the knowledge base — with the fixes one click away."
-      />
+      <PageHeader title="Data quality" description="Documents and collections that need attention." />
       <DataQualityClient data={data} />
     </div>
   );

@@ -3,81 +3,230 @@
 @tailwind utilities;
 
 /*
- * Practiscale design system.
+ * PractiScale Brain back office — the chatbot's design system, shared verbatim.
  *
- * Brand: the Practiscale mark is a teal-emerald -> deep-slate gradient. The UI is
- * a soft, enterprise, light-first surface with a teal-green accent and a dark
- * sidebar. Colors are space-separated RGB channels so Tailwind's
- * `rgb(var(--x) / <alpha-value>)` opacity modifiers work. Light is the default;
- * the dark block swaps automatically via prefers-color-scheme.
+ * The :root (light) and .dark token blocks below are copied value-for-value
+ * from the sister chatbot app (practiscale-rag-chatbot/src/app/globals.css), so
+ * both apps render the same colours: a constant dark navigation rail, a clean
+ * WHITE workspace, Inter throughout, pill buttons and generous radii.
  *
- * The SIDEBAR tokens are intentionally dark in BOTH themes — the sidebar is a
- * constant dark rail with the white logo, matching the brand.
+ * Colors are space-separated RGB channels so Tailwind's
+ * `rgb(var(--x) / <alpha-value>)` opacity modifiers work. Light is the
+ * default; the `.dark` class on <html> (the rail's More menu, the command
+ * palette, or "System") swaps every token below for the dark palette.
+ * Components never use dark-mode variants — keep new colours as tokens here.
  */
 :root {
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: light;
 
-  /* Deep GREEN-BLACK control-center palette (default; the Brain is dark-green
-     everywhere, not just the collections workspace). */
-  color-scheme: dark;
-  --background: 6 16 13;          /* #06100D canvas */
-  --foreground: 237 247 242;      /* #EDF7F2 near-white */
-  --surface: 13 30 24;            /* #0D1E18 cards / panels */
-  --surface-muted: 18 43 35;      /* #122B23 raised / subtle fill */
-  --border: 32 68 56;             /* #204438 */
-  --muted: 18 43 35;
-  --muted-foreground: 145 170 160; /* #91AAA0 secondary */
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 
-  /* brand accent — PractiScale green */
-  --accent: 0 191 174;            /* #00BFAE */
-  --accent-foreground: 6 16 13;   /* dark text on the bright green */
-  --accent-hover: 45 220 205;
-  --ring: 0 191 174;
+  /* ---- Workspace (white) ---- */
+  --background: 255 255 255;        /* #FFFFFF — the main panel */
+  --foreground: 17 19 21;           /* #111315 — primary text */
+  --surface: 255 255 255;           /* cards / bubbles / menus */
+  --surface-muted: 245 246 246;     /* #F5F6F6 — composer pill, subtle fills, hover */
+  --surface-sunken: 239 241 240;    /* #EFF1F0 — pressed / tracks */
+  --border: 234 236 236;            /* #EAECEC — hairlines */
+  --muted: 245 246 246;
+  --muted-foreground: 105 110 112;  /* #696E70 — secondary text (AA on surface-muted and the /10 tints) */
+  --subtle-foreground: 170 174 175; /* #AAAEAF kit Light Gray — placeholders, meta */
 
-  --success: 45 214 160;
-  --warning: 243 182 97;          /* #F3B661 attention */
-  --danger: 255 123 117;          /* #FF7B75 failures */
+  /* ---- PractiScale green (replaces the kit's Vivid Violet #9747FF) ---- */
+  --accent: 16 163 136;             /* #10A388 — icons, active states, fills */
+  --accent-strong: 10 124 106;      /* #0A7C6A — accent TEXT on white (AA) */
+  --accent-deep: 7 94 76;           /* #075E4C — dark brand green (wordmark) */
+  --accent-hover: 12 140 117;       /* #0C8C75 */
+  --accent-foreground: 255 255 255;
+  --accent-soft: 230 247 241;       /* #E6F7F1 — replaces lavender tints (user bubble) */
+  --accent-softer: 243 251 248;     /* #F3FBF8 — faint wash (composer footer) */
+  --ring: 23 195 165;               /* #17C3A5 */
 
-  /* dark green sidebar rail */
-  --sidebar: 9 25 20;             /* #091914 */
-  --sidebar-foreground: 237 247 242;
-  --sidebar-muted: 145 170 160;
-  --sidebar-border: 32 68 56;
+  /* ---- Tea green (kept from the kit): primary pills + send ---- */
+  --tea: 221 253 197;               /* #DDFDC5 */
+  --tea-hover: 205 248 172;
+  --tea-foreground: 24 44 16;       /* deep green ink on tea */
 
-  /* brand gradient stops (green) */
-  --brand-1: 0 191 174;
-  --brand-2: 20 184 166;
-  --brand-3: 18 43 35;
+  /* ---- Semantic ---- */
+  --success: 21 128 61;             /* green-700 — fills, dots, icons (text on its /10 tint: use --success-ink) */
+  --warning: 161 98 7;              /* amber-700 — fills, dots, icons (text on its /10 tint: use --warning-ink) */
+  --danger: 220 38 38;
+  /* Solid danger FILL under white text (danger buttons): AA in both themes. */
+  --danger-solid: 220 38 38;        /* #DC2626 — 4.83:1 with white */
+  --danger-solid-hover: 185 28 28;  /* #B91C1C — darkens, never lightens */
+  --info: 37 99 235;
+  /* Status TEXT on its own /10 tint (chips, banners): darker ink for AA in light. */
+  --success-ink: 22 101 52;         /* #166534 — 6.23:1 on success/10 */
+  --warning-ink: 133 77 14;         /* #854D0E — 6.01:1 on warning/10 */
+  --danger-ink: 185 28 28;          /* #B91C1C — 5.54:1 on danger/10 */
+  --info-ink: 29 78 216;            /* #1D4ED8 — 5.83:1 on info/10 */
+  --private: 4 120 87;              /* CEO / private — deep emerald */
 
-  /* elevation that stays visible on the dark green canvas */
-  --shadow-soft: 0 1px 2px rgb(0 0 0 / 0.4), 0 4px 16px rgb(0 0 0 / 0.5);
-  --shadow-soft-lg: 0 8px 24px rgb(0 0 0 / 0.55), 0 18px 50px -10px rgb(0 0 0 / 0.7);
+  /* ---- Elevation (soft, green-tinted) ---- */
+  --shadow-soft: 0 1px 2px rgb(17 19 21 / 0.04), 0 4px 16px rgb(17 19 21 / 0.05);
+  --shadow-soft-lg: 0 2px 8px rgb(17 19 21 / 0.06), 0 16px 40px rgb(17 19 21 / 0.10);
+  --shadow-float: 0 1px 2px rgb(10 90 75 / 0.04), 0 10px 34px -6px rgb(10 90 75 / 0.12);
+
+  /* ---- Dark navigation rail (constant) ---- */
+  --sidebar: 22 22 22;              /* #161616 — rail */
+  --sidebar-panel: 30 30 30;        /* #1E1E1E — the rounded panel */
+  --sidebar-item: 39 39 39;         /* #272727 — row pills */
+  --sidebar-item-hover: 49 49 49;   /* #313131 */
+  --sidebar-foreground: 236 236 236;
+  --sidebar-muted: 150 150 150;
+  --sidebar-border: 48 48 48;
+
+  /* ---- Folder accent bars (kit colors; violet swapped for green) ---- */
+  --folder-1: 125 227 244;          /* cyan */
+  --folder-2: 242 240 168;          /* soft yellow */
+  --folder-3: 245 163 217;          /* pink */
+  --folder-4: 221 253 197;          /* tea */
+  --folder-5: 23 195 165;           /* PractiScale green */
+
+  /* ---- Answer tables ---- */
+  --table-grid: 220 232 227;        /* #DCE8E3 — light green-gray cell grid */
+  --table-stripe: 250 252 251;      /* #FAFCFB — zebra rows (very light) */
+
+  /* ---- Answer-chart series (ChartBlock): greens first, then kit accents ---- */
+  --chart-1: 16 163 136;            /* #10A388 — PractiScale green */
+  --chart-2: 12 104 112;            /* #0C6870 — deep teal */
+  --chart-3: 125 217 176;           /* #7DD9B0 — mint */
+  --chart-4: 245 158 11;            /* #F59E0B — amber */
+  --chart-5: 92 207 230;            /* #5CCFE6 — cyan */
+  --chart-6: 232 121 185;           /* #E879B9 — pink */
+  --chart-7: 163 201 79;            /* #A3C94F — lime */
+  --chart-8: 239 68 68;             /* #EF4444 — red */
+
+  /* ---- Brand gradient (logo: teal-blue -> emerald) ---- */
+  --brand-1: 23 195 165;            /* #17C3A5 */
+  --brand-2: 14 158 139;            /* #0E9E8B */
+  --brand-3: 12 104 112;            /* #0C6870 */
+
+  /* ---- Ink: the near-black chips/buttons (inverts in dark) ---- */
+  --ink: 38 38 38;                  /* #262626 */
+  --ink-hover: 26 26 26;
+  --ink-foreground: 255 255 255;
+
+  /* Height of the installed app's title strip (0 in a browser tab). */
+  --titlebar-h: env(titlebar-area-height, 0px);
 }
 
-/* The Brain is dark-green regardless of system preference — mirror the palette. */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: 6 16 13;
-    --foreground: 237 247 242;
-    --surface: 13 30 24;
-    --surface-muted: 18 43 35;
-    --border: 32 68 56;
-    --muted: 18 43 35;
-    --muted-foreground: 145 170 160;
+/*
+ * Dark theme — a neutral, Claude-like charcoal (#1A1A19 workspace) with the
+ * same PractiScale greens lifted for contrast on dark. Text accents use
+ * accent-strong (AA on the dark surfaces); fills/icons use accent.
+ */
+.dark {
+  color-scheme: dark;
 
-    --accent: 0 191 174;
-    --accent-foreground: 6 16 13;
-    --accent-hover: 45 220 205;
-    --ring: 0 191 174;
+  --background: 26 26 25;           /* #1A1A19 — the main panel */
+  --foreground: 236 236 232;        /* #ECECE8 */
+  --surface: 34 34 33;              /* #222221 — cards / menus / composer */
+  --surface-muted: 42 42 40;        /* #2A2A28 — subtle fills, hover */
+  --surface-sunken: 22 22 21;       /* #161615 — pressed / tracks */
+  --border: 56 56 53;               /* #383835 */
+  --muted: 42 42 40;
+  --muted-foreground: 168 168 163;  /* #A8A8A3 */
+  --subtle-foreground: 122 122 117; /* #7A7A75 */
 
-    --success: 45 214 160;
-    --warning: 243 182 97;
-    --danger: 255 123 117;
-  }
+  --accent: 28 184 154;             /* #1CB89A */
+  --accent-strong: 94 219 190;      /* #5EDBBE — accent TEXT on dark (AA) */
+  --accent-deep: 110 224 196;       /* #6EE0C4 — wordmark on dark */
+  --accent-hover: 38 202 170;
+  --accent-foreground: 5 28 23;     /* dark ink on the bright green */
+  --accent-soft: 24 52 45;          /* #18342D — user bubble, selected rows */
+  --accent-softer: 28 37 34;        /* #1C2522 */
+  --ring: 45 212 180;
+
+  --tea: 200 240 170;               /* #C8F0AA — slightly softened on dark */
+  --tea-hover: 216 248 190;
+  --tea-foreground: 22 40 14;
+
+  --success: 74 222 128;
+  --warning: 251 191 36;
+  --danger: 248 113 113;
+  /* The lifted --danger is for text/tints; white-on-fill keeps a deep red. */
+  --danger-solid: 185 28 28;        /* #B91C1C — 6.47:1 with white */
+  --danger-solid-hover: 153 27 27;  /* #991B1B */
+  --info: 96 165 250;
+  /* Dark already passes AA as text on the tints: the ink equals the base colour. */
+  --success-ink: 74 222 128;
+  --warning-ink: 251 191 36;
+  --danger-ink: 248 113 113;
+  --info-ink: 96 165 250;
+  --private: 52 211 153;
+
+  --shadow-soft: 0 1px 2px rgb(0 0 0 / 0.35), 0 4px 16px rgb(0 0 0 / 0.25);
+  --shadow-soft-lg: 0 2px 8px rgb(0 0 0 / 0.4), 0 16px 40px rgb(0 0 0 / 0.45);
+  --shadow-float: 0 1px 2px rgb(0 0 0 / 0.35), 0 10px 34px -6px rgb(0 0 0 / 0.5);
+
+  /* The rail sits a step darker than the workspace. */
+  --sidebar: 20 20 19;              /* #141413 */
+  --sidebar-panel: 30 30 29;
+  --sidebar-item: 40 40 38;
+  --sidebar-item-hover: 50 50 48;
+  --sidebar-foreground: 236 236 232;
+  --sidebar-muted: 150 150 146;
+  --sidebar-border: 44 44 42;
+
+  --table-grid: 58 66 62;           /* #3A423E */
+
+  /* Answer-chart series: the deep ones lifted to stay ≥ 3:1 on the dark card. */
+  --chart-1: 28 184 154;            /* #1CB89A — the dark accent */
+  --chart-2: 47 163 173;            /* #2FA3AD — ~5.3:1 on #222221 */
+  --table-stripe: 31 31 30;
+
+  --ink: 236 236 232;
+  --ink-hover: 255 255 255;
+  --ink-foreground: 26 26 25;
 }
 
 * {
   border-color: rgb(var(--border));
+}
+
+/*
+ * Installed desktop app (PWA "window controls overlay"): the OS draws its
+ * window buttons over the top of the page, so the app keeps that strip as its
+ * own full-width, draggable title bar (<TitleBar/>) and every page starts
+ * below it. In a normal browser tab --titlebar-h is 0 and nothing changes.
+ */
+body {
+  padding-top: var(--titlebar-h);
+}
+.h-app {
+  height: calc(100dvh - var(--titlebar-h));
+}
+.min-h-app {
+  min-height: calc(100dvh - var(--titlebar-h));
+}
+.app-titlebar {
+  display: none;
+}
+@media (display-mode: window-controls-overlay) {
+  .app-titlebar {
+    display: block;
+    position: fixed;
+    inset: 0 0 auto 0;
+    height: var(--titlebar-h);
+    z-index: 60;
+    background: rgb(var(--sidebar));
+    border-bottom: 1px solid rgb(var(--sidebar-border));
+    -webkit-app-region: drag;
+    app-region: drag;
+    user-select: none;
+  }
+  .app-titlebar-inner {
+    position: absolute;
+    top: 0;
+    left: env(titlebar-area-x, 0px);
+    width: env(titlebar-area-width, 100%);
+    height: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+  }
 }
 
 html,
@@ -89,6 +238,7 @@ body {
   background-color: rgb(var(--background));
   color: rgb(var(--foreground));
   font-family: var(--font-sans);
+  font-feature-settings: "cv11", "ss01";
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -97,25 +247,73 @@ body {
   background-color: rgb(var(--accent) / 0.18);
 }
 
-/* Consistent focus ring for keyboard users across custom controls. */
-:focus-visible {
-  outline: 2px solid rgb(var(--ring));
-  outline-offset: 2px;
+/* Consistent focus ring for keyboard users across custom controls. In the base
+   layer so a component's own `outline-none` / ring utilities take precedence. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid rgb(var(--ring));
+    outline-offset: 2px;
+  }
+}
+
+/* ---- Assistant answers (Markdown) ---------------------------------------- */
+
+@layer components {
+  /* Block rhythm for rendered Markdown. Font family, size and line-height are
+     inherited from the answer container (font-serif / font-sans, text-[15px]
+     leading-[1.7]); every gap is in em so it scales with that size. In the
+     components layer, so a utility on a block can still override it. */
+  .md-flow {
+    overflow-wrap: break-word;
+  }
+  .md-flow > * + * {
+    margin-top: 0.75em;
+  }
+  /* Headings: comfortable space above, tight below (in the heading's own em). */
+  .md-flow > * + :is(h1, h2, h3, h4, h5, h6) {
+    margin-top: 1.35em;
+  }
+  .md-flow > :is(h1, h2, h3, h4, h5, h6) + * {
+    margin-top: 0.4em;
+  }
+  .md-flow > :is(h1, h2, h3, h4, h5, h6) + :is(h1, h2, h3, h4, h5, h6) {
+    margin-top: 0.55em;
+  }
+  .md-flow > * + hr,
+  .md-flow > hr + * {
+    margin-top: 1.25em;
+  }
+}
+
+@layer utilities {
+  /* Inter's cv11 / ss01 tags (set on body) would pick unrelated alternates in
+     the serif; tables and chrome inside a serif answer switch back via font-sans. */
+  .font-serif {
+    font-feature-settings: normal;
+  }
+  .font-sans {
+    font-feature-settings: "cv11", "ss01";
+  }
+  /* Dialog / drawer backdrop: the chatbot's bg-[#111315]/30 + backdrop-blur-[3px]
+     as one class, so TSX never needs the hex. */
+  .scrim {
+    background-color: rgb(17 19 21 / 0.3);
+    -webkit-backdrop-filter: blur(3px);
+    backdrop-filter: blur(3px);
+  }
 }
 
 /* ---- Brand utilities ------------------------------------------------------ */
 
-/* Deep green -> teal -> slate gradient for hero panels, primary CTAs, marks. */
 .bg-brand-gradient {
   background-image: linear-gradient(
     135deg,
     rgb(var(--brand-1)) 0%,
-    rgb(var(--brand-2)) 45%,
+    rgb(var(--brand-2)) 50%,
     rgb(var(--brand-3)) 100%
   );
 }
 
-/* Gradient text (headlines, logotype accents). */
 .text-brand-gradient {
   background-image: linear-gradient(135deg, rgb(var(--brand-1)), rgb(var(--brand-2)));
   -webkit-background-clip: text;
@@ -123,26 +321,58 @@ body {
   color: transparent;
 }
 
-/* Soft ambient sidebar glow behind the brand mark. */
-.sidebar-glow {
-  background: radial-gradient(120% 60% at 0% 0%, rgb(var(--brand-2) / 0.14), transparent 70%);
+/* Typing indicator dots. */
+@keyframes dot-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}
+.typing-dot {
+  animation: dot-bounce 1.2s ease-in-out infinite;
 }
 
-/* Refined thin scrollbars that match the theme. */
+@media (prefers-reduced-motion: reduce) {
+  .typing-dot {
+    animation: none !important;
+  }
+}
+
+/* Truncated row labels fade out instead of an ellipsis (sidebar chat rows). */
+.fade-truncate {
+  -webkit-mask-image: linear-gradient(90deg, #000 78%, transparent);
+  mask-image: linear-gradient(90deg, #000 78%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* Refined thin scrollbars. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgb(var(--muted-foreground) / 0.4) transparent;
+  scrollbar-color: rgb(var(--muted-foreground) / 0.3) transparent;
 }
 *::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 *::-webkit-scrollbar-thumb {
-  background-color: rgb(var(--muted-foreground) / 0.35);
+  background-color: rgb(var(--muted-foreground) / 0.28);
   border-radius: 9999px;
   border: 3px solid transparent;
   background-clip: content-box;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background-color: rgb(var(--muted-foreground) / 0.55);
+  background-color: rgb(var(--muted-foreground) / 0.5);
+}
+/* Scroll areas with no visible scrollbar (the rail panel, like the reference).
+   Setting the standard scrollbar-* properties makes Chrome ignore the webkit
+   styles and draw classic arrow buttons on Windows — so hide it outright. */
+.scrollbar-none {
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+/* Soft fade at the bottom edge of a scroll area (hints there's more below). */
+.fade-bottom {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent);
 }

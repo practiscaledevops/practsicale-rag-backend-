@@ -2,43 +2,43 @@ import * as React from "react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export interface EmptyStateProps extends React.HTMLAttributes<HTMLDivElement> {
+export interface EmptyStateProps extends Omit<React.HTMLAttributes<HTMLDivElement>, "title"> {
   icon?: LucideIcon;
-  title: string;
-  description?: string;
+  title: React.ReactNode;
+  description?: React.ReactNode;
   /** Optional call-to-action (e.g. a Button). */
   action?: React.ReactNode;
+  /** "dashed" (default) draws the dashed outline; "plain" sits inside a card. */
+  variant?: "plain" | "dashed";
 }
 
-/** Placeholder shown when a list/section has no data yet. */
+/** Placeholder shown when a list or section has no data yet (chatbot icon-disc recipe). */
 export function EmptyState({
   icon: Icon,
   title,
   description,
   action,
+  variant = "dashed",
   className,
   ...props
 }: EmptyStateProps) {
   return (
     <div
       className={cn(
-        "flex flex-col items-center justify-center rounded-xl border border-dashed border-border bg-surface/50 px-6 py-12 text-center",
+        "flex flex-col items-center gap-2.5 px-4 py-8 text-center",
+        variant === "dashed" && "rounded-xl border border-dashed border-border",
         className
       )}
       {...props}
     >
       {Icon && (
-        <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-surface-muted">
-          <Icon className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
-        </div>
+        <span aria-hidden className="grid h-10 w-10 place-items-center rounded-full bg-accent-soft text-accent">
+          <Icon size={16} />
+        </span>
       )}
-      <p className="text-sm font-medium text-foreground">{title}</p>
-      {description && (
-        <p className="mt-1 max-w-sm text-sm text-muted-foreground">
-          {description}
-        </p>
-      )}
-      {action && <div className="mt-4">{action}</div>}
+      <p className="text-[13px] font-medium text-foreground">{title}</p>
+      {description && <p className="max-w-sm text-[13px] text-muted-foreground">{description}</p>}
+      {action && <div className="mt-1">{action}</div>}
     </div>
   );
 }

@@ -1,8 +1,14 @@
+import Link from "next/link";
+import { Plus, Upload } from "lucide-react";
 import { requireAdmin } from "@/lib/auth/admin";
 import { supabaseAdmin } from "@/lib/supabase";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Alert } from "@/components/ui/Alert";
+import { buttonClass } from "@/components/ui/Button";
 import { DocumentsClient, type DocumentRow } from "./DocumentsClient";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Documents" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic"; // always reflect current documents
@@ -65,19 +71,34 @@ export default async function DocumentsPage() {
     review_date: meta(d.metadata, "review_date", "expiry_date"),
   }));
 
+  // The query is capped at LIST_LIMIT rows; say so instead of truncating silently.
+  const truncated = documents.length >= LIST_LIMIT;
+
   return (
     <div>
       <PageHeader
         title="Documents"
-        description="Everything ingested into the knowledge base, from uploads and data-source syncs."
+        description="Every document in the Brain, with its processing status and freshness."
+        actions={
+          <>
+            <Link href="/dashboard/uploads" className={buttonClass({ variant: "secondary", size: "toolbar" })}>
+              <Upload size={14} aria-hidden />
+              Bulk upload
+            </Link>
+            <Link href="/dashboard/knowledge/add" className={buttonClass({ variant: "primary", size: "toolbar" })}>
+              <Plus size={14} aria-hidden />
+              Add knowledge
+            </Link>
+          </>
+        }
       />
 
       {error ? (
-        <Alert tone="danger" title="Could not load documents">
-          {error.message}
+        <Alert tone="danger" title="Couldn't load documents">
+          <span className="text-danger">{error.message}</span>
         </Alert>
       ) : (
-        <DocumentsClient documents={documents} />
+        <DocumentsClient documents={documents} truncated={truncated} />
       )}
     </div>
   );

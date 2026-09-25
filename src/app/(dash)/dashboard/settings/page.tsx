@@ -8,121 +8,30 @@
 // resolves org_id server-side and enforces the admin's `settings` permission.
 
 import * as React from "react";
-import { Loader2, Save, RotateCcw } from "lucide-react";
+import { KeyRound, Layers, RotateCcw, SearchCheck, ShieldCheck, Sparkles } from "lucide-react";
 import type { RagSettings } from "@/lib/settings";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
-import { Label } from "@/components/ui/Label";
 import { Alert } from "@/components/ui/Alert";
+import { Badge, Tag } from "@/components/ui/Badge";
+import { SectionCard } from "@/components/ui/Card";
+import { useConfirm } from "@/components/ui/ConfirmDialog";
+import { Skeleton } from "@/components/ui/Loading";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/Card";
+  NumberField,
+  PolicySkeleton,
+  RERANK_HINT,
+  SaveBar,
+  SettingsList,
+  TierSelect,
+  Toggle,
+  guardOffConfirm,
+  sameSettings,
+  type GuardKey,
+} from "@/components/ui/policy";
 
 type Notice = { tone: "success" | "danger"; message: string };
-type Tier = "fast" | "recommended" | "max";
-
-/** A labelled on/off row. */
-function Toggle({
-  label,
-  hint,
-  checked,
-  onChange,
-}: {
-  label: string;
-  hint: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  return (
-    <label className="flex items-start justify-between gap-4 py-2.5">
-      <span className="min-w-0">
-        <span className="block text-sm font-medium">{label}</span>
-        <span className="block text-xs text-muted-foreground">{hint}</span>
-      </span>
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        className="mt-1 h-4 w-4 shrink-0 rounded border-border accent-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      />
-    </label>
-  );
-}
-
-/** A labelled numeric field. */
-function NumberField({
-  label,
-  hint,
-  value,
-  onChange,
-  min,
-  max,
-  step,
-}: {
-  label: string;
-  hint?: string;
-  value: number;
-  onChange: (v: number) => void;
-  min?: number;
-  max?: number;
-  step?: number;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <Label>{label}</Label>
-      <Input
-        type="number"
-        value={Number.isFinite(value) ? value : 0}
-        min={min}
-        max={max}
-        step={step ?? 1}
-        onChange={(e) => onChange(Number(e.target.value))}
-      />
-      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
-    </div>
-  );
-}
-
-const TIER_OPTIONS: { value: Tier; label: string }[] = [
-  { value: "fast", label: "Fast" },
-  { value: "recommended", label: "Recommended" },
-  { value: "max", label: "Max" },
-];
-
-function TierSelect({
-  label,
-  hint,
-  value,
-  onChange,
-}: {
-  label: string;
-  hint?: string;
-  value: Tier;
-  onChange: (v: Tier) => void;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <Label>{label}</Label>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value as Tier)}
-        className="flex h-10 w-full rounded-lg border border-border bg-surface px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        {TIER_OPTIONS.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
-    </div>
-  );
-}
 
 export default function SettingsPage() {
   const [settings, setSettings] = React.useState<RagSettings | null>(null);
@@ -132,6 +41,10 @@ export default function SettingsPage() {
   const [error, setError] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<Notice | null>(null);
   const [updatedAt, setUpdatedAt] = React.useState<string | null>(null);
+  // UI-only: the last loaded/saved settings, for the save bar's dirty state
+  // and Discard. It never changes what is fetched or sent.
+  const [snapshot, setSnapshot] = React.useState<RagSettings | null>(null);
+  const { confirm, dialog } = useConfirm();
 
   const load = React.useCallback(async () => {
     setError(null);
@@ -140,6 +53,7 @@ export default function SettingsPage() {
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Failed to load settings");
       setSettings(json.settings as RagSettings);
+      setSnapshot(json.settings as RagSettings);
       setDefaults(json.defaults as RagSettings);
       setUpdatedAt(json.updatedAt ?? null);
     } catch (e) {
@@ -170,6 +84,7 @@ export default function SettingsPage() {
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Failed to save");
       setSettings(json.settings as RagSettings);
+      setSnapshot(json.settings as RagSettings);
       setUpdatedAt(new Date().toISOString());
       setNotice({ tone: "success", message: "Settings saved. Changes apply immediately." });
     } catch (e) {
@@ -183,229 +98,236 @@ export default function SettingsPage() {
     if (defaults) setSettings(structuredClone(defaults));
   }
 
+  async function confirmResetDefaults() {
+    const ok = await confirm({
+      title: "Reset to defaults?",
+      description:
+        "Every pipeline setting on this page goes back to its default. Nothing changes for anyone until you save.",
+      tone: "danger",
+      confirmLabel: "Reset",
+    });
+    if (ok) resetDefaults();
+  }
+
+  /** Turning a guard off asks first; turning it on doesn't. */
+  async function setGuard(guard: GuardKey, next: boolean) {
+    if (!next && !(await confirm({ ...guardOffConfirm(guard) }))) return;
+    patch("features", guard === "groundOrRefuse" ? { groundOrRefuse: next } : { faithfulnessCheck: next });
+  }
+
+  const dirty = settings !== null && snapshot !== null && !sameSettings(settings, snapshot);
+
+  function discard() {
+    if (snapshot) setSettings(snapshot);
+    setNotice(null);
+  }
+
   return (
-    <div>
+    <div className="w-full max-w-4xl">
       <PageHeader
         title="Settings"
-        description="Tune the RAG pipeline — retrieval, generation, and the anti-hallucination guards. Stored in the database; changes apply live, no redeploy."
+        description="Workspace-wide pipeline settings and provider keys."
         actions={
-          <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={resetDefaults} disabled={loading || saving}>
-              <RotateCcw className="h-4 w-4" aria-hidden="true" />
-              Reset to defaults
-            </Button>
-            <Button onClick={save} disabled={loading || saving || !settings}>
-              {saving ? (
-                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <Save className="h-4 w-4" aria-hidden="true" />
-              )}
-              {saving ? "Saving…" : "Save changes"}
-            </Button>
-          </div>
+          <Button
+            variant="secondary"
+            size="toolbar"
+            onClick={() => void confirmResetDefaults()}
+            disabled={loading || saving}
+          >
+            <RotateCcw size={14} aria-hidden />
+            Reset to defaults
+          </Button>
         }
       />
 
-      {notice && (
-        <Alert tone={notice.tone} className="mb-4">
-          {notice.message}
-        </Alert>
-      )}
       {error && (
         <Alert tone="danger" className="mb-4">
           {error}
         </Alert>
       )}
-      {updatedAt && (
-        <p className="mb-4 text-xs text-muted-foreground">
-          Last saved {new Date(updatedAt).toLocaleString()}.
-        </p>
-      )}
 
-      <div className="mb-6">
+      <div className="space-y-4">
+        {loading ? (
+          <PolicySkeleton cards={3} />
+        ) : settings ? (
+          // The save bar sticks while this pipeline column is on screen and
+          // stops above Providers, whose keys save on their own.
+          <div>
+            <div className="space-y-4 pb-4">
+              <SectionCard
+                icon={ShieldCheck}
+                title="Pipeline features"
+                description="Turn the accuracy and anti-hallucination stages on or off."
+              >
+                <SettingsList>
+                  <Toggle
+                    label="Query rewriting"
+                    hint="Rewrite the question into a standalone search query before retrieval (better recall)."
+                    checked={settings.features.queryRewrite}
+                    onChange={(v) => patch("features", { queryRewrite: v })}
+                  />
+                  <Toggle
+                    label="Contextual retrieval"
+                    hint="Situate each chunk in its document before embedding (Anthropic technique). Applies on the next ingest or re-ingest."
+                    checked={settings.features.contextualRetrieval}
+                    onChange={(v) => patch("features", { contextualRetrieval: v })}
+                  />
+                  <Toggle
+                    label="Reranking"
+                    hint={RERANK_HINT}
+                    checked={settings.features.rerank}
+                    onChange={(v) => patch("features", { rerank: v })}
+                  />
+                  <Toggle
+                    label="LLM source router"
+                    hint="Use a model to pick source types (off = fast keyword router)."
+                    checked={settings.features.llmRouter}
+                    onChange={(v) => patch("features", { llmRouter: v })}
+                  />
+                  <Toggle
+                    label="Faithfulness check"
+                    hint="Verify every claim is supported by context after generation."
+                    checked={settings.features.faithfulnessCheck}
+                    onChange={(v) => void setGuard("faithfulnessCheck", v)}
+                  />
+                  <Toggle
+                    label="Ground or refuse"
+                    hint="Refuse (no model call) when retrieval finds nothing relevant. Guarantees no hallucination."
+                    checked={settings.features.groundOrRefuse}
+                    onChange={(v) => void setGuard("groundOrRefuse", v)}
+                  />
+                </SettingsList>
+              </SectionCard>
+
+              <SectionCard icon={SearchCheck} title="Retrieval" description="Hybrid search and reranking parameters.">
+                <SettingsList>
+                  <NumberField
+                    label="Candidate pool"
+                    hint="Chunks pulled before reranking (10–200)."
+                    value={settings.retrieval.matchCount}
+                    onChange={(v) => patch("retrieval", { matchCount: v })}
+                    min={10}
+                    max={200}
+                  />
+                  <NumberField
+                    label="Rerank top-N"
+                    hint="Chunks kept for the answer (1–50)."
+                    value={settings.retrieval.rerankTopN}
+                    onChange={(v) => patch("retrieval", { rerankTopN: v })}
+                    min={1}
+                    max={50}
+                  />
+                  <NumberField
+                    label="Full-text weight"
+                    hint="Keyword / exact-match influence (0–10)."
+                    value={settings.retrieval.fullTextWeight}
+                    onChange={(v) => patch("retrieval", { fullTextWeight: v })}
+                    min={0}
+                    max={10}
+                    step={0.1}
+                  />
+                  <NumberField
+                    label="Semantic weight"
+                    hint="Vector / meaning influence (0–10)."
+                    value={settings.retrieval.semanticWeight}
+                    onChange={(v) => patch("retrieval", { semanticWeight: v })}
+                    min={0}
+                    max={10}
+                    step={0.1}
+                  />
+                  <NumberField
+                    label="RRF k"
+                    hint="Rank-fusion constant (1–1000)."
+                    value={settings.retrieval.rrfK}
+                    onChange={(v) => patch("retrieval", { rrfK: v })}
+                    min={1}
+                    max={1000}
+                  />
+                  <Toggle
+                    label="Expand to parent chunks"
+                    hint="Return the fuller parent section for each hit."
+                    checked={settings.retrieval.expandParents}
+                    onChange={(v) => patch("retrieval", { expandParents: v })}
+                  />
+                </SettingsList>
+              </SectionCard>
+
+              <SectionCard icon={Sparkles} title="Generation" description="How the grounded answer is produced.">
+                <SettingsList>
+                  <TierSelect
+                    label="Default tier"
+                    hint="Used when a request doesn't specify one."
+                    value={settings.generation.defaultTier}
+                    onChange={(v) => patch("generation", { defaultTier: v })}
+                  />
+                  <NumberField
+                    label="Temperature"
+                    hint="0 = most faithful (0–2)."
+                    value={settings.generation.temperature}
+                    onChange={(v) => patch("generation", { temperature: v })}
+                    min={0}
+                    max={2}
+                    step={0.1}
+                  />
+                  <NumberField
+                    label="Max answer tokens"
+                    hint="Token budget for a single answer (128–8192)."
+                    value={settings.generation.maxTokens}
+                    onChange={(v) => patch("generation", { maxTokens: v })}
+                    min={128}
+                    max={8192}
+                  />
+                </SettingsList>
+              </SectionCard>
+
+              <SectionCard
+                icon={Layers}
+                title="Contextual retrieval"
+                description="Cost controls for per-chunk context generation at ingest."
+              >
+                <SettingsList>
+                  <TierSelect
+                    label="Context model tier"
+                    hint="The cheap tier is recommended."
+                    value={settings.contextual.tier}
+                    onChange={(v) => patch("contextual", { tier: v })}
+                  />
+                  <NumberField
+                    label="Concurrency"
+                    hint="Parallel context calls (1–20)."
+                    value={settings.contextual.concurrency}
+                    onChange={(v) => patch("contextual", { concurrency: v })}
+                    min={1}
+                    max={20}
+                  />
+                  <NumberField
+                    label="Max chunks per document"
+                    hint="Skip context generation above this (cost guard, 1–5000)."
+                    value={settings.contextual.maxChunksPerDoc}
+                    onChange={(v) => patch("contextual", { maxChunksPerDoc: v })}
+                    min={1}
+                    max={5000}
+                  />
+                </SettingsList>
+              </SectionCard>
+            </div>
+
+            <SaveBar
+              dirty={dirty}
+              saving={saving}
+              onSave={() => void save()}
+              onDiscard={discard}
+              savedAt={updatedAt}
+              justSaved={notice?.tone === "success" && !dirty}
+              error={notice?.tone === "danger" ? notice.message : null}
+            />
+          </div>
+        ) : null}
+
         <ProvidersCard />
       </div>
 
-      {loading || !settings ? (
-        <div className="flex items-center gap-2 py-16 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-          Loading settings…
-        </div>
-      ) : (
-        <div className="grid gap-6 lg:grid-cols-2">
-          {/* Features / guards */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Pipeline features</CardTitle>
-              <CardDescription>
-                Turn the accuracy and anti-hallucination stages on or off.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="divide-y divide-border">
-              <Toggle
-                label="Query rewriting"
-                hint="Rewrite the question into a standalone search query before retrieval (recall ↑)."
-                checked={settings.features.queryRewrite}
-                onChange={(v) => patch("features", { queryRewrite: v })}
-              />
-              <Toggle
-                label="Contextual retrieval"
-                hint="Situate each chunk in its document before embedding (Anthropic technique). Applies on next ingest/re-ingest."
-                checked={settings.features.contextualRetrieval}
-                onChange={(v) => patch("features", { contextualRetrieval: v })}
-              />
-              <Toggle
-                label="Reranking (Cohere)"
-                hint="Cross-encoder reorders candidates. No-op without a Cohere key."
-                checked={settings.features.rerank}
-                onChange={(v) => patch("features", { rerank: v })}
-              />
-              <Toggle
-                label="LLM source router"
-                hint="Use a model to pick source types (off = fast keyword router)."
-                checked={settings.features.llmRouter}
-                onChange={(v) => patch("features", { llmRouter: v })}
-              />
-              <Toggle
-                label="Faithfulness check"
-                hint="Verify every claim is supported by context after generation."
-                checked={settings.features.faithfulnessCheck}
-                onChange={(v) => patch("features", { faithfulnessCheck: v })}
-              />
-              <Toggle
-                label="Ground or refuse"
-                hint="Refuse (no model call) when retrieval finds nothing relevant. Guarantees no hallucination."
-                checked={settings.features.groundOrRefuse}
-                onChange={(v) => patch("features", { groundOrRefuse: v })}
-              />
-            </CardContent>
-          </Card>
-
-          {/* Retrieval */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Retrieval</CardTitle>
-              <CardDescription>Hybrid search + reranking parameters.</CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-4 sm:grid-cols-2">
-              <NumberField
-                label="Candidate pool"
-                hint="Chunks pulled before reranking (10–200)."
-                value={settings.retrieval.matchCount}
-                onChange={(v) => patch("retrieval", { matchCount: v })}
-                min={10}
-                max={200}
-              />
-              <NumberField
-                label="Rerank top-N"
-                hint="Chunks kept for the answer (1–50)."
-                value={settings.retrieval.rerankTopN}
-                onChange={(v) => patch("retrieval", { rerankTopN: v })}
-                min={1}
-                max={50}
-              />
-              <NumberField
-                label="Full-text weight"
-                value={settings.retrieval.fullTextWeight}
-                onChange={(v) => patch("retrieval", { fullTextWeight: v })}
-                min={0}
-                max={10}
-                step={0.1}
-              />
-              <NumberField
-                label="Semantic weight"
-                value={settings.retrieval.semanticWeight}
-                onChange={(v) => patch("retrieval", { semanticWeight: v })}
-                min={0}
-                max={10}
-                step={0.1}
-              />
-              <NumberField
-                label="RRF k"
-                hint="Rank-fusion constant."
-                value={settings.retrieval.rrfK}
-                onChange={(v) => patch("retrieval", { rrfK: v })}
-                min={1}
-                max={1000}
-              />
-              <div className="sm:col-span-2">
-                <Toggle
-                  label="Expand to parent chunks"
-                  hint="Return the fuller parent section for each hit."
-                  checked={settings.retrieval.expandParents}
-                  onChange={(v) => patch("retrieval", { expandParents: v })}
-                />
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Generation */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Generation</CardTitle>
-              <CardDescription>How the grounded answer is produced.</CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-4 sm:grid-cols-2">
-              <TierSelect
-                label="Default tier"
-                hint="Used when a request doesn't specify one."
-                value={settings.generation.defaultTier}
-                onChange={(v) => patch("generation", { defaultTier: v })}
-              />
-              <NumberField
-                label="Temperature"
-                hint="0 = most faithful."
-                value={settings.generation.temperature}
-                onChange={(v) => patch("generation", { temperature: v })}
-                min={0}
-                max={2}
-                step={0.1}
-              />
-              <NumberField
-                label="Max answer tokens"
-                value={settings.generation.maxTokens}
-                onChange={(v) => patch("generation", { maxTokens: v })}
-                min={128}
-                max={8192}
-              />
-            </CardContent>
-          </Card>
-
-          {/* Contextual retrieval cost controls */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Contextual retrieval</CardTitle>
-              <CardDescription>
-                Cost controls for per-chunk context generation at ingest.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-4 sm:grid-cols-2">
-              <TierSelect
-                label="Context model tier"
-                hint="Cheap tier is recommended."
-                value={settings.contextual.tier}
-                onChange={(v) => patch("contextual", { tier: v })}
-              />
-              <NumberField
-                label="Concurrency"
-                hint="Parallel context calls (1–20)."
-                value={settings.contextual.concurrency}
-                onChange={(v) => patch("contextual", { concurrency: v })}
-                min={1}
-                max={20}
-              />
-              <NumberField
-                label="Max chunks / document"
-                hint="Skip context generation above this (cost guard)."
-                value={settings.contextual.maxChunksPerDoc}
-                onChange={(v) => patch("contextual", { maxChunksPerDoc: v })}
-                min={1}
-                max={5000}
-              />
-            </CardContent>
-          </Card>
-        </div>
-      )}
+      {dialog}
     </div>
   );
 }
@@ -436,6 +358,7 @@ function ProvidersCard() {
   const [drafts, setDrafts] = React.useState<Record<string, string>>({});
   const [busy, setBusy] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<string | null>(null);
+  const { confirm, dialog } = useConfirm();
 
   const load = React.useCallback(async () => {
     setError(null);
@@ -494,88 +417,102 @@ function ProvidersCard() {
     }
   }
 
+  async function confirmClear(provider: string) {
+    const label = PROVIDER_LABELS[provider]?.label ?? provider;
+    const ok = await confirm({
+      title: `Remove the saved ${label} key?`,
+      description: "The Brain falls back to the environment variable if one is set; otherwise features that need this provider stop working.",
+      tone: "danger",
+      confirmLabel: "Remove key",
+    });
+    if (ok) await clearKey(provider);
+  }
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Provider API keys</CardTitle>
-        <CardDescription>
-          Set or rotate the model-provider keys without a redeploy. Stored encrypted; a key set here
-          overrides the environment variable. Super-admin only.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {notice && <Alert tone="success">{notice}</Alert>}
-        {error && <Alert tone="danger">{error}</Alert>}
-        {rows === null ? (
-          <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-            Loading…
+    <SectionCard
+      icon={KeyRound}
+      title="Provider API keys"
+      description="Set or rotate the model-provider keys without a redeploy. Stored encrypted; a key set here overrides the environment variable. Super-admin only. Key changes save immediately, separately from the save bar."
+      bodyClassName="space-y-3"
+    >
+      {notice && <Alert tone="success">{notice}</Alert>}
+      {error && <Alert tone="danger">{error}</Alert>}
+      {rows === null ? (
+        error ? null : (
+          <div role="status" className="space-y-2">
+            <span className="sr-only">Loading providers…</span>
+            <Skeleton className="h-14 rounded-xl" />
+            <Skeleton className="h-14 rounded-xl" />
           </div>
-        ) : (
-          <div className="space-y-4">
-            {rows.map((r) => {
-              const meta = PROVIDER_LABELS[r.provider] ?? { label: r.provider, hint: "" };
-              return (
-                <div key={r.provider} className="rounded-lg border border-border p-3">
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span id={`provider-${r.provider}-label`} className="text-sm font-medium">{meta.label}</span>
-                        {r.configured ? (
-                          <span className="rounded-full bg-success/15 px-2 py-0.5 text-xs font-medium text-success">
-                            {r.source === "db" ? "set" : "from env"}
-                            {r.last4 ? ` · ••••${r.last4}` : ""}
-                          </span>
-                        ) : (
-                          <span className="rounded-full bg-surface-muted px-2 py-0.5 text-xs text-muted-foreground">
-                            not set
-                          </span>
-                        )}
-                      </div>
-                      <p id={`provider-${r.provider}-hint`} className="text-xs text-muted-foreground">{meta.hint}</p>
-                    </div>
-                    {r.source === "db" && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => clearKey(r.provider)}
-                        disabled={busy === r.provider}
-                        aria-label={`Clear ${meta.label} key`}
-                      >
-                        Clear
-                      </Button>
+        )
+      ) : (
+        <div className="divide-y divide-border overflow-hidden rounded-xl border border-border">
+          {rows.map((r) => {
+            const meta = PROVIDER_LABELS[r.provider] ?? { label: r.provider, hint: "" };
+            const inputId = `provider-key-${r.provider}`;
+            const draft = drafts[r.provider] ?? "";
+            const isBusy = busy === r.provider;
+            return (
+              <div
+                key={r.provider}
+                className="flex flex-wrap items-center justify-between gap-3 bg-surface px-3 py-2.5"
+              >
+                <div className="min-w-0 flex-1 basis-60">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[13px] font-medium text-foreground">{meta.label}</span>
+                    {r.configured ? (
+                      <>
+                        <Badge tone="success">Configured</Badge>
+                        <Tag>{r.source === "db" ? "Saved" : "From env"}</Tag>
+                        {r.last4 && <Tag className="font-mono">••••{r.last4}</Tag>}
+                      </>
+                    ) : (
+                      <Badge tone="neutral">Not set</Badge>
                     )}
                   </div>
-                  <div className="flex items-center gap-2">
-                    <Input
-                      id={`provider-${r.provider}-key`}
-                      type="password"
-                      autoComplete="off"
-                      aria-label={`${meta.label} API key`}
-                      aria-describedby={meta.hint ? `provider-${r.provider}-hint` : undefined}
-                      placeholder={r.configured ? "Enter a new key to rotate…" : "Paste API key…"}
-                      value={drafts[r.provider] ?? ""}
-                      onChange={(e) => setDrafts((d) => ({ ...d, [r.provider]: e.target.value }))}
-                    />
-                    <Button
-                      onClick={() => save(r.provider)}
-                      disabled={busy === r.provider || !(drafts[r.provider] ?? "").trim()}
-                      aria-label={`Save ${meta.label} key`}
-                    >
-                      {busy === r.provider ? (
-                        <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                      ) : (
-                        <Save className="h-4 w-4" aria-hidden="true" />
-                      )}
-                      Save
-                    </Button>
-                  </div>
+                  {meta.hint && <p className="mt-0.5 text-xs text-muted-foreground">{meta.hint}</p>}
                 </div>
-              );
-            })}
-          </div>
-        )}
-      </CardContent>
-    </Card>
+
+                <div className="flex w-full items-center gap-2 sm:w-auto">
+                  <label htmlFor={inputId} className="sr-only">
+                    {`API key for ${meta.label}`}
+                  </label>
+                  <Input
+                    id={inputId}
+                    type="password"
+                    density="compact"
+                    autoComplete="off"
+                    placeholder={r.configured ? "Enter a new key to rotate…" : "Paste API key…"}
+                    value={draft}
+                    onChange={(e) => setDrafts((d) => ({ ...d, [r.provider]: e.target.value }))}
+                    className="min-w-0 flex-1 sm:w-60 sm:flex-none"
+                  />
+                  <Button
+                    variant="secondary"
+                    size="toolbar"
+                    onClick={() => void save(r.provider)}
+                    disabled={isBusy || !draft.trim()}
+                    loading={isBusy && draft.trim() !== ""}
+                  >
+                    Save
+                  </Button>
+                  {r.source === "db" && (
+                    <Button
+                      variant="ghost"
+                      size="toolbar"
+                      onClick={() => void confirmClear(r.provider)}
+                      disabled={isBusy}
+                    >
+                      Clear
+                    </Button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {dialog}
+    </SectionCard>
   );
 }

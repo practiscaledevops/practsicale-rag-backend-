@@ -7,8 +7,10 @@
 // stream is always released on stop / unmount so it never stays on.
 
 import * as React from "react";
-import { Loader2, Mic, Square } from "lucide-react";
-import { C, ErrorNote } from "@/components/ui/brain-ui";
+import { Mic, Square } from "lucide-react";
+import { Button } from "./Button";
+import { InlineError } from "./Alert";
+import { Spinner } from "./Loading";
 import {
   AUTO_STOP_MS,
   MIN_RECORDING_MS,
@@ -211,49 +213,34 @@ export function VoiceInput({
 
   const recording = phase === "recording";
   const transcribing = phase === "transcribing";
-  const btnStyle: React.CSSProperties = recording
-    ? { background: "rgba(255,123,117,0.14)", color: C.red, border: `1px solid rgba(255,123,117,0.4)` }
-    : { background: C.raised, color: C.green, border: `1px solid ${C.border}` };
 
   return (
     <div className={className}>
-      <button
-        type="button"
-        onClick={toggle}
-        disabled={disabled || transcribing}
-        aria-label={recording ? "Stop recording" : label}
-        aria-pressed={recording}
-        className="inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2"
-        style={btnStyle}
-      >
-        {transcribing ? (
-          <Loader2 size={13} className="animate-spin" />
-        ) : recording ? (
-          <Square size={12} className="fill-current" />
-        ) : (
-          <Mic size={13} />
-        )}
-        <span className="tabular-nums">
-          {transcribing ? "Transcribing…" : recording ? formatElapsed(elapsed) : label}
-        </span>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant={recording ? "danger-secondary" : "secondary"}
+          size="toolbar"
+          onClick={toggle}
+          disabled={disabled || transcribing}
+          aria-label={recording ? "Stop recording" : `${label}: start recording`}
+          aria-pressed={recording}
+        >
+          {recording ? <Square size={12} aria-hidden className="fill-current" /> : <Mic size={14} aria-hidden />}
+          {recording ? "Stop" : label}
+        </Button>
         {recording && (
-          <span
-            className="h-1.5 w-1.5 rounded-full motion-safe:animate-pulse"
-            style={{ background: C.red }}
-            aria-hidden
-          />
+          <span className="inline-flex items-center gap-1.5">
+            <span aria-hidden className="h-2 w-2 rounded-full bg-danger motion-safe:animate-pulse" />
+            <span className="text-xs tabular-nums text-muted-foreground">
+              <span className="sr-only">Recording, </span>
+              {formatElapsed(elapsed)}
+            </span>
+          </span>
         )}
-      </button>
-      {note && !error && (
-        <p className="mt-1 text-xs" style={{ color: C.muted }}>
-          {note}
-        </p>
-      )}
-      {error && (
-        <div className="mt-1">
-          <ErrorNote message={error} />
-        </div>
-      )}
+        {transcribing && <Spinner label="Transcribing…" className="py-0 text-xs" />}
+      </div>
+      {note && !error && <p className="mt-1 text-xs text-muted-foreground">{note}</p>}
+      <InlineError message={error} className="mt-1" />
     </div>
   );
 }

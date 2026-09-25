@@ -1,6 +1,9 @@
 import { requireAdmin } from "@/lib/auth/admin";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { TaxonomyClient } from "./TaxonomyClient";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Taxonomy" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,7 +16,7 @@ export default async function TaxonomyPage() {
     <div>
       <PageHeader
         title="Taxonomy"
-        description="Domain and type are predefined; subtypes are controlled but extensible. The compiler reuses existing values and proposes new ones here."
+        description="The vocabulary the Brain files knowledge under: class, domain, type and subtype. The AI reuses existing values and proposes new ones, which wait here for your approval."
       />
       <TaxonomyClient />
     </div>

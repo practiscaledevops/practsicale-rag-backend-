@@ -1,8 +1,10 @@
 import { requireAdmin } from "@/lib/auth/admin";
 import { supabaseAdmin } from "@/lib/supabase";
-import { PageHeader } from "@/components/ui/PageHeader";
-import { Alert } from "@/components/ui/Alert";
+import { Alert, PageHeader } from "@/components/ui";
 import { ProcessingClient, type RunRow } from "./ProcessingClient";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Processing runs" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic"; // always reflect the latest runs
@@ -59,14 +61,11 @@ export default async function ProcessingPage() {
 
   return (
     <div>
-      <PageHeader
-        title="Processing"
-        description="Live view of everything ingested and synced into the knowledge base — and any errors."
-      />
+      <PageHeader title="Processing runs" description="Every ingestion run, newest first." />
 
       {error ? (
-        <Alert tone="danger" title="Could not load processing activity">
-          {error.message}
+        <Alert tone="danger" title="Couldn't load processing runs">
+          <span className="text-danger">{error.message}</span>
         </Alert>
       ) : (
         <ProcessingClient initialRuns={runs} />

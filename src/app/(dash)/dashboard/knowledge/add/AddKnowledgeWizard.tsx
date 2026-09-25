@@ -40,10 +40,33 @@ import {
   suggestedSubtypes,
   humanize,
   slugify,
+  authorityLabel,
   type IntelligenceClass,
   type RealityBucket,
 } from "@/lib/intelligence-taxonomy";
-import { C, Chip, KBtn, KInput, KSelect, KTextarea, Field, Panel, ErrorNote, Spinner, api, type SelectOption } from "@/components/ui/brain-ui";
+import {
+  Alert,
+  Badge,
+  Button,
+  buttonClass,
+  Card,
+  Checkbox,
+  ClassBadge,
+  Field,
+  Input,
+  InlineError,
+  Meter,
+  SectionCard,
+  Select,
+  Spinner,
+  Textarea,
+  type SelectOption,
+} from "@/components/ui";
+import { StickyActionBar } from "@/components/ui/policy";
+import { api } from "@/components/ui/brain-ui";
+import { cn } from "@/lib/utils";
+import { fmtDuration } from "@/lib/format";
+import { CLASS_DOT, CLASS_DOT_BASE, dedupTone } from "@/lib/ui-labels";
 import { kindOfFile, isYouTubeUrl, fmtBytes, capText, PROGRESS_LABEL, MAX_TEXT_CHARS, MAX_LONG_TEXT_CHARS, MAX_DIRECT_UPLOAD_BYTES, MAX_STORAGE_UPLOAD_BYTES, MAX_BYTES_BY_KIND, type ExtractKind } from "@/lib/ingest-adapters/pure";
 import { LONG_SOURCE_CHARS, sourceKey } from "@/lib/long-source-pure";
 import { VoiceInput } from "@/components/ui/VoiceInput";
@@ -187,9 +210,9 @@ interface TaxValue {
 }
 
 const CLASS_CARDS: { id: IntelligenceClass; icon: React.ReactNode; title: string; question: string; hint: string }[] = [
-  { id: "playbook", icon: <BookOpen size={20} />, title: "Playbook", question: "How should we think / what should work?", hint: "A framework, principle, tactic, system, hook, structure… from an expert, a book, a course or our own discovery." },
-  { id: "business_reality", icon: <Building2 size={20} />, title: "Business Reality", question: "What is true / what happened?", hint: "Company truth, founder thinking, customer evidence, calls, reports, SOPs, proof, brand voice, approved content." },
-  { id: "platform_intelligence", icon: <Globe2 size={20} />, title: "Platform Intelligence", question: "How does a platform work?", hint: "Formats, audience behaviour, hooks, distribution mechanics, constraints and tested learnings for one platform." },
+  { id: "playbook", icon: <BookOpen size={16} aria-hidden />, title: "Playbook", question: "How should we think / what should work?", hint: "A framework, principle, tactic, system, hook, structure… from an expert, a book, a course or our own discovery." },
+  { id: "business_reality", icon: <Building2 size={16} aria-hidden />, title: "Business Reality", question: "What is true / what happened?", hint: "Company truth, founder thinking, customer evidence, calls, reports, SOPs, proof, brand voice, approved content." },
+  { id: "platform_intelligence", icon: <Globe2 size={16} aria-hidden />, title: "Platform Intelligence", question: "How does a platform work?", hint: "Formats, audience behaviour, hooks, distribution mechanics, constraints and tested learnings for one platform." },
 ];
 
 function csv(v: string[]): string {
@@ -199,6 +222,58 @@ function fromCsv(s: string): string[] {
   return s.split(",").map((x) => x.trim()).filter(Boolean);
 }
 const opt = (id: string, label?: string): SelectOption => ({ value: id, label: label ?? humanize(id) });
+
+// ---- radio cards ----------------------------------------------------------
+// Selectable cards are a WAI-ARIA radio group: one Tab stop (roving tabindex),
+// arrow keys move focus and select, Space/Enter select the focused card.
+
+const RADIO_KEYS = new Set(["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"]);
+
+function onRadioGroupKeyDown(e: React.KeyboardEvent<HTMLElement>): void {
+  if (!RADIO_KEYS.has(e.key)) return;
+  const radios = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]:not(:disabled)'));
+  if (radios.length === 0) return;
+  const cur = radios.indexOf(document.activeElement as HTMLElement);
+  const forward = e.key === "ArrowRight" || e.key === "ArrowDown";
+  const next =
+    e.key === "Home" ? 0 : e.key === "End" ? radios.length - 1 : (Math.max(cur, 0) + (forward ? 1 : -1) + radios.length) % radios.length;
+  e.preventDefault();
+  radios[next].focus();
+  // Selection follows focus, as the pattern specifies.
+  radios[next].click();
+}
+
+/** 0 for the checked radio, or for the first one while nothing is checked; -1 otherwise. */
+function radioTabIndex(checked: boolean, index: number, anyChecked: boolean): 0 | -1 {
+  return checked || (!anyChecked && index === 0) ? 0 : -1;
+}
+
+const RADIO_CARD =
+  "flex cursor-pointer items-start gap-2.5 rounded-xl border p-3 text-left text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60";
+const RADIO_ON = "border-accent bg-accent-softer ring-1 ring-accent";
+const RADIO_OFF = "border-border bg-surface hover:bg-surface-muted";
+
+function RadioCard({
+  checked,
+  className,
+  children,
+  ...props
+}: Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "role" | "type"> & { checked: boolean }) {
+  return (
+    <button type="button" role="radio" aria-checked={checked} className={cn(RADIO_CARD, checked ? RADIO_ON : RADIO_OFF, className)} {...props}>
+      {children}
+    </button>
+  );
+}
+
+/** Leading icon tile inside a radio card. */
+function CardIcon({ active, children }: { active: boolean; children: React.ReactNode }) {
+  return (
+    <span aria-hidden className={cn("grid h-8 w-8 shrink-0 place-items-center rounded-lg", active ? "bg-accent-soft text-accent-strong" : "bg-surface-muted text-muted-foreground")}>
+      {children}
+    </span>
+  );
+}
 
 export function AddKnowledgeWizard() {
   const [step, setStep] = React.useState<Step>(1);
@@ -233,6 +308,14 @@ export function AddKnowledgeWizard() {
   const [confirmTruth, setConfirmTruth] = React.useState(false);
   const [blocked, setBlocked] = React.useState<string | null>(null);
   const [result, setResult] = React.useState<CompileResponse | null>(null);
+  const stepperRef = React.useRef<HTMLDivElement>(null);
+  const shownStep = React.useRef(step);
+  // A step change unmounts the button that held focus: move focus to the new current step.
+  React.useEffect(() => {
+    if (shownStep.current === step) return; // first render, and StrictMode's re-run
+    shownStep.current = step;
+    stepperRef.current?.querySelector<HTMLElement>('[aria-current="step"]')?.focus();
+  }, [step]);
 
   const loadTaxonomy = React.useCallback(async () => {
     try {
@@ -466,59 +549,75 @@ export function AddKnowledgeWizard() {
 
   return (
     <div className="space-y-4">
-      <Stepper step={step} />
+      <div ref={stepperRef}>
+        <Stepper step={step} />
+      </div>
 
       {step === 1 && (
         <div className="space-y-4">
-          <div className="grid gap-3 md:grid-cols-3">
-            {CLASS_CARDS.map((c) => {
+          <div role="radiogroup" aria-label="What are you adding?" onKeyDown={onRadioGroupKeyDown} className="grid gap-3 md:grid-cols-3">
+            {CLASS_CARDS.map((c, i) => {
               const active = cls === c.id;
               return (
-                <button
+                <RadioCard
                   key={c.id}
-                  type="button"
+                  checked={active}
+                  tabIndex={radioTabIndex(active, i, !!cls)}
+                  aria-labelledby={`akw-class-${c.id}`}
+                  aria-describedby={`akw-class-${c.id}-q akw-class-${c.id}-hint`}
                   onClick={() => { setCls(c.id); setPick({ domain: "", objectType: "", subtype: "" }); if (c.id !== "business_reality") setBucket(null); }}
-                  className="rounded-xl p-4 text-left transition-colors"
-                  style={{ background: active ? "rgba(0,191,174,0.10)" : C.surface, border: `1px solid ${active ? C.green : C.border}` }}
+                  className="p-4"
                 >
-                  <div className="flex items-center gap-2" style={{ color: active ? C.green : C.text }}>{c.icon}<span className="text-sm font-semibold">{c.title}</span></div>
-                  <p className="mt-1 text-xs font-medium" style={{ color: C.text }}>{c.question}</p>
-                  <p className="mt-1 text-xs" style={{ color: C.muted }}>{c.hint}</p>
-                </button>
+                  <CardIcon active={active}>{c.icon}</CardIcon>
+                  <span className="min-w-0">
+                    <span id={`akw-class-${c.id}`} className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
+                      <span aria-hidden className={cn(CLASS_DOT_BASE, CLASS_DOT[c.id])} />
+                      {c.title}
+                    </span>
+                    <span id={`akw-class-${c.id}-q`} className="mt-1 block text-xs font-medium text-foreground">{c.question}</span>
+                    <span id={`akw-class-${c.id}-hint`} className="mt-1 block text-xs text-muted-foreground">{c.hint}</span>
+                  </span>
+                </RadioCard>
               );
             })}
           </div>
           {/* The other two classes are fed differently — point at their homes. */}
           <div className="grid gap-3 md:grid-cols-2">
-            <Link href="/dashboard/learning" className="rounded-xl p-3 transition-colors hover:bg-white/[0.03]" style={{ background: C.surface, border: `1px dashed ${C.border}` }}>
-              <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: C.violet }}><Lightbulb size={16} /> Organizational Learning</div>
-              <p className="text-xs" style={{ color: C.text }}>What have WE learned? — decisions, implementations, experiments, results, learnings.</p>
-              <p className="text-xs" style={{ color: C.muted }}>Recorded in the Learning Lab (or proposed automatically in chat), not uploaded as documents.</p>
+            <Link href="/dashboard/learning" className={POINTER_CARD}>
+              <span className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                <span aria-hidden className={cn(CLASS_DOT_BASE, CLASS_DOT.organizational_learning)} />
+                <Lightbulb size={16} aria-hidden className="text-muted-foreground" /> Organizational Learning
+              </span>
+              <span className="mt-1 block text-xs text-foreground">What have we learned? — decisions, implementations, experiments, results, learnings.</span>
+              <span className="mt-0.5 block text-xs text-muted-foreground">Recorded in the Learning Lab (or proposed automatically in chat), not uploaded as documents.</span>
             </Link>
-            <Link href="/dashboard/performance" className="rounded-xl p-3 transition-colors hover:bg-white/[0.03]" style={{ background: C.surface, border: `1px dashed ${C.border}` }}>
-              <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: C.amber }}><LineChart size={16} /> Performance Memory</div>
-              <p className="text-xs" style={{ color: C.text }}>What results occurred? — close rate, show rate, content and campaign numbers.</p>
-              <p className="text-xs" style={{ color: C.muted }}>Structured metrics, recorded on the Performance memory page.</p>
+            <Link href="/dashboard/performance" className={POINTER_CARD}>
+              <span className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                <span aria-hidden className={cn(CLASS_DOT_BASE, CLASS_DOT.performance_memory)} />
+                <LineChart size={16} aria-hidden className="text-muted-foreground" /> Performance Memory
+              </span>
+              <span className="mt-1 block text-xs text-foreground">What results occurred? — close rate, show rate, content and campaign numbers.</span>
+              <span className="mt-0.5 block text-xs text-muted-foreground">Structured metrics, recorded on the Performance memory page.</span>
             </Link>
           </div>
 
           {cls === "business_reality" && (
-            <Panel title="Which kind of reality?" subtitle="Company Truth carries the highest authority and is guarded: an external clip cannot establish it directly.">
-              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                {REALITY_BUCKETS.map((b) => {
+            <SectionCard title="Which kind of reality?" description="Company Truth carries the highest authority and is guarded: an external clip cannot establish it directly.">
+              <div role="radiogroup" aria-label="Which kind of reality?" onKeyDown={onRadioGroupKeyDown} className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {REALITY_BUCKETS.map((b, i) => {
                   const active = bucket === b.id;
                   return (
-                    <button key={b.id} type="button" onClick={() => setBucket(b.id)} className="rounded-lg px-3 py-2 text-left" style={{ background: active ? "rgba(0,191,174,0.10)" : C.bg, border: `1px solid ${active ? C.green : C.border}` }}>
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-medium" style={{ color: active ? C.green : C.text }}>{b.label}</span>
-                        <Chip tone={b.authority.startsWith("A") ? "green" : "amber"}>{b.authority}</Chip>
-                      </div>
-                      <p className="mt-0.5 text-xs" style={{ color: C.muted }}>{b.description}</p>
-                    </button>
+                    <RadioCard key={b.id} checked={active} tabIndex={radioTabIndex(active, i, !!bucket)} onClick={() => setBucket(b.id)} className="flex-col gap-0.5">
+                      <span className="flex w-full items-center justify-between gap-2">
+                        <span className={cn("text-sm font-medium", active ? "text-accent-strong" : "text-foreground")}>{b.label}</span>
+                        <Badge tone="neutral" className="font-mono" title="Default authority">{b.authority}</Badge>
+                      </span>
+                      <span className="block text-xs text-muted-foreground">{b.description}</span>
+                    </RadioCard>
                   );
                 })}
               </div>
-            </Panel>
+            </SectionCard>
           )}
 
           {cls && (
@@ -535,28 +634,35 @@ export function AddKnowledgeWizard() {
             />
           )}
 
-          <div className="flex items-center justify-between gap-3">
-            <span className="inline-flex items-center gap-1.5 text-xs" style={{ color: C.muted }}>
-              <Lightbulb size={13} /> Recording a decision, experiment or result? Use the <Link href="/dashboard/learning" style={{ color: C.green }}>Learning Lab</Link>.
-            </span>
-            <KBtn variant="primary" disabled={!cls || (cls === "business_reality" && !bucket)} onClick={() => setStep(2)}>
-              Continue <ArrowRight size={14} />
-            </KBtn>
+          <div className="flex justify-end">
+            <Button size="toolbar" disabled={!cls || (cls === "business_reality" && !bucket)} onClick={() => setStep(2)}>
+              Continue <ArrowRight size={14} aria-hidden />
+            </Button>
           </div>
         </div>
       )}
 
       {step === 2 && cls && (
         <div className="grid gap-4 lg:grid-cols-3">
-          <Panel className="lg:col-span-2" title="The source" subtitle="Paste it, upload it or link it — the Brain extracts the text. Promotional noise is removed automatically; numbers and names are kept exactly.">
+          <SectionCard
+            className="lg:col-span-2"
+            title="The source"
+            description="Paste it, upload it or link it — the Brain extracts the text. Promotional noise is removed automatically; numbers and names are kept exactly."
+          >
             <div className="space-y-3">
               <SourceSwitch mode={sourceMode} setMode={(m) => { setSourceMode(m); setExtractError(null); setRetryFile(null); }} disabled={!!extracting || longRunning} />
 
               {sourceMode === "file" && (
-                <label className="flex cursor-pointer flex-col items-center justify-center gap-1 rounded-lg px-4 py-5 text-center text-xs focus-within:ring-2 focus-within:ring-[#00BFAE]" style={{ border: `1px dashed ${extracting ? C.green : C.border}`, color: C.muted }}>
-                  <FileUp size={18} style={{ color: C.green }} />
-                  <span style={{ color: C.text }}>Choose a file — PDF · .txt .md .csv .json · audio (mp3, m4a, wav, mp4, webm, ogg) · image (png, jpg, webp, gif)</span>
-                  <span className="text-[11px]">Up to 4 MB uploads directly; larger files (to 50 MB) upload through secure storage automatically. Audio (to 25 MB) is transcribed; screenshots are read by the vision model.</span>
+                <label
+                  className={cn(
+                    "flex flex-col items-center justify-center gap-1 rounded-xl border border-dashed px-4 py-5 text-center text-xs text-muted-foreground transition-colors focus-within:border-accent focus-within:ring-2 focus-within:ring-ring/30",
+                    extracting ? "border-accent bg-accent-softer" : "border-border",
+                    extracting || longRunning ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-accent-softer"
+                  )}
+                >
+                  <FileUp size={18} aria-hidden className="text-accent" />
+                  <span className="text-[13px] font-medium text-foreground">Choose a file — PDF · .txt .md .csv .json · audio (mp3, m4a, wav, mp4, webm, ogg) · image (png, jpg, webp, gif)</span>
+                  <span>Up to 4 MB uploads directly; larger files (to 50 MB) upload through secure storage automatically. Audio (to 25 MB) is transcribed; screenshots are read by the vision model.</span>
                   {/* sr-only (not display:none) keeps the picker reachable from the keyboard. */}
                   <input type="file" accept={FILE_ACCEPT} className="sr-only" disabled={!!extracting || longRunning} onChange={(e) => { const f = e.target.files?.[0]; if (f) void extractFile(f); e.target.value = ""; }} />
                 </label>
@@ -565,7 +671,8 @@ export function AddKnowledgeWizard() {
               {sourceMode === "link" && (
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="min-w-0 flex-1">
-                    <KInput
+                    <Input
+                      aria-label="Link to fetch"
                       value={link}
                       onChange={(e) => setLink(e.target.value)}
                       placeholder="https://… — an article, a LinkedIn / Instagram / X post, or a YouTube video"
@@ -573,42 +680,40 @@ export function AddKnowledgeWizard() {
                       onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void extractLink(); } }}
                     />
                   </div>
-                  <KBtn variant="primary" loading={!!extracting} disabled={!link.trim() || !!extracting} onClick={extractLink}>
-                    {isYouTubeUrl(link) ? <Youtube size={14} /> : <Link2 size={14} />} Fetch
-                  </KBtn>
+                  <Button loading={!!extracting} disabled={!link.trim() || !!extracting} onClick={extractLink}>
+                    {!extracting && (isYouTubeUrl(link) ? <Youtube size={14} aria-hidden /> : <Link2 size={14} aria-hidden />)} Fetch
+                  </Button>
                 </div>
               )}
 
               <div aria-live="polite" className="space-y-2">
                 {extracting && upload && (
-                  <div className="space-y-1 py-2">
-                    <div className="flex flex-wrap items-center gap-2 text-sm" style={{ color: C.muted }}>
-                      <span>
+                  <div className="space-y-1.5 py-1">
+                    <div className="flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground">
+                      <span className="tabular-nums">
                         Uploading {fmtBytes(upload.loaded)} of {fmtBytes(upload.total)} · {upload.total ? Math.min(100, Math.round((upload.loaded / upload.total) * 100)) : 0}%
                       </span>
-                      <KBtn size="xs" variant="ghost" onClick={() => xhrRef.current?.abort()}><X size={11} /> Cancel</KBtn>
+                      <Button size="sm" variant="ghost" onClick={() => xhrRef.current?.abort()}><X size={12} aria-hidden /> Cancel</Button>
                     </div>
-                    <div className="h-1.5 overflow-hidden rounded-full" style={{ background: C.raised }} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={upload.total ? Math.round((upload.loaded / upload.total) * 100) : 0}>
-                      <div className="h-full rounded-full transition-all" style={{ width: `${upload.total ? (upload.loaded / upload.total) * 100 : 0}%`, background: C.green }} />
-                    </div>
+                    <Meter value={upload.loaded} max={upload.total} label="Upload progress" tone="accent" />
                   </div>
                 )}
-                {extracting && !upload && <Spinner label={PROGRESS_LABEL[extracting]} />}
-                <ErrorNote message={extractError} />
+                {extracting && !upload && <Spinner label={PROGRESS_LABEL[extracting]} className="py-2" />}
+                {extractError && <Alert tone="danger">{extractError}</Alert>}
                 {retryFile && !extracting && (
-                  <KBtn size="xs" onClick={() => void extractFile(retryFile)}><RotateCcw size={11} /> Retry {retryFile.name.length > 40 ? `${retryFile.name.slice(0, 40)}…` : retryFile.name}</KBtn>
+                  <Button size="sm" variant="secondary" onClick={() => void extractFile(retryFile)}><RotateCcw size={12} aria-hidden /> Retry {retryFile.name.length > 40 ? `${retryFile.name.slice(0, 40)}…` : retryFile.name}</Button>
                 )}
               </div>
               {extracted && !extracting && (
-                <div className="flex flex-wrap items-center gap-1.5 text-xs" style={{ color: C.muted }}>
-                  <Chip tone="green"><Check size={11} /> {KIND_LABEL[extracted.kind]}</Chip>
-                  <span className="max-w-[24rem] truncate" title={extracted.name} style={{ color: C.text }}>{extracted.name}</span>
-                  {typeof extracted.size === "number" && <Chip tone="muted">{fmtBytes(extracted.size)}</Chip>}
-                  {extracted.meta.pages ? <Chip tone="muted">{extracted.meta.pages} pages</Chip> : null}
-                  {extracted.meta.duration_s ? <Chip tone="muted">{fmtDuration(extracted.meta.duration_s)}</Chip> : null}
-                  {extracted.meta.source_platform && <Chip tone="info">{humanize(extracted.meta.source_platform)}</Chip>}
-                  {extracted.truncated && <Chip tone="amber" title="The source is longer than the Brain reads in one go — the rest was left out."><AlertTriangle size={11} /> Trimmed to {(extracted.cap ?? MAX_LONG_TEXT_CHARS).toLocaleString("en-US")} characters</Chip>}
-                  {!longRunning && <button type="button" className="underline" onClick={() => { setExtracted(null); setText(""); setSingleAnyway(false); }}>clear</button>}
+                <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                  <Badge tone="success"><Check size={12} aria-hidden /> {KIND_LABEL[extracted.kind]}</Badge>
+                  <span className="max-w-[24rem] truncate text-foreground" title={extracted.name}>{extracted.name}</span>
+                  {typeof extracted.size === "number" && <Badge tone="neutral">{fmtBytes(extracted.size)}</Badge>}
+                  {extracted.meta.pages ? <Badge tone="neutral">{extracted.meta.pages} pages</Badge> : null}
+                  {extracted.meta.duration_s ? <Badge tone="neutral">{fmtDuration(extracted.meta.duration_s * 1000)}</Badge> : null}
+                  {extracted.meta.source_platform && <Badge tone="neutral">{humanize(extracted.meta.source_platform)}</Badge>}
+                  {extracted.truncated && <Badge tone="warning" title="The source is longer than the Brain reads in one go — the rest was left out."><AlertTriangle size={12} aria-hidden /> Trimmed to {(extracted.cap ?? MAX_LONG_TEXT_CHARS).toLocaleString("en-US")} characters</Badge>}
+                  {!longRunning && <Button size="sm" variant="ghost" onClick={() => { setExtracted(null); setText(""); setSingleAnyway(false); }}>Clear</Button>}
                 </div>
               )}
 
@@ -633,83 +738,78 @@ export function AddKnowledgeWizard() {
               {/* Once a long source is outlined, its sections replace the raw text box (the offsets must not move). */}
               {!(isLong && longActive) && (
                 <>
-                  <KTextarea
-                    rows={isLong ? 8 : 14}
-                    value={text}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setText(v);
-                      // "One object anyway" holds for the text it cut (≤ 60k + the note); a different source gets the choice again.
-                      if (v.length <= LONG_SOURCE_CHARS || v.length > MAX_TEXT_CHARS + 500) setSingleAnyway(false);
-                    }}
-                    placeholder={sourceMode === "paste" ? "Paste the raw source here… (a canonical .md with frontmatter is also accepted)" : "The extracted text appears here — trim it before compiling if you like."}
-                    disabled={!!extracting}
-                  />
+                  <Field label="Source text">
+                    <Textarea
+                      rows={isLong ? 8 : 14}
+                      value={text}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setText(v);
+                        // "One object anyway" holds for the text it cut (≤ 60k + the note); a different source gets the choice again.
+                        if (v.length <= LONG_SOURCE_CHARS || v.length > MAX_TEXT_CHARS + 500) setSingleAnyway(false);
+                      }}
+                      placeholder={sourceMode === "paste" ? "Paste the raw source here… (a canonical .md with frontmatter is also accepted)" : "The extracted text appears here — trim it before compiling if you like."}
+                      disabled={!!extracting}
+                    />
+                  </Field>
                   <div className="flex flex-wrap items-center gap-3">
                     {/* Dictate: speak instead of type — appends the transcript to the box, in every source mode. */}
                     <VoiceInput
                       onText={(t) => { setSingleAnyway(false); setText((cur) => appendText(cur, t)); }}
                       disabled={!!extracting || longRunning || busy}
                     />
-                    <span className="ml-auto text-xs" style={{ color: C.muted }}>{text.length.toLocaleString()} chars</span>
+                    <span className="ml-auto text-xs tabular-nums text-muted-foreground">{text.length.toLocaleString()} chars</span>
                   </div>
-                  <Field label="Title (optional)"><KInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Leave empty to let the Brain name it" /></Field>
+                  <Field label="Title (optional)"><Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Leave empty to let the Brain name it" /></Field>
                 </>
               )}
-              <div className="flex flex-wrap items-center gap-1.5 text-xs" style={{ color: C.muted }}>
+              <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                 Classification:
+                <ClassBadge klass={cls} />
                 {classify === "auto" ? (
-                  <Chip tone="green"><Sparkles size={11} /> Auto — the Brain decides domain, type and subtype</Chip>
+                  <Badge tone="accent"><Sparkles size={12} aria-hidden /> Auto — the Brain decides domain, type and subtype</Badge>
                 ) : (
                   <>
-                    <Chip tone="info">{pick.domain ? `Domain: ${humanize(pick.domain)}` : "Domain: Auto"}</Chip>
-                    <Chip tone="info">{pick.objectType ? `Type: ${humanize(pick.objectType)}` : "Type: Auto"}</Chip>
-                    <Chip tone="info">{pick.subtype ? `Subtype: ${humanize(pick.subtype)}` : "Subtype: Auto"}</Chip>
+                    <Badge tone="neutral">{pick.domain ? `Domain: ${humanize(pick.domain)}` : "Domain: Auto"}</Badge>
+                    <Badge tone="neutral">{pick.objectType ? `Type: ${humanize(pick.objectType)}` : "Type: Auto"}</Badge>
+                    <Badge tone="neutral">{pick.subtype ? `Subtype: ${humanize(pick.subtype)}` : "Subtype: Auto"}</Badge>
                   </>
                 )}
-                <button type="button" className="underline" onClick={() => setStep(1)}>change</button>
+                <Button size="sm" variant="ghost" onClick={() => setStep(1)}>Change</Button>
               </div>
             </div>
-          </Panel>
-          <Panel title="Provenance" subtitle="Where this came from. Optional, but it keeps claims traceable.">
+          </SectionCard>
+          <SectionCard title="Provenance" description="Where this came from. Optional, but it keeps claims traceable.">
             <div className="space-y-3">
-              <Field label="Source expert / author"><KInput value={hints.sourceExpert} onChange={(e) => setHints({ ...hints, sourceExpert: e.target.value })} placeholder="Creator, book, consultant, employee…" /></Field>
+              <Field label="Source expert / author"><Input value={hints.sourceExpert} onChange={(e) => setHints({ ...hints, sourceExpert: e.target.value })} placeholder="Creator, book, consultant, employee…" /></Field>
               <Field label="Found on (platform)">
-                <KSelect value={hints.sourcePlatform} onChange={(e) => setHints({ ...hints, sourcePlatform: e.target.value })} placeholder="—" options={[...PLATFORMS.filter((p) => p !== "universal"), "book", "course", "article", "internal"].map((p) => opt(p))} />
+                <Select value={hints.sourcePlatform} onChange={(e) => setHints({ ...hints, sourcePlatform: e.target.value })} placeholder="—" options={[...PLATFORMS.filter((p) => p !== "universal"), "book", "course", "article", "internal"].map((p) => opt(p))} />
               </Field>
               <Field label="Source type">
-                <KSelect value={hints.sourceType} onChange={(e) => setHints({ ...hints, sourceType: e.target.value })} placeholder="—" options={SOURCE_TYPES.map((s) => opt(s))} />
+                <Select value={hints.sourceType} onChange={(e) => setHints({ ...hints, sourceType: e.target.value })} placeholder="—" options={SOURCE_TYPES.map((s) => opt(s))} />
               </Field>
-              <Field label="URL"><KInput value={hints.sourceUrl} onChange={(e) => setHints({ ...hints, sourceUrl: e.target.value })} placeholder="https://…" /></Field>
-              <Field label="Date"><KInput type="date" value={hints.sourceDate} onChange={(e) => setHints({ ...hints, sourceDate: e.target.value })} /></Field>
+              <Field label="URL"><Input value={hints.sourceUrl} onChange={(e) => setHints({ ...hints, sourceUrl: e.target.value })} placeholder="https://…" /></Field>
+              <Field label="Date"><Input type="date" value={hints.sourceDate} onChange={(e) => setHints({ ...hints, sourceDate: e.target.value })} /></Field>
               {cls === "business_reality" && (
-                <label className="flex items-center gap-2 text-xs" style={{ color: C.text }}>
-                  <input type="checkbox" checked={hints.isFounderVoice} onChange={(e) => setHints({ ...hints, isFounderVoice: e.target.checked })} />
+                <label className="flex items-center gap-2 text-[13px] text-foreground">
+                  <Checkbox checked={hints.isFounderVoice} onChange={(e) => setHints({ ...hints, isFounderVoice: e.target.checked })} />
                   These are the founder&apos;s own words (Founder Brain)
                 </label>
               )}
-              {blocked && (
-                <div className="space-y-2 rounded-lg p-3 text-xs" style={{ background: "rgba(243,182,97,0.10)", border: "1px solid rgba(243,182,97,0.4)", color: C.amber }}>
-                  <div className="flex items-start gap-2"><AlertTriangle size={14} className="mt-0.5 shrink-0" /><span>{blocked}</span></div>
-                  <label className="flex items-center gap-2" style={{ color: C.text }}>
-                    <input type="checkbox" checked={confirmTruth} onChange={(e) => setConfirmTruth(e.target.checked)} />
-                    I confirm this is verified company information
-                  </label>
-                </div>
-              )}
-              <ErrorNote message={error} />
+              {blocked && <BlockedNote reason={blocked} confirmTruth={confirmTruth} setConfirmTruth={setConfirmTruth} />}
+              {error && <Alert tone="danger">{error}</Alert>}
             </div>
-          </Panel>
+          </SectionCard>
           <div className="flex items-center justify-between gap-3 lg:col-span-3">
-            <KBtn variant="ghost" disabled={longRunning} onClick={() => setStep(1)}><ArrowLeft size={14} /> Back</KBtn>
+            <Button variant="ghost" size="toolbar" disabled={longRunning} onClick={() => setStep(1)}><ArrowLeft size={14} aria-hidden /> Back</Button>
             {/* A long source is driven from its own panel (outline → compile each section). */}
             {!isLong && (
-              <KBtn variant="primary" disabled={!canContinue2 || busy} loading={busy} onClick={() => void runPreview()}>
-                <Sparkles size={14} /> {busy ? "Understanding the source…" : classify === "auto" ? "Let the Brain classify it" : "Compile with my classification"}
-              </KBtn>
+              <Button size="toolbar" disabled={!canContinue2 || busy} loading={busy} onClick={() => void runPreview()}>
+                {!busy && <Sparkles size={14} aria-hidden />} {busy ? "Understanding the source…" : classify === "auto" ? "Let the Brain classify it" : "Compile with my classification"}
+              </Button>
             )}
           </div>
-          {busy && <div className="lg:col-span-3"><Spinner label="Extracting the substance, classifying, checking for duplicates and compiling the object… (20–60s)" /></div>}
+          {busy && <div className="lg:col-span-3"><Spinner label="Extracting the substance, classifying, checking for duplicates and compiling the object… (20–60s)" className="py-2" /></div>}
         </div>
       )}
 
@@ -735,89 +835,121 @@ export function AddKnowledgeWizard() {
       )}
 
       {step === 4 && result && (
-        <Panel title="Saved to the Brain">
-          <div className="space-y-3">
+        <SectionCard icon={Check} title="Saved to the Brain">
+          <div className="space-y-3" role="status">
             {result.object ? (
-              <p className="text-sm" style={{ color: C.text }}>
-                <Check size={14} className="mr-1 inline" style={{ color: C.green }} />
-                Created <span className="font-mono" style={{ color: C.green }}>{result.object.ref}</span> — {result.object.name} ({result.chunks} semantic chunks embedded).
+              <p className="text-[13px] text-foreground">
+                Created <span className="font-mono text-accent-strong">{result.object.ref}</span> — {result.object.name} ({result.chunks} semantic chunks embedded).
               </p>
             ) : result.target ? (
-              <p className="text-sm" style={{ color: C.text }}>
-                <Check size={14} className="mr-1 inline" style={{ color: C.green }} />
-                {preview?.dedup.decision === "duplicate" ? "Recorded as an additional source on" : "Enriched"} <span className="font-mono" style={{ color: C.green }}>{result.target.ref}</span> — {result.target.name}
+              <p className="text-[13px] text-foreground">
+                {preview?.dedup.decision === "duplicate" ? "Recorded as an additional source on" : "Enriched"} <span className="font-mono text-accent-strong">{result.target.ref}</span> — {result.target.name}
                 {result.chunks ? ` (${result.chunks} chunks re-embedded)` : ""}.
               </p>
             ) : (
-              <p className="text-sm" style={{ color: C.text }}>Done.</p>
+              <p className="text-[13px] text-foreground">Done.</p>
             )}
             {result.suggestedRelationships.length > 0 && (
-              <p className="text-xs" style={{ color: C.muted }}>{result.suggestedRelationships.length} relationship suggestion(s) are waiting in <Link href="/dashboard/relationships" style={{ color: C.green }}>Relationships</Link>.</p>
+              <p className="text-xs text-muted-foreground">{result.suggestedRelationships.length} relationship suggestion(s) are waiting in <Link href="/dashboard/relationships" className={TEXT_LINK}>Relationships</Link>.</p>
             )}
             {result.taxonomy.some((t) => t.status === "proposed") && (
-              <p className="text-xs" style={{ color: C.muted }}>A new taxonomy value was proposed — approve it in <Link href="/dashboard/taxonomy" style={{ color: C.green }}>Taxonomy</Link>.</p>
+              <p className="text-xs text-muted-foreground">A new taxonomy value was proposed — approve it in <Link href="/dashboard/taxonomy" className={TEXT_LINK}>Taxonomy</Link>.</p>
             )}
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               {(result.object ?? result.target) && (
-                <Link href={`/dashboard/knowledge/${(result.object ?? result.target)!.id}`}><KBtn variant="primary">Open the object</KBtn></Link>
+                <Link href={`/dashboard/knowledge/${(result.object ?? result.target)!.id}`} className={buttonClass({ size: "toolbar" })}>Open the object</Link>
               )}
-              <KBtn onClick={reset}>Add another</KBtn>
+              <Button variant="secondary" size="toolbar" onClick={reset}>Add another</Button>
             </div>
           </div>
-        </Panel>
+        </SectionCard>
       )}
     </div>
   );
 }
 
-function fmtDuration(s: number): string {
-  const m = Math.floor(s / 60);
-  const sec = Math.floor(s % 60);
-  return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}:${String(sec).padStart(2, "0")}` : `${m}:${String(sec).padStart(2, "0")}`;
+const POINTER_CARD =
+  "block rounded-xl border border-dashed border-border bg-surface p-3 transition-colors hover:bg-surface-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+const TEXT_LINK = "font-medium text-accent-strong underline-offset-2 hover:underline";
+
+/** The Company Truth guard: the reason plus the human's confirmation. */
+function BlockedNote({ reason, confirmTruth, setConfirmTruth }: { reason: string; confirmTruth: boolean; setConfirmTruth: (v: boolean) => void }) {
+  return (
+    <Alert tone="warning">
+      <p>{reason}</p>
+      <label className="mt-2 flex items-center gap-2 font-medium">
+        <Checkbox checked={confirmTruth} onChange={(e) => setConfirmTruth(e.target.checked)} />
+        I confirm this is verified company information
+      </label>
+    </Alert>
+  );
 }
 
 const SOURCE_MODES: { id: SourceMode; icon: React.ReactNode; title: string; hint: string }[] = [
-  { id: "paste", icon: <ClipboardPaste size={15} />, title: "Paste text", hint: "A transcript, caption, article, report or note." },
-  { id: "file", icon: <FileUp size={15} />, title: "Upload a file", hint: "PDF, text, a voice note or call recording, a screenshot." },
-  { id: "link", icon: <Link2 size={15} />, title: "From a link", hint: "A web page, a public post, or a YouTube video (captions)." },
+  { id: "paste", icon: <ClipboardPaste size={16} aria-hidden />, title: "Paste text", hint: "A transcript, caption, article, report or note." },
+  { id: "file", icon: <FileUp size={16} aria-hidden />, title: "Upload a file", hint: "PDF, text, a voice note or call recording, a screenshot." },
+  { id: "link", icon: <Link2 size={16} aria-hidden />, title: "From a link", hint: "A web page, a public post, or a YouTube video (captions)." },
 ];
 
-/** Segmented switch for how the source arrives (same look as the classification switch). */
+/** Radio cards for how the source arrives (same recipe as the classification switch). */
 function SourceSwitch({ mode, setMode, disabled }: { mode: SourceMode; setMode: (m: SourceMode) => void; disabled?: boolean }) {
   return (
-    <div className="flex flex-col gap-2 sm:flex-row">
-      {SOURCE_MODES.map((m) => {
+    <div role="radiogroup" aria-label="How does the source arrive?" onKeyDown={onRadioGroupKeyDown} className="grid gap-2 sm:grid-cols-3">
+      {SOURCE_MODES.map((m, i) => {
         const active = mode === m.id;
         return (
-          <button key={m.id} type="button" disabled={disabled} onClick={() => setMode(m.id)} className="flex-1 rounded-lg px-3 py-2 text-left disabled:opacity-60" style={{ background: active ? "rgba(0,191,174,0.10)" : C.bg, border: `1px solid ${active ? C.green : C.border}` }}>
-            <div className="flex items-center gap-2 text-sm font-medium" style={{ color: active ? C.green : C.text }}>{m.icon}{m.title}</div>
-            <p className="text-xs" style={{ color: C.muted }}>{m.hint}</p>
-          </button>
+          <RadioCard key={m.id} checked={active} tabIndex={radioTabIndex(active, i, true)} disabled={disabled} onClick={() => setMode(m.id)}>
+            <CardIcon active={active}>{m.icon}</CardIcon>
+            <span className="min-w-0">
+              <span className="block text-sm font-medium text-foreground">{m.title}</span>
+              <span className="block text-xs text-muted-foreground">{m.hint}</span>
+            </span>
+          </RadioCard>
         );
       })}
     </div>
   );
 }
 
+const STEPS = ["What is it?", "Source", "Review", "Saved"];
+
 function Stepper({ step }: { step: Step }) {
-  const items = ["What is it?", "Source", "Review", "Saved"];
   return (
-    <ol className="flex flex-wrap items-center gap-2 text-xs">
-      {items.map((label, i) => {
-        const n = (i + 1) as Step;
-        const active = n === step;
-        const done = n < step;
-        return (
-          <li key={label} className="flex items-center gap-2">
-            <span className="grid h-6 w-6 place-items-center rounded-full text-[11px] font-semibold" style={{ background: active || done ? "rgba(0,191,174,0.18)" : C.raised, color: active || done ? C.green : C.muted, border: `1px solid ${active ? C.green : C.border}` }}>
-              {done ? <Check size={12} /> : n}
-            </span>
-            <span style={{ color: active ? C.text : C.muted }}>{label}</span>
-            {i < items.length - 1 && <span style={{ color: C.border }}>—</span>}
-          </li>
-        );
-      })}
-    </ol>
+    <nav aria-label="Add knowledge steps">
+      <ol className="flex items-center gap-2">
+        {STEPS.map((label, i) => {
+          const n = (i + 1) as Step;
+          const active = n === step;
+          const done = n < step;
+          const last = i === STEPS.length - 1;
+          return (
+            <li
+              key={label}
+              aria-current={active ? "step" : undefined}
+              // Focus lands here after a step change (see the effect on `step`).
+              tabIndex={active ? -1 : undefined}
+              className={cn("flex min-w-0 items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", !last && "flex-1")}
+            >
+              <span
+                aria-hidden
+                className={cn(
+                  "grid h-6 w-6 shrink-0 place-items-center rounded-full text-xs font-semibold tabular-nums",
+                  active ? "bg-accent text-accent-foreground" : done ? "bg-accent-soft text-accent-strong" : "bg-surface-muted text-muted-foreground"
+                )}
+              >
+                {done ? <Check size={12} /> : n}
+              </span>
+              <span className={cn("whitespace-nowrap text-[13px]", active ? "font-medium text-foreground" : "sr-only text-muted-foreground sm:not-sr-only")}>
+                <span className="sr-only">Step {n}: </span>
+                {label}
+                {done && <span className="sr-only"> (done)</span>}
+              </span>
+              {!last && <span aria-hidden className="h-px min-w-3 flex-1 bg-border" />}
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
   );
 }
 
@@ -858,17 +990,30 @@ function AddValue({
   }
   if (!open) {
     return (
-      <button type="button" onClick={() => setOpen(true)} className="inline-flex items-center gap-1 text-[11px]" style={{ color: C.green }}>
-        <Plus size={11} /> New {label}
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-1.5 inline-flex items-center gap-1 rounded-md text-xs font-medium text-accent-strong hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <Plus size={12} aria-hidden /> New {label}
       </button>
     );
   }
   return (
-    <div className="mt-1 flex items-center gap-1.5">
-      <KInput value={value} onChange={(e) => setValue(e.target.value)} placeholder={`New ${label}…`} className="h-8 text-xs" onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void add(); } }} />
-      <KBtn size="xs" variant="primary" loading={busy} disabled={!value.trim() || busy} onClick={add}>Add</KBtn>
-      <KBtn size="xs" variant="ghost" onClick={() => { setOpen(false); setErr(null); }}>Cancel</KBtn>
-      {err && <span className="text-[11px]" style={{ color: C.red }}>{err}</span>}
+    <div className="mt-1.5 space-y-1">
+      <div className="flex items-center gap-1.5">
+        <Input
+          density="compact"
+          aria-label={`New ${label}`}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={`New ${label}…`}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void add(); } }}
+        />
+        <Button size="sm" loading={busy} disabled={!value.trim() || busy} onClick={add}>Add</Button>
+        <Button size="sm" variant="ghost" onClick={() => { setOpen(false); setErr(null); }}>Cancel</Button>
+      </div>
+      <InlineError message={err} />
     </div>
   );
 }
@@ -890,6 +1035,11 @@ function typeGroups(cls: IntelligenceClass, customTypes: string[]): { label: str
     { label: "Added by you", options: customTypes.map((t) => opt(t)) },
   ];
 }
+
+const CLASSIFY_MODES: { id: "auto" | "manual"; icon: React.ReactNode; title: string; hint: string }[] = [
+  { id: "auto", icon: <Sparkles size={16} aria-hidden />, title: "Auto — the Brain decides", hint: "It reads the source and picks domain, type and subtype (reusing your taxonomy). You review before saving." },
+  { id: "manual", icon: <ListChecks size={16} aria-hidden />, title: "Choose myself", hint: "Pick any domain, type and subtype — or add new ones. Leave a field blank to let the Brain decide that one." },
+];
 
 function ClassificationPanel({
   cls,
@@ -917,55 +1067,70 @@ function ClassificationPanel({
     () => Array.from(new Set([...suggestedSubtypes(pick.domain, pick.objectType), ...dbSubtypes(pick.domain, pick.objectType)])),
     [pick.domain, pick.objectType, dbSubtypes]
   );
-  const seg = (id: "auto" | "manual", icon: React.ReactNode, title: string, hint: string) => {
-    const active = mode === id;
-    return (
-      <button type="button" onClick={() => setMode(id)} className="flex-1 rounded-lg px-3 py-2 text-left" style={{ background: active ? "rgba(0,191,174,0.10)" : C.bg, border: `1px solid ${active ? C.green : C.border}` }}>
-        <div className="flex items-center gap-2 text-sm font-medium" style={{ color: active ? C.green : C.text }}>{icon}{title}</div>
-        <p className="text-xs" style={{ color: C.muted }}>{hint}</p>
-      </button>
-    );
-  };
   return (
-    <Panel title="Classification" subtitle="CLASS → DOMAIN → TYPE → SUBTYPE. Domain is what the knowledge is ABOUT (not where you found it).">
+    <SectionCard
+      title="Classification"
+      description="Class → domain → type → subtype. Domain is what the knowledge is about (not where you found it)."
+      actions={<ClassBadge klass={cls} />}
+    >
       <div className="space-y-3">
-        <div className="flex flex-col gap-2 sm:flex-row">
-          {seg("auto", <Sparkles size={15} />, "Auto — the Brain decides", "It reads the source and picks domain, type and subtype (reusing your taxonomy). You review before saving.")}
-          {seg("manual", <ListChecks size={15} />, "Choose myself", "Pick any domain, type and subtype — or add new ones. Leave a field blank to let the Brain decide that one.")}
+        <div role="radiogroup" aria-label="Classification" onKeyDown={onRadioGroupKeyDown} className="grid gap-2 sm:grid-cols-2">
+          {CLASSIFY_MODES.map((m, i) => {
+            const active = mode === m.id;
+            return (
+              <RadioCard key={m.id} checked={active} tabIndex={radioTabIndex(active, i, true)} onClick={() => setMode(m.id)}>
+                <CardIcon active={active}>{m.icon}</CardIcon>
+                <span className="min-w-0">
+                  <span className="block text-sm font-medium text-foreground">{m.title}</span>
+                  <span className="block text-xs text-muted-foreground">{m.hint}</span>
+                </span>
+              </RadioCard>
+            );
+          })}
         </div>
         {mode === "manual" && (
           <div className="grid gap-3 md:grid-cols-3">
             <div>
               <Field label="Domain">
-                <KSelect value={pick.domain} onChange={(e) => setPick({ ...pick, domain: e.target.value, subtype: "" })} placeholder="Auto (let the Brain decide)" groups={domainGroups(cls, customDomains)} />
+                <Select value={pick.domain} onChange={(e) => setPick({ ...pick, domain: e.target.value, subtype: "" })} placeholder="Auto (let the Brain decide)" groups={domainGroups(cls, customDomains)} />
               </Field>
               <AddValue kind="domain" label="domain" onAdded={async (v, n) => { await onAdded(); setPick({ ...pick, domain: v }); setNote(n); }} />
             </div>
             <div>
               <Field label="Type">
-                <KSelect value={pick.objectType} onChange={(e) => setPick({ ...pick, objectType: e.target.value, subtype: "" })} placeholder="Auto (let the Brain decide)" groups={typeGroups(cls, customTypes)} />
+                <Select value={pick.objectType} onChange={(e) => setPick({ ...pick, objectType: e.target.value, subtype: "" })} placeholder="Auto (let the Brain decide)" groups={typeGroups(cls, customTypes)} />
               </Field>
               <AddValue kind="object_type" label="type" extra={{ intelligenceClass: cls }} onAdded={async (v, n) => { await onAdded(); setPick({ ...pick, objectType: v }); setNote(n); }} />
             </div>
             <div>
               <Field label="Subtype" hint={subtypeOptions.length ? `Suggested: ${subtypeOptions.slice(0, 6).map(humanize).join(", ")}` : "Pick domain + type to see suggestions, or type a new one"}>
-                <KInput value={pick.subtype} onChange={(e) => setPick({ ...pick, subtype: slugify(e.target.value) || e.target.value })} list="wizard-subtypes" placeholder="Auto, or type e.g. accountability" />
-                <datalist id="wizard-subtypes">{subtypeOptions.map((s) => <option key={s} value={s} />)}</datalist>
+                <Input value={pick.subtype} onChange={(e) => setPick({ ...pick, subtype: slugify(e.target.value) || e.target.value })} list="wizard-subtypes" placeholder="Auto, or type e.g. accountability" />
               </Field>
+              <datalist id="wizard-subtypes">{subtypeOptions.map((s) => <option key={s} value={s} />)}</datalist>
               <AddValue kind="subtype" label="subtype" extra={{ domain: pick.domain || null, objectType: pick.objectType || null, intelligenceClass: cls }} onAdded={async (v, n) => { await onAdded(); setPick({ ...pick, subtype: v }); setNote(n); }} />
             </div>
           </div>
         )}
-        {note && <p className="text-[11px]" style={{ color: C.amber }}>{note}</p>}
+        {note && <p role="status" className="text-xs text-foreground">{note}</p>}
         {mode === "manual" && (
-          <p className="flex items-center gap-1 text-[11px]" style={{ color: C.muted }}>
-            <Wand2 size={11} /> Your choices are locked in; the Brain still extracts the summary, entities, tags and provenance, checks for duplicates and compiles the object.
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Wand2 size={12} aria-hidden className="shrink-0" /> Your choices are locked in; the Brain still extracts the summary, entities, tags and provenance, checks for duplicates and compiles the object.
           </p>
         )}
       </div>
-    </Panel>
+    </SectionCard>
   );
 }
+
+/** Dedup verdict labels; the tone comes from the shared dedupTone (same colours as Decisions). */
+const VERDICT: Record<CompileResponse["dedup"]["decision"], string> = {
+  new: "New",
+  enrich: "Enrich",
+  duplicate: "Duplicate",
+  conflict: "Conflict",
+};
+
+const SUBHEAD = "mb-1 text-xs font-medium text-muted-foreground";
 
 function ReviewStep({
   cls, preview, draft, set, forceNew, setForceNew, busy, error, blocked, confirmTruth, setConfirmTruth, customDomains, customTypes, dbSubtypes, onBack, onSave,
@@ -990,143 +1155,168 @@ function ReviewStep({
   const d = preview.dedup;
   const isContent = draft.domain === "content";
   const subtypeSeeds = Array.from(new Set([...suggestedSubtypes(draft.domain, draft.object_type), ...dbSubtypes(draft.domain, draft.object_type)]));
-  const verdictTone = d.decision === "new" ? "green" : d.decision === "enrich" ? "info" : d.decision === "duplicate" ? "amber" : "red";
   const saveLabel = forceNew || d.decision === "new" || d.decision === "conflict" ? "Save as new object" : d.decision === "enrich" ? `Enrich ${d.targetRef}` : `Add source to ${d.targetRef}`;
+  const canSave = !busy && !!draft.name.trim();
+  const barStatus = busy
+    ? "Saving to the Brain…"
+    : error
+      ? error
+      : blocked
+        ? "Confirm this is verified company information, then save again."
+        : !draft.name.trim()
+          ? "Give the object a name to save it."
+          : forceNew || d.decision === "new"
+            ? "Ready to save as a new object."
+            : d.decision === "enrich"
+              ? `Ready to enrich ${d.targetRef}.`
+              : d.decision === "duplicate"
+                ? `Ready to add this source to ${d.targetRef}.`
+                : `Contradicts ${d.targetRef ?? "an existing object"} — it will be saved as a new object.`;
 
   return (
     <div className="space-y-4">
       {/* Dedup verdict */}
-      <div className="rounded-xl p-4" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
+      <Card className="p-4">
         <div className="flex flex-wrap items-center gap-2">
-          <Chip tone={verdictTone}>{d.decision.toUpperCase()}</Chip>
+          <Badge tone={dedupTone(d.decision)}>{VERDICT[d.decision]}</Badge>
           {d.targetRef && (
-            <span className="text-sm" style={{ color: C.text }}>
-              {d.decision === "conflict" ? "Contradicts" : "Matches"} <span className="font-mono" style={{ color: C.green }}>{d.targetRef}</span> — {d.targetName}
-              {typeof d.similarity === "number" && <span style={{ color: C.muted }}> ({Math.round(d.similarity * 100)}% similar)</span>}
+            <span className="text-[13px] text-foreground">
+              {d.decision === "conflict" ? "Contradicts" : "Matches"} <span className="font-mono text-accent-strong">{d.targetRef}</span> — {d.targetName}
+              {typeof d.similarity === "number" && <span className="text-muted-foreground"> ({Math.round(d.similarity * 100)}% similar)</span>}
             </span>
           )}
-          {d.decision === "new" && !d.targetRef && <span className="text-sm" style={{ color: C.muted }}>No existing object covers this — it will be created.</span>}
-          {preview.models.classify && <span className="ml-auto text-[11px]" style={{ color: C.muted }}>classified by {preview.models.classify}</span>}
+          {d.decision === "new" && !d.targetRef && <span className="text-[13px] text-muted-foreground">No existing object covers this — it will be created.</span>}
+          {preview.models.classify && <span className="ml-auto text-xs text-muted-foreground">Classified by {preview.models.classify}</span>}
         </div>
-        {d.rationale && <p className="mt-1 text-xs" style={{ color: C.muted }}>{d.rationale}</p>}
-        {d.conflictSummary && <p className="mt-1 text-xs" style={{ color: C.red }}>{d.conflictSummary}</p>}
+        {d.rationale && <p className="mt-1.5 text-xs text-muted-foreground">{d.rationale}</p>}
+        {d.conflictSummary && (
+          <p className="mt-1.5 flex items-start gap-1.5 text-xs text-foreground">
+            <AlertTriangle size={14} aria-hidden className="mt-px shrink-0 text-warning" /> {d.conflictSummary}
+          </p>
+        )}
         {d.decision === "enrich" && d.enrichment.length > 0 && (
-          <div className="mt-2 text-xs" style={{ color: C.text }}>
+          <p className="mt-2 text-xs text-foreground">
             Will add to {d.targetRef}: {d.enrichment.map((e) => e.heading).join(" · ")}
-          </div>
+          </p>
         )}
         {(d.decision === "enrich" || d.decision === "duplicate") && (
-          <label className="mt-2 flex items-center gap-2 text-xs" style={{ color: C.text }}>
-            <input type="checkbox" checked={forceNew} onChange={(e) => setForceNew(e.target.checked)} /> Create as a separate new object anyway
+          <label className="mt-2 flex items-center gap-2 text-[13px] text-foreground">
+            <Checkbox checked={forceNew} onChange={(e) => setForceNew(e.target.checked)} /> Create as a separate new object anyway
           </label>
         )}
         {preview.warnings.length > 0 && (
-          <ul className="mt-2 space-y-0.5 text-xs" style={{ color: C.amber }}>
-            {preview.warnings.map((w, i) => <li key={i}>• {w}</li>)}
-          </ul>
+          <Alert tone="warning" role="status" className="mt-3">
+            <ul className="space-y-0.5">
+              {preview.warnings.map((w, i) => <li key={i}>{w}</li>)}
+            </ul>
+          </Alert>
         )}
-      </div>
+      </Card>
 
       <div className="grid gap-4 lg:grid-cols-3">
         {/* Classification + governance */}
-        <Panel title="Classification" subtitle="CLASS → DOMAIN → TYPE → SUBTYPE. Reuse first; a new subtype goes to the approval queue.">
+        <SectionCard title="Classification" description="Class → domain → type → subtype. Reuse first; a new subtype goes to the approval queue." actions={<ClassBadge klass={cls} />}>
           <div className="space-y-3">
-            <Field label="Name"><KInput value={draft.name} onChange={(e) => set("name", e.target.value)} /></Field>
-            <Field label="Domain"><KSelect value={draft.domain} onChange={(e) => set("domain", e.target.value)} groups={domainGroups(cls, customDomains)} /></Field>
-            <Field label="Type"><KSelect value={draft.object_type} onChange={(e) => set("object_type", e.target.value)} groups={typeGroups(cls, customTypes)} /></Field>
-            <Field label="Subtype" hint={preview.taxonomy.find((t) => t.kind === "subtype")?.status === "proposed" ? "New value — will be proposed for approval." : subtypeSeeds.length ? `Suggested: ${subtypeSeeds.slice(0, 5).map(humanize).join(", ")}` : undefined}>
-              <KInput value={draft.subtype ?? ""} onChange={(e) => set("subtype", e.target.value || null)} list="subtype-seeds" placeholder="e.g. accountability" />
+            <Field label="Name"><Input value={draft.name} onChange={(e) => set("name", e.target.value)} /></Field>
+            <Field label="Domain"><Select value={draft.domain} onChange={(e) => set("domain", e.target.value)} groups={domainGroups(cls, customDomains)} /></Field>
+            <Field label="Type"><Select value={draft.object_type} onChange={(e) => set("object_type", e.target.value)} groups={typeGroups(cls, customTypes)} /></Field>
+            <div>
+              <Field label="Subtype" hint={preview.taxonomy.find((t) => t.kind === "subtype")?.status === "proposed" ? "New value — will be proposed for approval." : subtypeSeeds.length ? `Suggested: ${subtypeSeeds.slice(0, 5).map(humanize).join(", ")}` : undefined}>
+                <Input value={draft.subtype ?? ""} onChange={(e) => set("subtype", e.target.value || null)} list="subtype-seeds" placeholder="e.g. accountability" />
+              </Field>
               <datalist id="subtype-seeds">{subtypeSeeds.map((s) => <option key={s} value={s} />)}</datalist>
-            </Field>
-            <Field label="Applies to" hint="comma separated"><KInput value={csv(draft.applies_to)} onChange={(e) => set("applies_to", fromCsv(e.target.value))} placeholder="managers, team_leaders" /></Field>
-            <Field label="Goals"><KInput value={csv(draft.goals)} onChange={(e) => set("goals", fromCsv(e.target.value))} placeholder="accountability, ownership" /></Field>
-            <Field label="Applies to platforms" hint="Only when the teaching itself is platform-specific"><KInput value={csv(draft.applies_to_platforms)} onChange={(e) => set("applies_to_platforms", fromCsv(e.target.value))} placeholder="linkedin" /></Field>
-            <Field label="Tags"><KInput value={csv(draft.tags)} onChange={(e) => set("tags", fromCsv(e.target.value))} /></Field>
+            </div>
+            <Field label="Applies to" hint="Comma separated"><Input value={csv(draft.applies_to)} onChange={(e) => set("applies_to", fromCsv(e.target.value))} placeholder="managers, team_leaders" /></Field>
+            <Field label="Goals"><Input value={csv(draft.goals)} onChange={(e) => set("goals", fromCsv(e.target.value))} placeholder="accountability, ownership" /></Field>
+            <Field label="Applies to platforms" hint="Only when the teaching itself is platform-specific"><Input value={csv(draft.applies_to_platforms)} onChange={(e) => set("applies_to_platforms", fromCsv(e.target.value))} placeholder="linkedin" /></Field>
+            <Field label="Tags"><Input value={csv(draft.tags)} onChange={(e) => set("tags", fromCsv(e.target.value))} /></Field>
             {isContent && (
-              <div className="grid grid-cols-2 gap-2 rounded-lg p-2" style={{ border: `1px solid ${C.border}` }}>
-                <Field label="Format"><KSelect value={draft.content_format ?? ""} onChange={(e) => set("content_format", e.target.value || null)} placeholder="—" options={FORMATS.map((f) => opt(f))} /></Field>
-                <Field label="Content job"><KSelect value={draft.content_job ?? ""} onChange={(e) => set("content_job", e.target.value || null)} placeholder="—" options={CONTENT_JOBS.map((f) => opt(f))} /></Field>
-                <Field label="Funnel stage"><KSelect value={draft.funnel_stage ?? ""} onChange={(e) => set("funnel_stage", e.target.value || null)} placeholder="—" options={FUNNEL_STAGES.map((f) => ({ value: f, label: f.toUpperCase() }))} /></Field>
-                <Field label="Brand"><KSelect value={draft.brand ?? ""} onChange={(e) => set("brand", e.target.value || null)} placeholder="—" options={BRANDS.map((f) => opt(f))} /></Field>
-                <Field label="Audiences" className="col-span-2"><KInput value={csv(draft.audiences)} onChange={(e) => set("audiences", fromCsv(e.target.value))} placeholder="healthcare_practice_owner" /></Field>
-                <Field label="Length"><KSelect value={draft.content_length ?? ""} onChange={(e) => set("content_length", e.target.value || null)} placeholder="—" options={LENGTHS.map((f) => opt(f))} /></Field>
+              <div className="grid grid-cols-2 gap-2 rounded-xl border border-border p-2.5">
+                <Field label="Format"><Select value={draft.content_format ?? ""} onChange={(e) => set("content_format", e.target.value || null)} placeholder="—" options={FORMATS.map((f) => opt(f))} /></Field>
+                <Field label="Content job"><Select value={draft.content_job ?? ""} onChange={(e) => set("content_job", e.target.value || null)} placeholder="—" options={CONTENT_JOBS.map((f) => opt(f))} /></Field>
+                <Field label="Funnel stage"><Select value={draft.funnel_stage ?? ""} onChange={(e) => set("funnel_stage", e.target.value || null)} placeholder="—" options={FUNNEL_STAGES.map((f) => ({ value: f, label: f.toUpperCase() }))} /></Field>
+                <Field label="Brand"><Select value={draft.brand ?? ""} onChange={(e) => set("brand", e.target.value || null)} placeholder="—" options={BRANDS.map((f) => opt(f))} /></Field>
+                <Field label="Audiences" className="col-span-2"><Input value={csv(draft.audiences)} onChange={(e) => set("audiences", fromCsv(e.target.value))} placeholder="healthcare_practice_owner" /></Field>
+                <Field label="Length"><Select value={draft.content_length ?? ""} onChange={(e) => set("content_length", e.target.value || null)} placeholder="—" options={LENGTHS.map((f) => opt(f))} /></Field>
               </div>
             )}
           </div>
-        </Panel>
+        </SectionCard>
 
-        <Panel title="Governance & provenance" subtitle="Do I believe in it? Have we used it? Did it work? Kept as three separate questions.">
+        <SectionCard title="Governance & provenance" description="Do I believe in it? Have we used it? Did it work? Kept as three separate questions.">
           <div className="space-y-3">
             {(cls === "playbook" || cls === "platform_intelligence") && (
               <Field label="Founder endorsement">
-                <KSelect value={draft.founder_endorsement ?? "interested"} onChange={(e) => set("founder_endorsement", e.target.value || null)} options={FOUNDER_ENDORSEMENTS.map((x) => ({ value: x.id, label: `${x.label} — ${x.hint}` }))} />
+                <Select value={draft.founder_endorsement ?? "interested"} onChange={(e) => set("founder_endorsement", e.target.value || null)} options={FOUNDER_ENDORSEMENTS.map((x) => ({ value: x.id, label: `${x.label} — ${x.hint}` }))} />
               </Field>
             )}
             <div className="grid grid-cols-2 gap-2">
-              <Field label="Priority"><KSelect value={draft.priority} onChange={(e) => set("priority", e.target.value)} options={PRIORITIES.map((p) => ({ value: p.id, label: p.label }))} /></Field>
-              <Field label="Status"><KSelect value={draft.status} onChange={(e) => set("status", e.target.value)} options={OBJECT_STATUSES.map((s) => ({ value: s.id, label: s.label }))} /></Field>
+              <Field label="Priority"><Select value={draft.priority} onChange={(e) => set("priority", e.target.value)} options={PRIORITIES.map((p) => ({ value: p.id, label: p.label }))} /></Field>
+              <Field label="Status"><Select value={draft.status} onChange={(e) => set("status", e.target.value)} options={OBJECT_STATUSES.map((s) => ({ value: s.id, label: s.label }))} /></Field>
             </div>
-            <div className="flex items-center gap-2 text-xs" style={{ color: C.muted }}>
-              Authority <Chip tone={draft.authority.startsWith("A") ? "green" : draft.authority.startsWith("B") ? "info" : "amber"}>{draft.authority}</Chip>
-              {draft.evidence_level && <Chip tone="muted">{humanize(draft.evidence_level)}</Chip>}
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Effective from"><KInput type="date" value={draft.effective_from?.slice(0, 10) ?? ""} onChange={(e) => set("effective_from", e.target.value || null)} /></Field>
-              <Field label="Effective until"><KInput type="date" value={draft.effective_until?.slice(0, 10) ?? ""} onChange={(e) => set("effective_until", e.target.value || null)} /></Field>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              {/* Authority is a rank, not a status: the same outlined chip as the object page. */}
+              <Badge tone="strong" title={authorityLabel(draft.authority)}>Authority {draft.authority}</Badge>
+              {draft.evidence_level && <Badge tone="neutral">{humanize(draft.evidence_level)}</Badge>}
             </div>
             <div className="grid grid-cols-2 gap-2">
-              <Field label="Source expert"><KInput value={draft.source_expert ?? ""} onChange={(e) => set("source_expert", e.target.value || null)} /></Field>
-              <Field label="Found on"><KInput value={draft.source_platform ?? ""} onChange={(e) => set("source_platform", e.target.value || null)} /></Field>
-              <Field label="Source type"><KInput value={draft.source_type ?? ""} onChange={(e) => set("source_type", e.target.value || null)} /></Field>
-              <Field label="Source date"><KInput type="date" value={draft.source_date ?? ""} onChange={(e) => set("source_date", e.target.value || null)} /></Field>
-              <Field label="URL" className="col-span-2"><KInput value={draft.source_url ?? ""} onChange={(e) => set("source_url", e.target.value || null)} /></Field>
+              <Field label="Effective from"><Input type="date" value={draft.effective_from?.slice(0, 10) ?? ""} onChange={(e) => set("effective_from", e.target.value || null)} /></Field>
+              <Field label="Effective until"><Input type="date" value={draft.effective_until?.slice(0, 10) ?? ""} onChange={(e) => set("effective_until", e.target.value || null)} /></Field>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Source expert"><Input value={draft.source_expert ?? ""} onChange={(e) => set("source_expert", e.target.value || null)} /></Field>
+              <Field label="Found on"><Input value={draft.source_platform ?? ""} onChange={(e) => set("source_platform", e.target.value || null)} /></Field>
+              <Field label="Source type"><Input value={draft.source_type ?? ""} onChange={(e) => set("source_type", e.target.value || null)} /></Field>
+              <Field label="Source date"><Input type="date" value={draft.source_date ?? ""} onChange={(e) => set("source_date", e.target.value || null)} /></Field>
+              <Field label="URL" className="col-span-2"><Input value={draft.source_url ?? ""} onChange={(e) => set("source_url", e.target.value || null)} /></Field>
             </div>
             {draft.source_claims.length > 0 && (
               <div>
-                <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider" style={{ color: C.muted }}>Source claims (kept as claims, never facts)</p>
-                <ul className="space-y-1 text-xs" style={{ color: C.text }}>
-                  {draft.source_claims.slice(0, 8).map((c, i) => <li key={i}>• {c.claim} <span style={{ color: C.muted }}>({c.kind ?? "claim"}, unverified)</span></li>)}
+                <p className={SUBHEAD}>Source claims (kept as claims, never facts)</p>
+                <ul className="list-disc space-y-1 pl-4 text-xs text-foreground marker:text-muted-foreground">
+                  {draft.source_claims.slice(0, 8).map((c, i) => <li key={i}>{c.claim} <span className="text-muted-foreground">({c.kind ?? "claim"}, unverified)</span></li>)}
                 </ul>
               </div>
             )}
             {preview.entities.length > 0 && (
               <div>
-                <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider" style={{ color: C.muted }}>Entities found</p>
-                <div className="flex flex-wrap gap-1">{preview.entities.slice(0, 20).map((e, i) => <Chip key={i} tone="muted" title={e.role ?? undefined}>{humanize(e.kind)}: {e.name}</Chip>)}</div>
+                <p className={SUBHEAD}>Entities found</p>
+                <div className="flex flex-wrap gap-1">{preview.entities.slice(0, 20).map((e, i) => <Badge key={i} tone="neutral" title={e.role ?? undefined}>{humanize(e.kind)}: {e.name}</Badge>)}</div>
               </div>
             )}
             {preview.suggestedRelationships.length > 0 && (
               <div>
-                <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider" style={{ color: C.muted }}>Possible relationships (saved as suggestions to review)</p>
-                <ul className="space-y-1 text-xs" style={{ color: C.text }}>
-                  {preview.suggestedRelationships.map((r, i) => <li key={i}>• {humanize(r.type)} <span className="font-mono" style={{ color: C.green }}>{r.targetRef}</span> {r.targetName} <span style={{ color: C.muted }}>({Math.round(r.confidence * 100)}%)</span></li>)}
+                <p className={SUBHEAD}>Possible relationships (saved as suggestions to review)</p>
+                <ul className="list-disc space-y-1 pl-4 text-xs text-foreground marker:text-muted-foreground">
+                  {preview.suggestedRelationships.map((r, i) => <li key={i}>{humanize(r.type)} <span className="font-mono text-accent-strong">{r.targetRef}</span> {r.targetName} <span className="text-muted-foreground">({Math.round(r.confidence * 100)}%)</span></li>)}
                 </ul>
               </div>
             )}
           </div>
-        </Panel>
+        </SectionCard>
 
-        <Panel title="Compiled object" subtitle="The canonical markdown the Brain will chunk by section. Edit freely." padded={false}>
-          <div className="p-3">
-            <Field label="Summary"><KTextarea rows={3} value={draft.summary} onChange={(e) => set("summary", e.target.value)} /></Field>
+        <SectionCard title="Compiled object" description="The canonical markdown the Brain will chunk by section. Edit freely.">
+          <div className="space-y-3">
+            <Field label="Summary"><Textarea rows={3} value={draft.summary} onChange={(e) => set("summary", e.target.value)} /></Field>
+            <Field label="Compiled markdown"><Textarea mono rows={26} value={draft.compiled_markdown} onChange={(e) => set("compiled_markdown", e.target.value)} className="text-xs" /></Field>
           </div>
-          <KTextarea rows={26} value={draft.compiled_markdown} onChange={(e) => set("compiled_markdown", e.target.value)} className="rounded-none border-0 border-t font-mono text-xs" style={{ background: C.bg }} />
-        </Panel>
+        </SectionCard>
       </div>
 
-      {blocked && (
-        <div className="space-y-2 rounded-lg p-3 text-xs" style={{ background: "rgba(243,182,97,0.10)", border: "1px solid rgba(243,182,97,0.4)", color: C.amber }}>
-          <div className="flex items-start gap-2"><AlertTriangle size={14} className="mt-0.5 shrink-0" /><span>{blocked}</span></div>
-          <label className="flex items-center gap-2" style={{ color: C.text }}>
-            <input type="checkbox" checked={confirmTruth} onChange={(e) => setConfirmTruth(e.target.checked)} /> I confirm this is verified company information
-          </label>
+      {blocked && <BlockedNote reason={blocked} confirmTruth={confirmTruth} setConfirmTruth={setConfirmTruth} />}
+      {error && <Alert tone="danger">{error}</Alert>}
+
+      {/* Sticky action bar: Back and Save stay in view however far down the review is scrolled. */}
+      <StickyActionBar className="max-w-6xl">
+        <p className={cn("hidden min-w-0 truncate text-xs sm:block", error ? "text-danger" : "text-muted-foreground")} title={barStatus}>
+          {barStatus}
+        </p>
+        {/* max-w-full: at 375px the buttons wrap inside the bar instead of overflowing it. */}
+        <div className="ml-auto flex max-w-full shrink-0 flex-wrap items-center justify-end gap-2">
+          <Button variant="secondary" size="toolbar" onClick={onBack}><ArrowLeft size={14} aria-hidden /> Back to source</Button>
+          <Button size="toolbar" loading={busy} disabled={!canSave} onClick={onSave}>{!busy && <Check size={14} aria-hidden />} {saveLabel}</Button>
         </div>
-      )}
-      <ErrorNote message={error} />
-      <div className="flex items-center justify-between gap-3">
-        <KBtn variant="ghost" onClick={onBack}><ArrowLeft size={14} /> Back to source</KBtn>
-        <KBtn variant="primary" loading={busy} disabled={busy || !draft.name.trim()} onClick={onSave}><Check size={14} /> {saveLabel}</KBtn>
-      </div>
+      </StickyActionBar>
     </div>
   );
 }

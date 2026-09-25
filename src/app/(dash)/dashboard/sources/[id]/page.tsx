@@ -2,6 +2,9 @@ import { notFound } from "next/navigation";
 import { requireAdmin } from "@/lib/auth/admin";
 import { supabaseAdmin } from "@/lib/supabase";
 import { SourceHealthClient, type SourceHealth, type SourceRun } from "./SourceHealthClient";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Source" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

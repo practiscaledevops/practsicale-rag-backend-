@@ -9,23 +9,34 @@
 //
 // Transport: the route returns NDJSON — one JSON object per line. The first line
 // is the citations payload, then one line per streamed text delta.
+//
+// Layout: a full-bleed route (the shell gives it `flex h-full min-h-0 flex-col`
+// with no padding). Header and composer are fixed; only the transcript scrolls.
 
 import * as React from "react";
-import { FlaskConical, Send, User, Sparkles, FileText } from "lucide-react";
-import { PageHeader } from "@/components/ui/PageHeader";
-import { Card, CardContent } from "@/components/ui/Card";
-import { Button } from "@/components/ui/Button";
-import { Badge } from "@/components/ui/Badge";
-import { Alert } from "@/components/ui/Alert";
-import { Label } from "@/components/ui/Label";
+import { BrainCircuit, ChevronRight, Eraser, FileText, FlaskConical, Send } from "lucide-react";
+import {
+  Alert,
+  Badge,
+  Button,
+  EmptyState,
+  Label,
+  PageHeader,
+  Segmented,
+  Select,
+  Textarea,
+  type SegmentedOption,
+} from "@/components/ui";
 import { cn } from "@/lib/utils";
+import { TIER_HINTS, TIER_LABELS, sourceTypeLabel, type Tier } from "@/lib/ui-labels";
 
-type Tier = "fast" | "recommended" | "max";
-const TIERS: { value: Tier; label: string }[] = [
-  { value: "fast", label: "Fast" },
-  { value: "recommended", label: "Recommended" },
-  { value: "max", label: "Max" },
-];
+const TIERS: SegmentedOption<Tier>[] = (["fast", "recommended", "max"] as const).map((value) => ({
+  value,
+  label: TIER_LABELS[value],
+}));
+
+/** The composer grows with its text up to this height, then scrolls. */
+const MAX_INPUT_HEIGHT = 160;
 
 interface Citation {
   id: string;
@@ -49,6 +60,8 @@ export default function PlaygroundPage() {
   const [error, setError] = React.useState<string | null>(null);
 
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  const inputRef = React.useRef<HTMLTextAreaElement>(null);
+  const wasStreaming = React.useRef(false);
 
   // Populate the source-type filter from the org's documents.
   React.useEffect(() => {
@@ -62,6 +75,20 @@ export default function PlaygroundPage() {
   React.useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
+
+  // Grow the composer with its content (capped), and shrink it back after a send.
+  React.useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, MAX_INPUT_HEIGHT)}px`;
+  }, [input]);
+
+  // The composer is disabled while an answer streams; hand focus back afterwards.
+  React.useEffect(() => {
+    if (wasStreaming.current && !streaming) inputRef.current?.focus();
+    wasStreaming.current = streaming;
+  }, [streaming]);
 
   /** Merge a patch into the last (assistant) message. */
   function patchLastAssistant(patch: (m: Message) => Message) {
@@ -161,172 +188,188 @@ export default function PlaygroundPage() {
     }
   }
 
+  /** Clears the on-screen conversation only (nothing is sent or stored). */
+  function clear() {
+    setMessages([]);
+    setError(null);
+  }
+
   return (
-    <div className="flex h-[calc(100vh-7rem)] flex-col">
-      <PageHeader
-        title="Playground"
-        description="Internal grounded chat over the full org. Not a public key — admin session only."
-      />
-
-      {/* Controls */}
-      <div className="mb-4 flex flex-wrap items-end gap-4">
-        <div>
-          <Label className="mb-1.5 block">Model tier</Label>
-          <div
-            className="inline-flex rounded-lg border border-border bg-surface p-0.5"
-            role="group"
-            aria-label="Model tier"
-          >
-            {TIERS.map((t) => (
-              <button
-                key={t.value}
-                type="button"
-                onClick={() => setTier(t.value)}
-                aria-pressed={tier === t.value}
-                className={cn(
-                  "rounded-md px-3 py-1 text-sm font-medium transition-colors",
-                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                  tier === t.value
-                    ? "bg-accent/10 text-accent"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
+    <div className="flex h-full min-h-0 flex-col">
+      {/* Header + controls (fixed) */}
+      <div className="shrink-0 border-b border-border px-4 pt-5 sm:px-6 sm:pt-6">
+        <div className="mx-auto w-full max-w-3xl">
+          <PageHeader
+            className="mb-3"
+            title="Playground"
+            description="Ask the Brain a question and see the grounded answer and its sources."
+            actions={
+              <Button
+                variant="ghost"
+                size="toolbar"
+                onClick={clear}
+                disabled={streaming || messages.length === 0}
               >
-                {t.label}
-              </button>
-            ))}
+                <Eraser size={14} aria-hidden />
+                Clear
+              </Button>
+            }
+          />
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 pb-3">
+            <div className="flex items-center gap-2">
+              <span aria-hidden className="text-xs font-medium text-muted-foreground">
+                Model tier
+              </span>
+              <Segmented label="Model tier" value={tier} options={TIERS} onChange={setTier} />
+            </div>
+            <div className="flex items-center gap-2">
+              <Label htmlFor="pg-source" className="whitespace-nowrap">
+                Source type
+              </Label>
+              <Select
+                id="pg-source"
+                density="compact"
+                className="w-auto min-w-[9.5rem]"
+                value={sourceType}
+                onChange={(e) => setSourceType(e.target.value)}
+                placeholder="All sources"
+                options={sourceTypes.map((s) => ({ value: s, label: sourceTypeLabel(s) }))}
+              />
+            </div>
+            <p className="hidden text-xs text-muted-foreground lg:block">{TIER_HINTS[tier]}</p>
           </div>
-        </div>
-
-        <div>
-          <Label htmlFor="pg-source" className="mb-1.5 block">
-            Source type
-          </Label>
-          <select
-            id="pg-source"
-            value={sourceType}
-            onChange={(e) => setSourceType(e.target.value)}
-            className={cn(
-              "h-9 rounded-lg border border-border bg-surface px-3 text-sm",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
-            )}
-          >
-            <option value="">All sources</option>
-            {sourceTypes.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
         </div>
       </div>
 
-      {/* Conversation */}
-      <Card className="flex min-h-0 flex-1 flex-col">
-        <div ref={scrollRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
+      {/* Transcript (the only scrolling region) */}
+      <div
+        ref={scrollRef}
+        role="log"
+        aria-label="Conversation"
+        aria-live="polite"
+        aria-busy={streaming}
+        tabIndex={0}
+        className="min-h-0 flex-1 overflow-y-auto px-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:px-6"
+      >
+        <div
+          className={cn(
+            "mx-auto w-full max-w-3xl py-4",
+            messages.length === 0 ? "flex h-full items-center justify-center" : "space-y-5"
+          )}
+        >
           {messages.length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center text-center">
-              <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-surface-muted">
-                <FlaskConical className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
-              </div>
-              <p className="text-sm font-medium">Ask the Brain anything</p>
-              <p className="mt-1 max-w-sm text-sm text-muted-foreground">
-                Answers are grounded in retrieved context and cite their sources. Test prompts and
-                model tiers here before wiring a scoped key.
-              </p>
-            </div>
+            <EmptyState
+              variant="plain"
+              icon={FlaskConical}
+              title="Ask the Brain anything"
+              description="Answers are grounded in retrieved context and cite their sources. Test prompts and model tiers here before wiring a scoped key."
+            />
           ) : (
-            messages.map((m, i) => <MessageBubble key={i} message={m} streaming={streaming && i === messages.length - 1} />)
+            messages.map((m, i) => (
+              <MessageBubble key={i} message={m} streaming={streaming && i === messages.length - 1} />
+            ))
           )}
         </div>
+      </div>
 
-        {error && (
-          <div className="px-5 pb-3">
-            <Alert tone="danger">{error}</Alert>
-          </div>
-        )}
-
-        {/* Composer */}
-        <CardContent className="border-t border-border p-4 pt-4">
-          <div className="flex items-end gap-2">
-            <label htmlFor="pg-input" className="sr-only">
+      {/* Composer (fixed) */}
+      <div className="shrink-0 border-t border-border bg-background px-4 py-3 sm:px-6">
+        <div className="mx-auto w-full max-w-3xl">
+          {error && (
+            <Alert tone="danger" className="mb-2" onDismiss={() => setError(null)}>
+              {error}
+            </Alert>
+          )}
+          <div className="flex items-end gap-2 rounded-2xl border border-border bg-surface-muted p-2 transition-[border-color,background-color,box-shadow] duration-200 focus-within:border-accent/35 focus-within:bg-surface focus-within:shadow-float">
+            <Label htmlFor="pg-input" className="sr-only">
               Message
-            </label>
-            <textarea
+            </Label>
+            <Textarea
+              ref={inputRef}
               id="pg-input"
               rows={1}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKeyDown}
-              placeholder="Ask a question…  (Enter to send, Shift+Enter for a new line)"
+              placeholder="Ask a question…"
               disabled={streaming}
-              className={cn(
-                "flex max-h-40 min-h-[2.25rem] w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 text-sm",
-                "placeholder:text-muted-foreground",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
-                "disabled:cursor-not-allowed disabled:opacity-50"
-              )}
+              className="max-h-40 min-h-8 flex-1 resize-none border-0 bg-transparent px-2 py-1 focus-visible:border-transparent focus-visible:ring-0"
             />
-            <Button onClick={() => void send()} disabled={streaming || !input.trim()}>
-              <Send className="h-4 w-4" aria-hidden="true" />
+            <Button
+              size="toolbar"
+              onClick={() => void send()}
+              loading={streaming}
+              disabled={!input.trim()}
+              aria-label={streaming ? "Sending" : "Send"}
+            >
+              {!streaming && <Send size={14} aria-hidden />}
               <span className="hidden sm:inline">{streaming ? "Sending…" : "Send"}</span>
             </Button>
           </div>
-        </CardContent>
-      </Card>
+          <p className="mt-1.5 px-1 text-[11px] text-muted-foreground">
+            Enter to send · Shift+Enter for a new line · Searches the full org with your admin session, not a public key.
+          </p>
+        </div>
+      </div>
     </div>
   );
 }
 
 function MessageBubble({ message, streaming }: { message: Message; streaming: boolean }) {
-  const isUser = message.role === "user";
-  return (
-    <div className={cn("flex gap-3", isUser && "flex-row-reverse")}>
-      <div
-        className={cn(
-          "flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
-          isUser ? "bg-accent/10 text-accent" : "bg-surface-muted text-muted-foreground"
-        )}
-        aria-hidden="true"
-      >
-        {isUser ? <User className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />}
+  if (message.role === "user") {
+    return (
+      <div className="ml-auto w-fit max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-tr-md bg-accent-soft px-4 py-2.5 text-sm leading-6 text-foreground">
+        <span className="sr-only">You: </span>
+        {message.content}
       </div>
-      <div className={cn("min-w-0 max-w-[80%] space-y-2", isUser && "items-end")}>
-        <div
-          className={cn(
-            "rounded-xl px-4 py-2.5 text-sm",
-            isUser ? "bg-accent text-accent-foreground" : "bg-surface-muted text-foreground"
-          )}
-        >
-          {message.content ? (
-            <p className="whitespace-pre-wrap break-words">{message.content}</p>
-          ) : streaming ? (
-            <span className="inline-flex items-center gap-1 text-muted-foreground">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
-              Thinking…
-            </span>
-          ) : null}
-        </div>
+    );
+  }
 
-        {message.citations && message.citations.length > 0 && (
-          <details className="rounded-lg border border-border bg-surface px-3 py-2 text-sm">
-            <summary className="cursor-pointer select-none font-medium text-muted-foreground">
-              {message.citations.length} source{message.citations.length === 1 ? "" : "s"}
-            </summary>
-            <ul className="mt-2 space-y-2">
-              {message.citations.map((c) => (
-                <li key={c.id} className="rounded-md bg-surface-muted p-2">
-                  <div className="mb-1 flex items-center gap-2">
-                    <FileText className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
-                    <code className="text-xs text-muted-foreground">[{c.id.slice(0, 8)}]</code>
-                    {c.source_type && <Badge tone="neutral">{c.source_type}</Badge>}
-                  </div>
-                  <p className="text-xs text-muted-foreground">{c.snippet}</p>
-                </li>
-              ))}
-            </ul>
-          </details>
-        )}
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        <BrainCircuit size={14} aria-hidden className="shrink-0 text-accent" />
+        Brain
       </div>
+      {message.content ? (
+        <p className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{message.content}</p>
+      ) : streaming ? (
+        <span className="inline-flex items-center gap-2 text-[13px] text-muted-foreground">
+          <span aria-hidden className="inline-flex items-center gap-1">
+            {[0, 1, 2].map((d) => (
+              <span
+                key={d}
+                className="typing-dot h-1.5 w-1.5 rounded-full bg-current"
+                style={{ animationDelay: `${d * 0.15}s` }}
+              />
+            ))}
+          </span>
+          Thinking…
+        </span>
+      ) : null}
+
+      {message.citations && message.citations.length > 0 && (
+        <details className="group/cites rounded-xl border border-border bg-surface">
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+            <ChevronRight size={14} aria-hidden className="shrink-0 transition-transform group-open/cites:rotate-90" />
+            {message.citations.length} source{message.citations.length === 1 ? "" : "s"}
+          </summary>
+          <ul className="divide-y divide-border border-t border-border">
+            {message.citations.map((c) => (
+              <li key={c.id} className="space-y-1 px-3 py-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Badge tone="accent" className="font-mono">
+                    <FileText size={12} aria-hidden />
+                    {c.id.slice(0, 8)}
+                  </Badge>
+                  {c.source_type && <Badge tone="neutral">{sourceTypeLabel(c.source_type)}</Badge>}
+                </div>
+                <p className="text-xs leading-5 text-muted-foreground">{c.snippet}</p>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
     </div>
   );
 }
