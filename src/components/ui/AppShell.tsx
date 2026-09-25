@@ -473,7 +473,11 @@ export function AppShell({ email, role, children }: AppShellProps) {
 
   return (
     <>
-      <div className="flex h-app overflow-hidden bg-sidebar">
+      {/* relative: the frame is the containing block for absolutely positioned
+          descendants (sr-only labels, popovers). Without it they resolve against
+          the page, and one deep in a long scrolled page makes the whole document
+          taller than the window — the page then scrolls, leaving a blank strip. */}
+      <div className="relative flex h-app overflow-hidden bg-sidebar">
         <a
           href="#main"
           className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-[70] focus:rounded-full focus:bg-surface focus:px-3 focus:py-1.5 focus:text-[13px] focus:shadow-soft-lg"
@@ -592,7 +596,7 @@ export function AppShell({ email, role, children }: AppShellProps) {
             </div>
           </header>
 
-          <main id="main" tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto focus:outline-none">
+          <main id="main" tabIndex={-1} className="relative min-h-0 flex-1 overflow-y-auto focus:outline-none">
             {width === "full" ? (
               <div className="flex h-full min-h-0 flex-col">{children}</div>
             ) : (
