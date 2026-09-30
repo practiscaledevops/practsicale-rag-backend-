@@ -36,7 +36,7 @@ export const maxDuration = 60;
 type Ctx = { params: Promise<{ id: string }> };
 
 export async function GET(_req: Request, ctx: Ctx) {
-  const g = await guard();
+  const g = await guard("documents:read");
   if ("response" in g) return g.response;
   const { admin } = g;
   const id = uuid((await ctx.params).id);
@@ -174,7 +174,10 @@ export async function PATCH(req: Request, ctx: Ctx) {
 }
 
 export async function DELETE(_req: Request, ctx: Ctx) {
-  const g = await guard("documents:write");
+  // Destroys the object plus its compiled + raw documents (chunks, edges, mentions
+  // and learning records cascade), so it requires documents:delete — the PATCH
+  // above is curation and stays documents:write.
+  const g = await guard("documents:delete");
   if ("response" in g) return g.response;
   const { admin } = g;
   const { id } = await ctx.params;

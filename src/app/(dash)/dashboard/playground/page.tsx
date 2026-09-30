@@ -29,6 +29,7 @@ import {
 } from "@/components/ui";
 import { cn } from "@/lib/utils";
 import { TIER_HINTS, TIER_LABELS, sourceTypeLabel, type Tier } from "@/lib/ui-labels";
+import { PermissionGate } from "@/components/auth/PermissionGate";
 
 const TIERS: SegmentedOption<Tier>[] = (["fast", "recommended", "max"] as const).map((value) => ({
   value,
@@ -195,6 +196,7 @@ export default function PlaygroundPage() {
   }
 
   return (
+    <PermissionGate resource="documents">
     <div className="flex h-full min-h-0 flex-col">
       {/* Header + controls (fixed) */}
       <div className="shrink-0 border-b border-border px-4 pt-5 sm:px-6 sm:pt-6">
@@ -312,6 +314,7 @@ export default function PlaygroundPage() {
         </div>
       </div>
     </div>
+    </PermissionGate>
   );
 }
 

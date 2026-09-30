@@ -1,5 +1,7 @@
 import { Suspense } from "react";
-import { requireAdmin } from "@/lib/auth/admin";
+import { redirect } from "next/navigation";
+import { pageAccess } from "@/lib/auth/page-guard";
+import { NoAccessNotice } from "@/components/auth/PermissionGate";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Spinner } from "@/components/ui/Loading";
 import { EntitiesClient } from "./EntitiesClient";
@@ -12,7 +14,10 @@ export const dynamic = "force-dynamic";
 
 /** /dashboard/entities — WHO and WHAT exist inside the knowledge (people, departments, clients, offers, campaigns, frameworks…). */
 export default async function EntitiesPage() {
-  await requireAdmin();
+  // Org resolved server-side; a member without documents:read sees the notice.
+  const { session, allowed } = await pageAccess("documents:read");
+  if (!session) redirect("/login");
+  if (!allowed) return <NoAccessNotice />;
   return (
     // min-w-0: the table scrolls inside its own card; the page never widens the shell.
     <div className="min-w-0">

@@ -14,6 +14,7 @@ import { supabaseServer } from "@/lib/supabase-server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { isDemo } from "@/lib/demo/mode";
 import { DEMO_ADMIN } from "@/lib/demo/fixtures";
+import { hasAction } from "@/lib/auth/permissions";
 
 export type AdminRole = "super_admin" | "admin";
 
@@ -73,6 +74,11 @@ export async function getAdmin(): Promise<AdminSession | null> {
 /**
  * Does this session hold `action` on `resource`?
  * super_admin bypasses all checks. Permissions shape: { resource: [actions] }.
+ *
+ * Read is implied by any write-like action (see permissions.ts / hasAction): a
+ * member granted only documents:[write] passes hasPermission(…, "documents",
+ * "read"), so tightening read GETs never locks a writer out. write/delete/revoke
+ * checks are unchanged — they still require that exact action.
  */
 export function hasPermission(
   session: AdminSession,
@@ -80,6 +86,5 @@ export function hasPermission(
   action: string
 ): boolean {
   if (session.role === "super_admin") return true;
-  const actions = session.permissions?.[resource];
-  return Array.isArray(actions) && actions.includes(action);
+  return hasAction(session.permissions, resource, action);
 }

@@ -1,4 +1,6 @@
-import { requireAdmin } from "@/lib/auth/admin";
+import { redirect } from "next/navigation";
+import { pageAccess } from "@/lib/auth/page-guard";
+import { NoAccessNotice } from "@/components/auth/PermissionGate";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { AddKnowledgeWizard } from "./AddKnowledgeWizard";
 import type { Metadata } from "next";
@@ -15,7 +17,11 @@ export const dynamic = "force-dynamic";
  * canonical object; the human reviews and saves.
  */
 export default async function AddKnowledgePage() {
-  await requireAdmin("documents:write");
+  // Adding knowledge is a write (upload/create) action, so gate on documents:write:
+  // a read-only member sees the notice and the nav hides this page for them.
+  const { session, allowed } = await pageAccess("documents:write");
+  if (!session) redirect("/login");
+  if (!allowed) return <NoAccessNotice />;
   return (
     <div>
       <PageHeader

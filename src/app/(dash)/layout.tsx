@@ -14,7 +14,7 @@ export default async function DashboardLayout({
   if (!admin) redirect("/login");
 
   return (
-    <AppShell email={admin.email} role={admin.role}>
+    <AppShell email={admin.email} role={admin.role} permissions={admin.permissions}>
       {children}
     </AppShell>
   );

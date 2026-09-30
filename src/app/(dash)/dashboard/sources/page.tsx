@@ -1,4 +1,6 @@
-import { requireAdmin } from "@/lib/auth/admin";
+import { redirect } from "next/navigation";
+import { pageAccess } from "@/lib/auth/page-guard";
+import { NoAccessNotice } from "@/components/auth/PermissionGate";
 import { supabaseAdmin } from "@/lib/supabase";
 import { Alert, PageHeader } from "@/components/ui";
 import { SourcesClient, type DataSource } from "./SourcesClient";
@@ -16,14 +18,18 @@ const SELECT =
   "is_active, last_run_at, last_status, created_at";
 
 export default async function SourcesPage() {
-  // requireAdmin resolves org_id server-side from the session — never client input.
-  const admin = await requireAdmin();
+  // Access + org resolved server-side (never client input). Viewing Sources needs
+  // data_sources:read; write/delete imply read and super_admin sees all. The
+  // /api/admin/sources routes enforce the same grants server-side.
+  const { session, allowed } = await pageAccess("data_sources:read");
+  if (!session) redirect("/login");
+  if (!allowed) return <NoAccessNotice />;
 
   const db = supabaseAdmin();
   const { data, error } = await db
     .from("data_sources")
     .select(SELECT)
-    .eq("org_id", admin.orgId)
+    .eq("org_id", session.orgId)
     .order("created_at", { ascending: false });
 
   return (

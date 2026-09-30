@@ -12,7 +12,7 @@ export const preferredRegion = ["sin1"];
 export const maxDuration = 60;
 
 export async function GET() {
-  const g = await guard();
+  const g = await guard("documents:read");
   if ("response" in g) return g.response;
   const { admin } = g;
   try {

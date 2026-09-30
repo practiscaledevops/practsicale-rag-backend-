@@ -342,10 +342,11 @@ describe("PATCH /api/admin/knowledge/objects (bulk governance)", () => {
 });
 
 describe("DELETE /api/admin/knowledge/objects (bulk delete)", () => {
-  it("requires documents:write", async () => {
-    m.requireAdmin.mockRejectedValueOnce(new AdminAuthError("Missing permission 'documents:write'", 403));
+  it("requires documents:delete", async () => {
+    m.requireAdmin.mockRejectedValueOnce(new AdminAuthError("Missing permission 'documents:delete'", 403));
     const res = await bulkDelete(req("DELETE", { ids: [id(1)] }));
     expect(res.status).toBe(403);
+    expect(m.requireAdmin).toHaveBeenCalledWith("documents:delete");
     expect(m.state.tables.knowledge_objects).toHaveLength(4);
   });
 
@@ -441,11 +442,11 @@ const ent = (n: number) => rows("entities").find((e) => e.id === eid(n));
 describe("POST /api/admin/knowledge/entities (merge)", () => {
   const merge = (body: unknown) => entitiesPost(req("POST", body, ENTITIES_URL));
 
-  it("requires documents:write", async () => {
-    m.requireAdmin.mockRejectedValueOnce(new AdminAuthError("Missing permission 'documents:write'", 403));
+  it("requires documents:delete (merge destroys the source entities)", async () => {
+    m.requireAdmin.mockRejectedValueOnce(new AdminAuthError("Missing permission 'documents:delete'", 403));
     const res = await merge({ action: "merge", ids: [eid(2)], targetId: eid(1) });
     expect(res.status).toBe(403);
-    expect(m.requireAdmin).toHaveBeenCalledWith("documents:write");
+    expect(m.requireAdmin).toHaveBeenCalledWith("documents:delete");
     expect(m.state.log).toHaveLength(0);
   });
 
@@ -559,10 +560,11 @@ describe("POST /api/admin/knowledge/entities (merge in one transaction, migratio
 });
 
 describe("DELETE /api/admin/knowledge/entities (bulk delete)", () => {
-  it("requires documents:write", async () => {
-    m.requireAdmin.mockRejectedValueOnce(new AdminAuthError("Missing permission 'documents:write'", 403));
+  it("requires documents:delete", async () => {
+    m.requireAdmin.mockRejectedValueOnce(new AdminAuthError("Missing permission 'documents:delete'", 403));
     const res = await entitiesDelete(req("DELETE", { ids: [eid(2)] }, ENTITIES_URL));
     expect(res.status).toBe(403);
+    expect(m.requireAdmin).toHaveBeenCalledWith("documents:delete");
     expect(rows("entities")).toHaveLength(4);
   });
 

@@ -1,5 +1,7 @@
-// PATCH  /api/admin/collections/[id] — rename a collection (and edit description).
-// DELETE /api/admin/collections/[id] — delete a collection.
+// PATCH  /api/admin/collections/[id] — rename a collection (and edit description). Requires collections:write.
+// DELETE /api/admin/collections/[id] — delete a collection. This DESTROYS data, so it
+//   requires the dedicated collections:delete grant (not collections:write): a member
+//   who may create/rename collections and move documents cannot also delete a collection.
 //
 // org_id is resolved SERVER-SIDE from the admin session (never from the request)
 // and every query is filtered by it, so a request can only ever touch a
@@ -148,7 +150,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
 export async function DELETE(_req: Request, ctx: { params: Promise<{ id: string }> }) {
   let admin;
   try {
-    admin = await requireAdmin("collections:write");
+    admin = await requireAdmin("collections:delete");
   } catch (e) {
     return guard(e);
   }

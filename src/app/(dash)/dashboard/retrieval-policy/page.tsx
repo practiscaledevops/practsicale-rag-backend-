@@ -20,6 +20,7 @@ import {
   guardOffConfirm,
   type GuardKey,
 } from "@/components/ui/policy";
+import { PermissionGate } from "@/components/auth/PermissionGate";
 
 export default function RetrievalPolicyPage() {
   const { settings, patch, save, saving, loading, notice, dirty, savedAt, justSaved, discard } =
@@ -33,6 +34,7 @@ export default function RetrievalPolicyPage() {
   }
 
   return (
+    <PermissionGate resource="settings">
     <div className="w-full max-w-4xl">
       <PageHeader
         title="Retrieval policy"
@@ -167,5 +169,6 @@ export default function RetrievalPolicyPage() {
 
       {dialog}
     </div>
+    </PermissionGate>
   );
 }

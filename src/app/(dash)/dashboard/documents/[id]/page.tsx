@@ -1,4 +1,6 @@
-import { requireAdmin } from "@/lib/auth/admin";
+import { redirect } from "next/navigation";
+import { pageAccess } from "@/lib/auth/page-guard";
+import { NoAccessNotice } from "@/components/auth/PermissionGate";
 import { DocumentDetailClient } from "./DocumentDetailClient";
 import type { Metadata } from "next";
 
@@ -20,7 +22,9 @@ export default async function DocumentDetailPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await requireAdmin("documents:read");
+  const { session, allowed } = await pageAccess("documents:read");
+  if (!session) redirect("/login");
+  if (!allowed) return <NoAccessNotice />;
   const { id } = await params;
 
   return <DocumentDetailClient documentId={id} />;

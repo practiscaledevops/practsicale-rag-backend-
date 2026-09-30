@@ -32,6 +32,7 @@ import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { Skeleton } from "@/components/ui/Loading";
 import { Table, THead, TBody, Tr, Th, Td, TableCard } from "@/components/ui/Table";
 import { fmtDateTime } from "@/lib/format";
+import { PermissionGate } from "@/components/auth/PermissionGate";
 
 interface Prompt {
   id: string;
@@ -193,6 +194,7 @@ export default function PromptsPage() {
   const knownUseCase = PROMPT_USE_CASES.some((u) => u.key === editorUseCase.trim());
 
   return (
+    <PermissionGate resource="prompts">
     <div>
       <PageHeader
         title="Prompts"
@@ -397,6 +399,7 @@ export default function PromptsPage() {
 
       {dialog}
     </div>
+    </PermissionGate>
   );
 }
 

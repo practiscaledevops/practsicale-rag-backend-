@@ -41,6 +41,7 @@ import {
 import { CHART } from "@/lib/chart-theme";
 import { DASH, fmtCompact, fmtInt, humanize } from "@/lib/format";
 import { TIER_LABELS } from "@/lib/ui-labels";
+import { PermissionGate } from "@/components/auth/PermissionGate";
 
 /** LLM cost at 4 decimals on this page, so per-model and per-key rows add up to the total. */
 const costFmt = new Intl.NumberFormat("en-US", {
@@ -119,6 +120,7 @@ export default function AnalyticsPage() {
   const rangeLabel = `${days} days`;
 
   return (
+    <PermissionGate resource="analytics">
     <div>
       <PageHeader
         title="Analytics"
@@ -310,5 +312,6 @@ export default function AnalyticsPage() {
         </div>
       </div>
     </div>
+    </PermissionGate>
   );
 }

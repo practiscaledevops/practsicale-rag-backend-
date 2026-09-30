@@ -30,6 +30,7 @@ import {
   sameSettings,
   type GuardKey,
 } from "@/components/ui/policy";
+import { PermissionGate, usePermissionSubject } from "@/components/auth/PermissionGate";
 
 type Notice = { tone: "success" | "danger"; message: string };
 
@@ -45,6 +46,9 @@ export default function SettingsPage() {
   // and Discard. It never changes what is fetched or sent.
   const [snapshot, setSnapshot] = React.useState<RagSettings | null>(null);
   const { confirm, dialog } = useConfirm();
+  // Provider keys are super-admin-only (the /api/admin/providers route enforces
+  // it); hide the card from a settings:read member so they don't hit a 403 inside it.
+  const subject = usePermissionSubject();
 
   const load = React.useCallback(async () => {
     setError(null);
@@ -123,6 +127,7 @@ export default function SettingsPage() {
   }
 
   return (
+    <PermissionGate resource="settings">
     <div className="w-full max-w-4xl">
       <PageHeader
         title="Settings"
@@ -324,11 +329,12 @@ export default function SettingsPage() {
           </div>
         ) : null}
 
-        <ProvidersCard />
+        {subject?.role === "super_admin" && <ProvidersCard />}
       </div>
 
       {dialog}
     </div>
+    </PermissionGate>
   );
 }
 

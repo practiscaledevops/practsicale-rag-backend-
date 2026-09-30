@@ -1,7 +1,9 @@
 import { Suspense } from "react";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { PlusCircle } from "lucide-react";
-import { requireAdmin } from "@/lib/auth/admin";
+import { pageAccess } from "@/lib/auth/page-guard";
+import { NoAccessNotice } from "@/components/auth/PermissionGate";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { buttonClass } from "@/components/ui/Button";
 import { KnowledgeObjectsClient } from "./KnowledgeObjectsClient";
@@ -20,7 +22,10 @@ export const dynamic = "force-dynamic";
  * authority, currency). Org resolved server-side; data loads from the admin API.
  */
 export default async function KnowledgePage() {
-  await requireAdmin();
+  // Org resolved server-side; a member without documents:read sees the notice.
+  const { session, allowed } = await pageAccess("documents:read");
+  if (!session) redirect("/login");
+  if (!allowed) return <NoAccessNotice />;
   return (
     // min-w-0: the table scrolls inside its own card; the page never widens the shell.
     <div className="min-w-0">

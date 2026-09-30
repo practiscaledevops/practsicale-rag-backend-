@@ -1,6 +1,8 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { Plus, Upload } from "lucide-react";
-import { requireAdmin } from "@/lib/auth/admin";
+import { pageAccess } from "@/lib/auth/page-guard";
+import { NoAccessNotice } from "@/components/auth/PermissionGate";
 import { supabaseAdmin } from "@/lib/supabase";
 import { isMissingRelation } from "@/lib/knowledge-store";
 import { PageHeader } from "@/components/ui/PageHeader";
@@ -51,8 +53,13 @@ function meta(m: Record<string, unknown> | null, ...keys: string[]): string | nu
 }
 
 export default async function DocumentsPage() {
-  // requireAdmin resolves org_id server-side from the session — never client input.
-  const admin = await requireAdmin();
+  // Org is resolved server-side from the session — never client input. A member
+  // without documents:read (write/delete imply it) sees the no-access notice
+  // instead of the list; super_admin/demo always pass.
+  const { session, allowed } = await pageAccess("documents:read");
+  if (!session) redirect("/login");
+  if (!allowed) return <NoAccessNotice />;
+  const admin = session;
 
   const db = supabaseAdmin();
   const list = (select: string) =>

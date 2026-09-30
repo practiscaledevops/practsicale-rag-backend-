@@ -1,4 +1,6 @@
-import { requireAdmin } from "@/lib/auth/admin";
+import { redirect } from "next/navigation";
+import { pageAccess } from "@/lib/auth/page-guard";
+import { NoAccessNotice } from "@/components/auth/PermissionGate";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { PerformanceClient } from "./PerformanceClient";
 import type { Metadata } from "next";
@@ -8,9 +10,12 @@ export const metadata: Metadata = { title: "Performance memory" };
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** /dashboard/performance — Performance Memory: the structured numbers the Brain reasons from (close rate, show rate, profile visits…). */
+/** /dashboard/performance — Performance Memory: the structured numbers the Brain reasons from (close rate,
+ *  show rate, profile visits…). Gated on documents:read (write/delete imply read; super_admin/demo always pass). */
 export default async function PerformancePage() {
-  await requireAdmin();
+  const { session, allowed } = await pageAccess("documents:read");
+  if (!session) redirect("/login");
+  if (!allowed) return <NoAccessNotice />;
   return (
     <div>
       <PageHeader

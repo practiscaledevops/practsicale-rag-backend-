@@ -1,4 +1,6 @@
-import { requireAdmin } from "@/lib/auth/admin";
+import { redirect } from "next/navigation";
+import { pageAccess } from "@/lib/auth/page-guard";
+import { NoAccessNotice } from "@/components/auth/PermissionGate";
 import { supabaseAdmin } from "@/lib/supabase";
 import { Alert, PageHeader } from "@/components/ui";
 import { ProcessingClient, type RunRow } from "./ProcessingClient";
@@ -29,8 +31,12 @@ interface RawRun {
 }
 
 export default async function ProcessingPage() {
-  // requireAdmin resolves org_id server-side from the session — never client input.
-  const admin = await requireAdmin();
+  // Access + org resolved server-side (never client input). Processing runs belong
+  // to data sources, so viewing needs data_sources:read (write/delete imply read;
+  // super_admin sees all). The /api/admin/runs route enforces the same grant.
+  const { session, allowed } = await pageAccess("data_sources:read");
+  if (!session) redirect("/login");
+  if (!allowed) return <NoAccessNotice />;
 
   const db = supabaseAdmin();
 
@@ -41,10 +47,10 @@ export default async function ProcessingPage() {
     db
       .from("ingestion_runs")
       .select(SELECT)
-      .eq("org_id", admin.orgId)
+      .eq("org_id", session.orgId)
       .order("started_at", { ascending: false })
       .limit(LIMIT),
-    db.from("data_sources").select("id, name").eq("org_id", admin.orgId),
+    db.from("data_sources").select("id, name").eq("org_id", session.orgId),
   ]);
   const { data, error } = runsRes;
   const srcRows = srcRes.data;

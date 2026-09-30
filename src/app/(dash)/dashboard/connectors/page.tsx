@@ -42,6 +42,7 @@ import { HttpError, bulkErrorMessage, requestJson, runChunks, type BulkFailure }
 import { fmtDate, fmtInt } from "@/lib/format";
 import { statusTone } from "@/lib/ui-labels";
 import { cn } from "@/lib/utils";
+import { PermissionGate } from "@/components/auth/PermissionGate";
 
 // ---------------------------------------------------------------------------
 // Types + labels
@@ -286,6 +287,7 @@ export default function ConnectorsPage() {
   const grantTarget = grantFor ? connectors.find((c) => c.id === grantFor) ?? null : null;
 
   return (
+    <PermissionGate resource="connectors">
     <div className="min-w-0">
       <PageHeader
         title="Connectors"
@@ -392,6 +394,7 @@ export default function ConnectorsPage() {
 
       {dialog}
     </div>
+    </PermissionGate>
   );
 }
 

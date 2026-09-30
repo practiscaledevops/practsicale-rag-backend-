@@ -1,9 +1,9 @@
-import { requireAdmin, AdminAuthError } from "@/lib/auth/admin";
+import { redirect } from "next/navigation";
 import { supabaseAdmin } from "@/lib/supabase";
 import { isMissingRelation } from "@/lib/knowledge-store";
 import { objectStubs } from "@/app/api/admin/knowledge/_shared";
-import { PageHeader } from "@/components/ui/PageHeader";
-import { Alert } from "@/components/ui/Alert";
+import { pageAccess } from "@/lib/auth/page-guard";
+import { NoAccessNotice } from "@/components/auth/PermissionGate";
 import {
   KnowledgeWorkspace,
   type WsCollection,
@@ -81,30 +81,26 @@ async function loadDocuments(db: ReturnType<typeof supabaseAdmin>, orgId: string
 }
 
 export default async function CollectionsPage() {
-  let admin;
-  try {
-    admin = await requireAdmin("collections:read");
-  } catch (e) {
-    const err = e as AdminAuthError;
+  // collections:read gates the page; write/delete imply read, so an uploader who
+  // can only add documents still sees it. super_admin (and demo) always pass.
+  const { session, allowed } = await pageAccess("collections:read");
+  if (!session) redirect("/login");
+  if (!allowed) {
     // Full-bleed route: the shell adds no padding, so this branch brings its own.
     return (
       <div className="p-4 sm:p-6">
-        <PageHeader title="Collections" description="Your knowledge, organized by collection." />
-        <Alert tone="danger" title="You don't have access to collections">
-          <span className="text-danger">
-            {err.status === 403
-              ? "Your account is missing the 'collections:read' permission. Ask an administrator to grant it."
-              : err.message}
-          </span>
-        </Alert>
+        <NoAccessNotice
+          title="You don't have access to collections"
+          description="Ask a super admin to grant you the collections permission if you need it."
+        />
       </div>
     );
   }
 
   const db = supabaseAdmin();
-  const [colRes, rawDocs] = await Promise.all([loadCollections(db, admin.orgId), loadDocuments(db, admin.orgId)]);
+  const [colRes, rawDocs] = await Promise.all([loadCollections(db, session.orgId), loadDocuments(db, session.orgId)]);
   // One org-scoped lookup resolves the ref/name of every compiled object behind the listed documents.
-  const objects = await objectStubs(admin.orgId, rawDocs.map((d) => d.object_id ?? ""));
+  const objects = await objectStubs(session.orgId, rawDocs.map((d) => d.object_id ?? ""));
 
   const collections: WsCollection[] = ((colRes.data as RawCol[]) ?? []).map((c) => ({
     id: c.id,

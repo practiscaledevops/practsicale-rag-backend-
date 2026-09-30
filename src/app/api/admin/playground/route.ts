@@ -43,7 +43,10 @@ function isTierName(v: unknown): v is "fast" | "recommended" | "max" {
 export async function GET() {
   let admin;
   try {
-    admin = await requireAdmin();
+    // The playground retrieves and generates over the org's FULL knowledge base,
+    // so it is gated on "documents:read" (write/delete imply read; super_admin
+    // bypasses). A read-only analyst may probe it; a members-only admin may not.
+    admin = await requireAdmin("documents:read");
   } catch (e) {
     const err = e as AdminAuthError;
     return Response.json({ error: err.message }, { status: err.status ?? 401 });
@@ -64,7 +67,9 @@ export async function GET() {
 export async function POST(req: Request) {
   let admin;
   try {
-    admin = await requireAdmin();
+    // Same gate as GET: generating an answer reads across the org's knowledge, so
+    // it needs "documents:read" (write/delete imply read; super_admin bypasses).
+    admin = await requireAdmin("documents:read");
   } catch (e) {
     const err = e as AdminAuthError;
     return Response.json({ error: err.message }, { status: err.status ?? 401 });

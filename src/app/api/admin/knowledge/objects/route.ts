@@ -29,7 +29,7 @@ export const preferredRegion = ["sin1"];
 export const maxDuration = 120;
 
 export async function GET(req: Request) {
-  const g = await guard();
+  const g = await guard("documents:read");
   if ("response" in g) return g.response;
   const { admin } = g;
   const url = new URL(req.url);
@@ -114,7 +114,10 @@ const DELETE_BATCH = 100;
 const OBJECT_DELETE_SLICE = DELETE_BATCH / 2;
 
 export async function DELETE(req: Request) {
-  const g = await guard("documents:write");
+  // Bulk-deletes objects and their compiled/raw documents (chunks cascade), so it
+  // requires documents:delete — unlike the PATCH bulk governance edit above, which
+  // only changes status/metadata and stays documents:write.
+  const g = await guard("documents:delete");
   if ("response" in g) return g.response;
   const { admin } = g;
   const body = await readJson(req);

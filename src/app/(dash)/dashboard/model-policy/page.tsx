@@ -18,6 +18,7 @@ import {
   SettingsList,
   PolicySkeleton,
 } from "@/components/ui/policy";
+import { PermissionGate } from "@/components/auth/PermissionGate";
 
 const LINK = "font-medium text-accent-strong underline-offset-2 hover:underline";
 
@@ -26,6 +27,7 @@ export default function ModelPolicyPage() {
     usePolicySettings();
 
   return (
+    <PermissionGate resource="settings">
     <div className="w-full max-w-4xl">
       <PageHeader
         title="Model policy"
@@ -131,5 +133,6 @@ export default function ModelPolicyPage() {
         </>
       ) : null}
     </div>
+    </PermissionGate>
   );
 }

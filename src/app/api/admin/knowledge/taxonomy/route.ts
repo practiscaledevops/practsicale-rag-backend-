@@ -57,7 +57,7 @@ function parseIds(v: unknown): { ids: string[] } | { error: string } {
 }
 
 export async function GET() {
-  const g = await guard();
+  const g = await guard("documents:read");
   if ("response" in g) return g.response;
   const { admin } = g;
   const db = supabaseAdmin();

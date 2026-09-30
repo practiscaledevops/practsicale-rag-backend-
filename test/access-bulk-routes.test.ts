@@ -322,11 +322,13 @@ describe("POST /api/admin/connectors — grant to many keys", () => {
 // ---------------------------------------------------------------------------
 
 describe("DELETE /api/admin/connectors — remove many grants", () => {
-  it("requires connectors:write", async () => {
+  it("requires connectors:delete", async () => {
     m.requireAdmin.mockRejectedValueOnce(new AdminAuthError("Not authenticated", 401));
     const res = await connectorsDelete(req("/api/admin/connectors", "DELETE", { grant_ids: [id(1)] }));
     expect(res.status).toBe(401);
-    expect(m.requireAdmin).toHaveBeenLastCalledWith("connectors:write");
+    // Destroying grants is gated on connectors:delete, separate from connectors:write
+    // (register + grant), so a member can wire connectors up without tearing grants down.
+    expect(m.requireAdmin).toHaveBeenLastCalledWith("connectors:delete");
     expect(m.calls).toEqual([]);
   });
 

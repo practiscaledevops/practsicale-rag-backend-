@@ -13,7 +13,9 @@ export const preferredRegion = ["sin1"];
 export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> }) {
   let admin;
   try {
-    admin = await requireAdmin();
+    // Read of the org's knowledge — gate on documents:read (write/delete imply it,
+    // super_admin bypasses). Was previously open to any active admin.
+    admin = await requireAdmin("documents:read");
   } catch (e) {
     const err = e as AdminAuthError;
     return Response.json({ error: err.message }, { status: err.status ?? 401 });

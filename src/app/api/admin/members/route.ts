@@ -5,56 +5,57 @@
 // touch members of their own tenant.
 //
 //   GET    list members                         requireAdmin('members')
-//   POST   invite/create an admin               super_admin only
-//   PATCH  update permissions / role / active   requireAdmin('members');
+//   POST   create a member (email + password)    super_admin only
+//   PATCH  update permissions / role / active   requireAdmin('members:write');
 //                                                role changes are super_admin only
 //
-// Creating a member provisions a Supabase Auth user (invite email) and inserts an
-// org_members row that binds them to this org with a granular permission set.
+// Creating a member provisions a Supabase Auth user with the password the
+// super-admin sets (email pre-confirmed — no invite email) and inserts an
+// org_members row binding them to this org with a granular permission set. The
+// member can change their own password later from their profile. The raw
+// password is used once to create the account and is never stored or logged.
+//
+// The grantable surface + sanitize + presets all derive from the permission
+// CATALOGUE (src/lib/auth/permissions.ts) — the single source of truth the Admins
+// UI also renders from. Add a resource/action there and it appears here for free.
 
 import { supabaseAdmin } from "@/lib/supabase";
 import { requireAdmin, AdminAuthError } from "@/lib/auth/admin";
-import type { Permissions } from "@/lib/auth/session";
+import {
+  GRANTABLE_PERMISSIONS,
+  PERMISSION_CATALOGUE,
+  PRESETS,
+  clampToGranter,
+  presetById,
+  sanitizePermissions,
+  MIN_PASSWORD_LENGTH,
+} from "@/lib/auth/permissions";
+import type { AdminSession, Permissions } from "@/lib/auth/session";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
 
-// The permission surface a super-admin can grant. Input is sanitized against
-// this so an admin can never be granted an unknown resource/action.
-const ALLOWED_PERMISSIONS: Record<string, string[]> = {
-  data_sources: ["read", "write"],
-  // documents:write also covers uploads, knowledge objects, learning, taxonomy
-  // and relationships (every knowledge write route checks it).
-  documents: ["read", "write"],
-  collections: ["read", "write"],
-  prompts: ["read", "write"],
-  api_keys: ["read", "write", "revoke"],
-  connectors: ["read", "write"],
-  members: ["read", "write"],
-  settings: ["read", "write"],
-  analytics: ["read"],
-};
-
 const MEMBER_COLUMNS = "id, email, role, permissions, is_active, user_id, created_at";
-
-/** Keep only known resources/actions; drop everything else. */
-function sanitizePermissions(input: unknown): Permissions {
-  const out: Permissions = {};
-  if (!input || typeof input !== "object") return out;
-  for (const [resource, allowedActions] of Object.entries(ALLOWED_PERMISSIONS)) {
-    const requested = (input as Record<string, unknown>)[resource];
-    if (!Array.isArray(requested)) continue;
-    const actions = allowedActions.filter((a) => requested.includes(a));
-    if (actions.length > 0) out[resource] = actions;
-  }
-  return out;
-}
 
 function isValidEmail(email: unknown): email is string {
   return typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-/** GET — list this org's members. */
+/**
+ * Resolve the permission set to store from the request: an explicit permissions
+ * map wins; otherwise an optional preset id fills it. The result is sanitized to
+ * the catalogue surface AND clamped to what the granter themselves holds, so a
+ * non-super-admin can never grant a permission they lack (super_admin passes all).
+ */
+function resolvePermissions(body: Record<string, unknown>, granter: AdminSession): Permissions {
+  let raw: unknown = body?.permissions;
+  if (raw === undefined && typeof body?.preset === "string") {
+    raw = presetById(body.preset)?.permissions;
+  }
+  return clampToGranter(sanitizePermissions(raw), granter);
+}
+
+/** GET — list this org's members, plus the catalogue + presets the UI renders from. */
 export async function GET() {
   let admin;
   try {
@@ -75,8 +76,11 @@ export async function GET() {
 
   return Response.json({
     members: data ?? [],
-    viewer: { memberId: admin.memberId, role: admin.role },
-    allowedPermissions: ALLOWED_PERMISSIONS,
+    viewer: { memberId: admin.memberId, role: admin.role, permissions: admin.permissions },
+    catalogue: PERMISSION_CATALOGUE,
+    presets: PRESETS,
+    // Retained for compatibility; the UI now renders from `catalogue`.
+    allowedPermissions: GRANTABLE_PERMISSIONS,
   });
 }
 
@@ -96,22 +100,41 @@ export async function POST(req: Request) {
 
   const body = await req.json().catch(() => ({}));
   const email = body?.email;
+  const password = body?.password;
   const role = body?.role === "super_admin" ? "super_admin" : "admin";
-  const permissions = sanitizePermissions(body?.permissions);
+  // Super admins carry all access via the role; don't also store a permissions map.
+  const permissions = role === "super_admin" ? {} : resolvePermissions(body, admin);
 
   if (!isValidEmail(email)) {
     return Response.json({ error: "A valid email is required" }, { status: 400 });
   }
+  // The super-admin SETS the member's password here (internal tool — no invite
+  // email). The member can change it later from their profile. The raw value is
+  // used once to create the auth user and is never stored or logged.
+  if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH) {
+    return Response.json(
+      { error: `Set a password of at least ${MIN_PASSWORD_LENGTH} characters` },
+      { status: 400 }
+    );
+  }
 
   const db = supabaseAdmin();
 
-  // Provision the auth user via an invite (sends a set-password link). Requires
-  // SMTP configured on the Supabase project.
-  const { data: invited, error: inviteErr } = await db.auth.admin.inviteUserByEmail(email);
-  if (inviteErr) {
-    return Response.json({ error: `Could not invite user: ${inviteErr.message}` }, { status: 400 });
+  // Create the auth user with the given password, already confirmed (no email
+  // sent). A duplicate email surfaces as a clear 409 instead of an opaque 500.
+  const { data: created, error: createErr } = await db.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+  });
+  if (createErr || !created?.user?.id) {
+    const already = /already|exist|registered/i.test(createErr?.message ?? "");
+    return Response.json(
+      { error: already ? "That email already has an account" : `Could not create user: ${createErr?.message ?? "unknown error"}` },
+      { status: already ? 409 : 400 }
+    );
   }
-  const userId = invited?.user?.id ?? null;
+  const userId = created.user.id;
 
   const { data: member, error: insErr } = await db
     .from("org_members")
@@ -127,6 +150,9 @@ export async function POST(req: Request) {
     .single();
 
   if (insErr) {
+    // The org_members row failed after the auth user was created — roll the auth
+    // user back (best-effort) so a retry isn't blocked by an orphaned account.
+    await db.auth.admin.deleteUser(userId).catch(() => undefined);
     // Unique (org_id, email) violation => already a member.
     const status = insErr.code === "23505" ? 409 : 500;
     const message =
@@ -178,8 +204,11 @@ export async function PATCH(req: Request) {
     return Response.json({ error: "Only a super_admin can modify a super_admin" }, { status: 403 });
   }
 
-  if (body?.permissions !== undefined) {
-    update.permissions = sanitizePermissions(body.permissions);
+  if (body?.permissions !== undefined || typeof body?.preset === "string") {
+    // Sanitized to the catalogue AND clamped to the granter's own grants, so a
+    // non-super-admin can never escalate a member (or themselves) past what they
+    // hold. super_admin passes everything through.
+    update.permissions = resolvePermissions(body, admin);
   }
 
   if (typeof body?.is_active === "boolean") {

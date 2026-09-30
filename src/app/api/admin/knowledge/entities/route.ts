@@ -23,7 +23,7 @@ export const preferredRegion = ["sin1"];
 export const maxDuration = 60;
 
 export async function GET(req: Request) {
-  const g = await guard();
+  const g = await guard("documents:read");
   if ("response" in g) return g.response;
   const { admin } = g;
   const url = new URL(req.url);
@@ -224,7 +224,10 @@ async function mergeStepwise(
 }
 
 export async function POST(req: Request) {
-  const g = await guard("documents:write");
+  // Merge is destructive: the source entities are deleted (their mentions, metrics
+  // and aliases fold into the target), so it requires documents:delete. An uploader
+  // with only documents:write cannot merge entities away.
+  const g = await guard("documents:delete");
   if ("response" in g) return g.response;
   const { admin } = g;
   const body = await readJson(req);
@@ -274,7 +277,8 @@ export async function POST(req: Request) {
 }
 
 export async function DELETE(req: Request) {
-  const g = await guard("documents:write");
+  // Destroys entity rows (their mentions cascade), so it requires documents:delete.
+  const g = await guard("documents:delete");
   if ("response" in g) return g.response;
   const { admin } = g;
   const body = await readJson(req);

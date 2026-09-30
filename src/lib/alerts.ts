@@ -6,6 +6,8 @@
 //   error → red · warning → amber · info → blue · success → teal · ceo → purple
 
 import { supabaseAdmin } from "@/lib/supabase";
+import { can } from "@/lib/auth/permissions";
+import type { AdminSession } from "@/lib/auth/session";
 
 export type AlertPriority = "error" | "warning" | "info" | "success" | "ceo";
 
@@ -32,7 +34,13 @@ async function safeCount(
   }
 }
 
-export async function getAlerts(orgId: string): Promise<Alert[]> {
+export async function getAlerts(session: AdminSession): Promise<Alert[]> {
+  const orgId = session.orgId;
+  // Match the alert categories to what the caller may actually use, so the bell
+  // never leaks a section they can't open (super_admin bypasses via can()).
+  const seeSources = can(session, "data_sources:read");
+  const seeDocs = can(session, "documents:read");
+  const seeCollections = can(session, "collections:read");
   const db = supabaseAdmin();
   const now = Date.now();
   const staleCut = new Date(now - STALE_DAYS * 86_400_000).toISOString();
@@ -74,7 +82,8 @@ export async function getAlerts(orgId: string): Promise<Alert[]> {
   }[];
 
   // Per-source: failed last sync (red) or overdue scheduled sync (amber).
-  for (const s of sources) {
+  // Only for callers who can read data sources — else the names/health leak.
+  if (seeSources) for (const s of sources) {
     if (s.last_status === "error") {
       alerts.push({
         id: `src-error-${s.id}`,
@@ -99,7 +108,7 @@ export async function getAlerts(orgId: string): Promise<Alert[]> {
     }
   }
 
-  if (failedRuns > 0) {
+  if (seeSources && failedRuns > 0) {
     alerts.push({
       id: "runs-failed",
       priority: "error",
@@ -108,7 +117,7 @@ export async function getAlerts(orgId: string): Promise<Alert[]> {
       href: "/dashboard/quality-data",
     });
   }
-  if (reviewDue > 0) {
+  if (seeDocs && reviewDue > 0) {
     alerts.push({
       id: "review-due",
       priority: "warning",
@@ -117,7 +126,7 @@ export async function getAlerts(orgId: string): Promise<Alert[]> {
       href: "/dashboard/quality-data",
     });
   }
-  if (noOwner > 0) {
+  if (seeCollections && noOwner > 0) {
     alerts.push({
       id: "no-owner",
       priority: "warning",
@@ -126,7 +135,7 @@ export async function getAlerts(orgId: string): Promise<Alert[]> {
       href: "/dashboard/collections",
     });
   }
-  if (staleCount > 0) {
+  if (seeDocs && staleCount > 0) {
     alerts.push({
       id: "stale",
       priority: "info",

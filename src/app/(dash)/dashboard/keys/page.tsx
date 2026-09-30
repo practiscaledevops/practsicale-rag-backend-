@@ -35,6 +35,7 @@ import {
 import { HttpError, bulkErrorMessage, requestJson, type BulkFailure } from "@/lib/bulk";
 import { fmtDate, fmtInt } from "@/lib/format";
 import { sourceTypeLabel } from "@/lib/ui-labels";
+import { PermissionGate } from "@/components/auth/PermissionGate";
 
 // ---------------------------------------------------------------------------
 // Types + labels
@@ -399,6 +400,7 @@ export default function KeysPage() {
   );
 
   return (
+    <PermissionGate resource="api_keys">
     <div className="min-w-0">
       <PageHeader
         title="API keys"
@@ -565,6 +567,7 @@ export default function KeysPage() {
 
       {dialog}
     </div>
+    </PermissionGate>
   );
 }
 

@@ -19,6 +19,6 @@ export async function GET() {
     return Response.json({ error: err.message }, { status: err.status ?? 401 });
   }
 
-  const alerts = await getAlerts(admin.orgId);
+  const alerts = await getAlerts(admin);
   return Response.json({ alerts });
 }

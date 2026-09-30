@@ -1,4 +1,6 @@
-import { requireAdmin } from "@/lib/auth/admin";
+import { redirect } from "next/navigation";
+import { pageAccess } from "@/lib/auth/page-guard";
+import { NoAccessNotice } from "@/components/auth/PermissionGate";
 import { getRagQuality } from "@/lib/rag-quality";
 import { getKnowledgeInsights } from "@/lib/knowledge-insights";
 import { QualityClient } from "./QualityClient";
@@ -22,12 +24,18 @@ export default async function QualityPage({
 }: {
   searchParams: Promise<{ days?: string }>;
 }) {
-  const admin = await requireAdmin();
+  // Query intelligence reads usage + knowledge analytics, so it is gated on
+  // analytics:read (write/delete imply read; super_admin/demo bypass). A member
+  // without it sees the no-access notice instead of the section.
+  const { session, allowed } = await pageAccess("analytics:read");
+  if (!session) redirect("/login");
+  if (!allowed) return <NoAccessNotice />;
+
   const sp = await searchParams;
   const days = ALLOWED_DAYS.includes(Number(sp.days)) ? Number(sp.days) : 30;
   const [data, insights] = await Promise.all([
-    getRagQuality(admin.orgId, days),
-    getKnowledgeInsights(admin.orgId, days),
+    getRagQuality(session.orgId, days),
+    getKnowledgeInsights(session.orgId, days),
   ]);
 
   return <QualityClient data={data} insights={insights} />;

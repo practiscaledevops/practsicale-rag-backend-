@@ -50,7 +50,9 @@ import {
 import { cn } from "@/lib/utils";
 import { supabaseBrowser } from "@/lib/supabase-server";
 import { useTheme, type ThemePref } from "@/lib/theme";
-import type { AdminRole } from "@/lib/auth/session";
+import type { AdminRole, Permissions } from "@/lib/auth/session";
+import { canAccessRoute, navItemsFor, type PermissionSubject } from "@/lib/auth/permissions";
+import { PermissionProvider } from "@/components/auth/PermissionGate";
 import { Logo } from "./Brand";
 import { CommandPalette, type CommandItem } from "./CommandPalette";
 import { IconButton } from "./IconButton";
@@ -289,10 +291,12 @@ export interface AppShellProps {
   email: string;
   /** The admin's role, for the profile caption. Optional so older callers compile. */
   role?: AdminRole;
+  /** The admin's granular permissions — filters the nav and gates pages. */
+  permissions?: Permissions;
   children: React.ReactNode;
 }
 
-export function AppShell({ email, role, children }: AppShellProps) {
+export function AppShell({ email, role, permissions, children }: AppShellProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [mobileOpen, setMobileOpen] = React.useState(false);
@@ -303,6 +307,20 @@ export function AppShell({ email, role, children }: AppShellProps) {
   const [collapsedGroups, setCollapsedGroups] = React.useState<ReadonlySet<string>>(() => new Set());
   const [paletteOpen, setPaletteOpen] = React.useState(false);
   const [themePref, setThemePref] = useTheme();
+
+  // Access scope: only show what this member can use. super_admin sees everything;
+  // write/delete imply read (see permissions.ts). Filtering runs the same on the
+  // server render and the client (props are identical), so no hydration mismatch.
+  const subject = React.useMemo<PermissionSubject>(
+    () => ({ role: role ?? "admin", permissions: permissions ?? {} }),
+    [role, permissions]
+  );
+  const visibleGroups = React.useMemo<NavGroup[]>(
+    () =>
+      NAV_GROUPS.map((g) => ({ ...g, items: navItemsFor(subject, g.items) })).filter((g) => g.items.length > 0),
+    [subject]
+  );
+  const showPrimary = canAccessRoute(subject, PRIMARY_ACTION.href);
 
   const menuButtonRef = React.useRef<HTMLButtonElement>(null);
   const expandButtonRef = React.useRef<HTMLButtonElement>(null);
@@ -440,7 +458,7 @@ export function AppShell({ email, role, children }: AppShellProps) {
 
   const paletteItems = React.useMemo<CommandItem[]>(
     () => [
-      ...NAV_GROUPS.flatMap((g) =>
+      ...visibleGroups.flatMap((g) =>
         g.items.map<CommandItem>((it) => ({
           id: `nav:${it.href}`,
           group: "Navigate",
@@ -451,7 +469,9 @@ export function AppShell({ email, role, children }: AppShellProps) {
           href: it.href,
         }))
       ),
-      { id: "action:add-knowledge", group: "Actions", label: PRIMARY_ACTION.label, icon: Plus, href: PRIMARY_ACTION.href },
+      ...(showPrimary
+        ? [{ id: "action:add-knowledge", group: "Actions", label: PRIMARY_ACTION.label, icon: Plus, href: PRIMARY_ACTION.href } as CommandItem]
+        : []),
       ...THEMES.map<CommandItem>((t) => ({
         id: `action:theme-${t.value}`,
         group: "Actions",
@@ -463,7 +483,7 @@ export function AppShell({ email, role, children }: AppShellProps) {
       })),
       { id: "action:sign-out", group: "Actions", label: "Sign out", keywords: "log out", icon: LogOut, onSelect: () => void signOut() },
     ],
-    [themePref, setThemePref, signOut]
+    [themePref, setThemePref, signOut, visibleGroups, showPrimary]
   );
 
   const currentLabel = ALL_ITEMS.find((i) => isActive(pathname, i.href))?.label ?? EXTRA_LABELS[pathname];
@@ -474,6 +494,8 @@ export function AppShell({ email, role, children }: AppShellProps) {
     pathname,
     email,
     role,
+    navGroups: visibleGroups,
+    showPrimary,
     collapsedGroups,
     onToggleGroup: toggleGroup,
     onSearch: openPalette,
@@ -484,7 +506,7 @@ export function AppShell({ email, role, children }: AppShellProps) {
   };
 
   return (
-    <>
+    <PermissionProvider role={role} permissions={permissions}>
       {/* relative: the frame is the containing block for absolutely positioned
           descendants (sr-only labels, popovers). Without it they resolve against
           the page, and one deep in a long scrolled page makes the whole document
@@ -635,7 +657,7 @@ export function AppShell({ email, role, children }: AppShellProps) {
       </div>
 
       <CommandPalette open={paletteOpen} onClose={closePalette} items={paletteItems} />
-    </>
+    </PermissionProvider>
   );
 }
 
@@ -648,6 +670,10 @@ interface RailContentProps {
   pathname: string;
   email: string;
   role?: AdminRole;
+  /** Nav groups already filtered to what the member can access. */
+  navGroups: NavGroup[];
+  /** Whether the "Add knowledge" primary action is visible (documents:write). */
+  showPrimary: boolean;
   collapsedGroups: ReadonlySet<string>;
   onToggleGroup: (id: string) => void;
   onSearch: () => void;
@@ -669,6 +695,8 @@ function RailContent({
   pathname,
   email,
   role,
+  navGroups,
+  showPrimary,
   collapsedGroups,
   onToggleGroup,
   onSearch,
@@ -759,17 +787,19 @@ function RailContent({
       <div className="mx-2 flex min-h-0 flex-1 flex-col rounded-2xl bg-sidebar-panel">
         <div className="scrollbar-none fade-bottom flex min-h-0 flex-1 flex-col overflow-y-auto p-1.5 pb-5">
           <div className="space-y-0.5">
-            <Link
-              href={PRIMARY_ACTION.href}
-              onClick={onNavigate}
-              aria-current={addActive ? "page" : undefined}
-              className={cn(ROW, addActive ? ROW_ACTIVE : ROW_IDLE, "font-medium")}
-            >
-              <span className={cn(ICON_BOX, "text-accent")}>
-                <Plus size={16} strokeWidth={1.75} aria-hidden />
-              </span>
-              <span className="truncate">{PRIMARY_ACTION.label}</span>
-            </Link>
+            {showPrimary && (
+              <Link
+                href={PRIMARY_ACTION.href}
+                onClick={onNavigate}
+                aria-current={addActive ? "page" : undefined}
+                className={cn(ROW, addActive ? ROW_ACTIVE : ROW_IDLE, "font-medium")}
+              >
+                <span className={cn(ICON_BOX, "text-accent")}>
+                  <Plus size={16} strokeWidth={1.75} aria-hidden />
+                </span>
+                <span className="truncate">{PRIMARY_ACTION.label}</span>
+              </Link>
+            )}
             <button
               type="button"
               onClick={onSearch}
@@ -787,7 +817,7 @@ function RailContent({
           </div>
 
           <nav aria-label="Primary" className="mt-2 space-y-0.5">
-            {NAV_GROUPS.map((group) => {
+            {navGroups.map((group) => {
               if (!group.title) {
                 return (
                   <ul key={group.id} className="space-y-0.5">
@@ -831,18 +861,23 @@ function RailContent({
       {/* Profile card — the avatar flush with the rows' left edge (x=14) so the
           email starts on the label column (x=52); sign-out ends at x=240. */}
       <div className="m-2 flex shrink-0 items-center gap-2.5 rounded-xl bg-sidebar-panel py-2 pl-1.5 pr-2">
-        <span
-          aria-hidden
-          className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-brand-gradient text-[11px] font-semibold text-white"
+        <Link
+          href="/dashboard/profile"
+          onClick={onNavigate}
+          title="Your profile"
+          className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          {initial}
-        </span>
-        <span className="min-w-0 flex-1 leading-tight">
-          <span className="block truncate text-[13px] font-medium text-sidebar-foreground" title={email}>
-            {email}
+          <span
+            aria-hidden
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-brand-gradient text-[11px] font-semibold text-white"
+          >
+            {initial}
           </span>
-          {roleLabel && <span className="block truncate text-[11px] text-sidebar-muted">{roleLabel}</span>}
-        </span>
+          <span className="min-w-0 flex-1 leading-tight">
+            <span className="block truncate text-[13px] font-medium text-sidebar-foreground">{email}</span>
+            {roleLabel && <span className="block truncate text-[11px] text-sidebar-muted">{roleLabel}</span>}
+          </span>
+        </Link>
         <button
           type="button"
           onClick={onSignOut}

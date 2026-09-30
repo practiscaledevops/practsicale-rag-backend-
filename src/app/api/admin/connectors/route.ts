@@ -370,10 +370,14 @@ async function grantMany(db: Db, orgId: string, connectorId: string, rawKeyIds: 
 //   ?grant_id=<uuid>                  one grant (the original contract, unchanged).
 //   JSON body { grant_ids: uuid[] }   up to 200 grants in ONE org-scoped delete;
 //                                     ids not found in this org come back in `failed`.
+//
+// Destroys connector_grant rows (a key loses its access), so this requires
+// "connectors:delete" — separate from "connectors:write" (register + grant), so a
+// member can be allowed to wire connectors up without being able to tear grants down.
 export async function DELETE(req: Request) {
   let admin;
   try {
-    admin = await requireAdmin("connectors:write");
+    admin = await requireAdmin("connectors:delete");
   } catch (e) {
     return guard(e);
   }

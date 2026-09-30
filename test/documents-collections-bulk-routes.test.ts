@@ -186,9 +186,11 @@ describe("DELETE /api/admin/documents — bulk { ids }", () => {
   it("passes 401 / 403 through without touching the database", async () => {
     m.requireAdmin.mockRejectedValueOnce(new AdminAuthError("Not authenticated", 401));
     expect((await deleteDocuments(request("DELETE", "/api/admin/documents", { ids: [A] }))).status).toBe(401);
-    m.requireAdmin.mockRejectedValueOnce(new AdminAuthError("Missing permission 'documents:write'", 403));
+    m.requireAdmin.mockRejectedValueOnce(new AdminAuthError("Missing permission 'documents:delete'", 403));
     expect((await deleteDocuments(request("DELETE", "/api/admin/documents", { ids: [A] }))).status).toBe(403);
-    expect(m.requireAdmin).toHaveBeenCalledWith("documents:write");
+    // Deleting a document (single ?id= or bulk { ids }) now requires documents:delete,
+    // so an uploader with only documents:write is refused before any query runs.
+    expect(m.requireAdmin).toHaveBeenCalledWith("documents:delete");
     expect(m.calls).toHaveLength(0);
   });
 

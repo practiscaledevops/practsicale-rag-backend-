@@ -1,5 +1,6 @@
-import { notFound } from "next/navigation";
-import { requireAdmin } from "@/lib/auth/admin";
+import { notFound, redirect } from "next/navigation";
+import { pageAccess } from "@/lib/auth/page-guard";
+import { NoAccessNotice } from "@/components/auth/PermissionGate";
 import { supabaseAdmin } from "@/lib/supabase";
 import { SourceHealthClient, type SourceHealth, type SourceRun } from "./SourceHealthClient";
 import type { Metadata } from "next";
@@ -17,7 +18,11 @@ export const dynamic = "force-dynamic";
  */
 export default async function SourceHealthPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const admin = await requireAdmin();
+  // Access + org resolved server-side; viewing a source's health needs
+  // data_sources:read (write/delete imply read; super_admin sees all).
+  const { session, allowed } = await pageAccess("data_sources:read");
+  if (!session) redirect("/login");
+  if (!allowed) return <NoAccessNotice />;
   const db = supabaseAdmin();
 
   const { data: source } = await db
@@ -26,7 +31,7 @@ export default async function SourceHealthPage({ params }: { params: Promise<{ i
       "id, name, slug, source_type, kind, endpoint_url, http_method, auth_type, records_path, record_id_field, cursor_field, cursor_param, cursor_value, schedule_cron, is_active, last_run_at, last_status, created_at"
     )
     .eq("id", id)
-    .eq("org_id", admin.orgId)
+    .eq("org_id", session.orgId)
     .maybeSingle();
 
   if (!source) notFound();

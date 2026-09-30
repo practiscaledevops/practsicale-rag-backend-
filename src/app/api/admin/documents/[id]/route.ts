@@ -275,7 +275,9 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
 export async function DELETE(_req: Request, ctx: { params: Promise<{ id: string }> }) {
   let admin;
   try {
-    admin = await requireAdmin("documents:write");
+    // Destroys the document (chunks + collection memberships cascade), so this
+    // requires documents:delete — not the documents:write that GET/PATCH use.
+    admin = await requireAdmin("documents:delete");
   } catch (e) {
     return guard(e);
   }

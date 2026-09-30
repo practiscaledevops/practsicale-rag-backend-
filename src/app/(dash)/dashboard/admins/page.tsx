@@ -4,10 +4,14 @@
 //
 // Reads GET /api/admin/members (org resolved server-side, 'members' permission
 // enforced). A super_admin can invite/create admins and change roles; anyone
-// with 'members' access can edit permission grants and (de)activate members.
+// with 'members' write access can edit permission grants and (de)activate members.
+//
+// The permission checkboxes, the destructive-action warnings and the one-click
+// PRESETS all render from the CATALOGUE the API returns (src/lib/auth/permissions.ts),
+// so adding a resource/action there flows through here with no UI change.
 
 import * as React from "react";
-import { Pencil, UserPlus, Users } from "lucide-react";
+import { AlertTriangle, Pencil, UserPlus, Users } from "lucide-react";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -22,6 +26,8 @@ import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Table, THead, TBody, Tr, Th, Td, TableCard, TableSkeletonRows } from "@/components/ui/Table";
 import { fmtInt, humanize } from "@/lib/format";
+import { hasAction, can, MIN_PASSWORD_LENGTH, type CatalogueResource, type Preset } from "@/lib/auth/permissions";
+import { PermissionGate } from "@/components/auth/PermissionGate";
 import { cn } from "@/lib/utils";
 
 type Role = "admin" | "super_admin";
@@ -39,6 +45,7 @@ interface Member {
 interface Viewer {
   memberId: string;
   role: Role;
+  permissions?: Permissions;
 }
 
 const ROLE_LABEL: Record<Role, string> = { admin: "Admin", super_admin: "Super admin" };
@@ -47,13 +54,13 @@ const ROLE_OPTIONS = [
   { value: "super_admin", label: ROLE_LABEL.super_admin },
 ];
 
-/** Resource names that humanize() would get wrong. */
-const RESOURCE_LABELS: Record<string, string> = { api_keys: "API keys" };
-const resourceLabel = (r: string) => RESOURCE_LABELS[r] ?? humanize(r);
+/** Fallbacks when the catalogue hasn't loaded (or a stored resource is unknown). */
+const FALLBACK_RESOURCE_LABELS: Record<string, string> = { api_keys: "API keys", data_sources: "Data sources" };
 
-/** "Documents: Read, Write". */
-const permissionSummary = (resource: string, actions: string[]) =>
-  `${resourceLabel(resource)}: ${actions.map(humanize).join(", ")}`;
+/** Deep-clone a permissions map (so editing a preset never mutates the source). */
+function clonePermissions(perms: Permissions): Permissions {
+  return Object.fromEntries(Object.entries(perms).map(([k, v]) => [k, [...v]]));
+}
 
 /** Add/remove an action for a resource, pruning empty resources. */
 function togglePermission(
@@ -74,7 +81,8 @@ function togglePermission(
 export default function AdminsPage() {
   const [members, setMembers] = React.useState<Member[]>([]);
   const [viewer, setViewer] = React.useState<Viewer | null>(null);
-  const [allowed, setAllowed] = React.useState<Permissions>({});
+  const [catalogue, setCatalogue] = React.useState<CatalogueResource[]>([]);
+  const [presets, setPresets] = React.useState<Preset[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -90,7 +98,8 @@ export default function AdminsPage() {
       if (!res.ok) throw new Error(json?.error || `Request failed (${res.status})`);
       setMembers(json.members ?? []);
       setViewer(json.viewer ?? null);
-      setAllowed(json.allowedPermissions ?? {});
+      setCatalogue(json.catalogue ?? []);
+      setPresets(json.presets ?? []);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load members");
     } finally {
@@ -103,6 +112,20 @@ export default function AdminsPage() {
   }, [load]);
 
   const isSuper = viewer?.role === "super_admin";
+  // Who may edit members: a super admin, or a member holding members:write. A
+  // view-only member (members:read) sees the list but not the edit affordance —
+  // opening the editor would only 403 on Save (the API is the real gate).
+  const canManage = isSuper || hasAction(viewer?.permissions, "members", "write");
+
+  const resourceLabel = React.useCallback(
+    (id: string) => catalogue.find((r) => r.id === id)?.label ?? FALLBACK_RESOURCE_LABELS[id] ?? humanize(id),
+    [catalogue]
+  );
+  const actionLabel = React.useCallback(
+    (resource: string, id: string) =>
+      catalogue.find((r) => r.id === resource)?.actions.find((a) => a.id === id)?.label ?? humanize(id),
+    [catalogue]
+  );
 
   const head = (
     <THead>
@@ -119,6 +142,7 @@ export default function AdminsPage() {
   );
 
   return (
+    <PermissionGate resource="members">
     <div>
       <PageHeader
         title="Admins"
@@ -189,7 +213,9 @@ export default function AdminsPage() {
                       ) : (
                         <div className="flex flex-wrap gap-1">
                           {grants.map(([resource, actions]) => (
-                            <Tag key={resource}>{permissionSummary(resource, actions)}</Tag>
+                            <Tag key={resource}>
+                              {resourceLabel(resource)}: {actions.map((a) => actionLabel(resource, a)).join(", ")}
+                            </Tag>
                           ))}
                         </div>
                       )}
@@ -202,11 +228,13 @@ export default function AdminsPage() {
                       )}
                     </Td>
                     <Td className="text-right">
-                      <Button variant="secondary" size="sm" onClick={() => setEditing(m)}>
-                        <Pencil size={14} aria-hidden />
-                        Edit
-                        <span className="sr-only"> {m.email}</span>
-                      </Button>
+                      {canManage && (
+                        <Button variant="secondary" size="sm" onClick={() => setEditing(m)}>
+                          <Pencil size={14} aria-hidden />
+                          Edit
+                          <span className="sr-only"> {m.email}</span>
+                        </Button>
+                      )}
                     </Td>
                   </Tr>
                 );
@@ -218,7 +246,8 @@ export default function AdminsPage() {
 
       {inviteOpen && (
         <InviteDialog
-          allowed={allowed}
+          catalogue={catalogue}
+          presets={presets}
           onClose={() => setInviteOpen(false)}
           onSaved={() => {
             setInviteOpen(false);
@@ -231,7 +260,8 @@ export default function AdminsPage() {
         <EditDialog
           member={editing}
           viewer={viewer}
-          allowed={allowed}
+          catalogue={catalogue}
+          presets={presets}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
@@ -240,68 +270,150 @@ export default function AdminsPage() {
         />
       )}
     </div>
+    </PermissionGate>
+  );
+}
+
+/** One-click preset buttons that fill the checkboxes below (still editable after). */
+function PresetPicker({
+  presets,
+  onApply,
+  onClear,
+  disabled,
+  viewer,
+}: {
+  presets: Preset[];
+  onApply: (perms: Permissions) => void;
+  onClear: () => void;
+  disabled?: boolean;
+  viewer?: Viewer;
+}) {
+  if (presets.length === 0) return null;
+  // A non-super granter can't apply a preset that includes an access they lack
+  // (the server clamps it away); disable it so the UI doesn't promise a grant
+  // that won't stick.
+  const restrict = !!viewer && viewer.role !== "super_admin";
+  const presetExceeds = (p: Preset) =>
+    restrict &&
+    Object.entries(p.permissions).some(([resource, actions]) =>
+      actions.some((a) => !can({ role: viewer!.role, permissions: viewer!.permissions ?? {} }, `${resource}:${a}`))
+    );
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs font-medium text-muted-foreground">Start from a preset</p>
+      <div className="flex flex-wrap gap-1.5">
+        {presets.map((p) => (
+          <Button
+            key={p.id}
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={disabled || presetExceeds(p)}
+            title={presetExceeds(p) ? "Includes an access you don't have" : p.description}
+            onClick={() => onApply(clonePermissions(p.permissions))}
+          >
+            {p.label}
+          </Button>
+        ))}
+        <Button type="button" variant="ghost" size="sm" disabled={disabled} onClick={onClear}>
+          Clear all
+        </Button>
+      </div>
+    </div>
   );
 }
 
 /** Checkbox groups for granting resource:action permissions: one fieldset per resource. */
 function PermissionEditor({
-  allowed,
+  catalogue,
   value,
   onChange,
   disabled,
+  viewer,
 }: {
-  allowed: Permissions;
+  catalogue: CatalogueResource[];
   value: Permissions;
   onChange: (next: Permissions) => void;
   disabled?: boolean;
+  viewer?: Viewer;
 }) {
-  const resources = Object.keys(allowed);
+  // A non-super granter can only grant actions they themselves hold (mirrors the
+  // server's clampToGranter), so the UI never offers a grant the server drops.
+  const restrict = !!viewer && viewer.role !== "super_admin";
+  const canGrant = (key: string) =>
+    !restrict || can({ role: viewer!.role, permissions: viewer!.permissions ?? {} }, key);
   return (
-    <div className="grid gap-x-4 gap-y-2.5 rounded-xl border border-border p-3 sm:grid-cols-2">
-      {resources.map((resource) => (
-        <fieldset key={resource} disabled={disabled} className="min-w-0">
-          <legend className="px-2 text-xs font-medium text-muted-foreground">{resourceLabel(resource)}</legend>
-          <div className="flex flex-wrap gap-x-1">
-            {allowed[resource].map((action) => {
-              const checked = value[resource]?.includes(action) ?? false;
-              return (
-                <label
-                  key={action}
-                  className={cn(
-                    "flex h-8 cursor-pointer items-center gap-2 rounded-lg px-2 text-[13px] text-foreground transition-colors hover:bg-surface-muted",
-                    disabled && "cursor-not-allowed opacity-60"
-                  )}
-                >
-                  <Checkbox
-                    checked={checked}
-                    disabled={disabled}
-                    onChange={(e) => onChange(togglePermission(value, resource, action, e.target.checked))}
-                  />
-                  {humanize(action)}
-                </label>
-              );
-            })}
-          </div>
-        </fieldset>
-      ))}
+    <div className="grid gap-x-4 gap-y-3 rounded-xl border border-border p-3 sm:grid-cols-2">
+      {catalogue.map((resource) => {
+        // Read is implied by any write-like action; show it checked + locked then.
+        const impliedRead = hasAction(value, resource.id, "read") && !(value[resource.id]?.includes("read") ?? false);
+        const destructive = resource.actions.filter((a) => a.destructive);
+        return (
+          <fieldset key={resource.id} disabled={disabled} className="min-w-0">
+            <legend className="px-2 text-xs font-medium text-muted-foreground" title={resource.description}>
+              {resource.label}
+            </legend>
+            <div className="flex flex-wrap gap-x-1">
+              {resource.actions.map((action) => {
+                const isRead = action.id === "read";
+                const checked = isRead ? impliedRead || (value[resource.id]?.includes("read") ?? false) : value[resource.id]?.includes(action.id) ?? false;
+                const lockRead = isRead && impliedRead;
+                const ungrantable = !canGrant(`${resource.id}:${action.id}`);
+                return (
+                  <label
+                    key={action.id}
+                    title={ungrantable ? "You can't grant an access you don't have yourself" : action.description}
+                    className={cn(
+                      "flex h-8 items-center gap-2 rounded-lg px-2 text-[13px] transition-colors",
+                      action.destructive ? "text-danger" : "text-foreground",
+                      disabled || lockRead || ungrantable ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-surface-muted"
+                    )}
+                  >
+                    <Checkbox
+                      checked={checked}
+                      disabled={disabled || lockRead || ungrantable}
+                      onChange={(e) => onChange(togglePermission(value, resource.id, action.id, e.target.checked))}
+                    />
+                    {action.label}
+                  </label>
+                );
+              })}
+            </div>
+            {destructive.length > 0 && (
+              <p className="mt-0.5 flex items-center gap-1 px-2 text-xs text-danger">
+                <AlertTriangle size={12} aria-hidden className="shrink-0" />
+                {destructive.map((a) => a.label).join(" / ")} permanently removes data.
+              </p>
+            )}
+          </fieldset>
+        );
+      })}
     </div>
   );
 }
 
-/** The whole permission picker, as a labelled group. */
+/** The whole permission picker: presets on top, granular checkboxes below. */
 function PermissionsField({
-  allowed,
+  catalogue,
+  presets,
   value,
   onChange,
+  viewer,
 }: {
-  allowed: Permissions;
+  catalogue: CatalogueResource[];
+  presets: Preset[];
   value: Permissions;
   onChange: (next: Permissions) => void;
+  viewer?: Viewer;
 }) {
   return (
-    <fieldset className="min-w-0 space-y-1.5">
+    <fieldset className="min-w-0 space-y-2.5">
       <legend className="text-xs font-medium text-muted-foreground">Permissions</legend>
-      <PermissionEditor allowed={allowed} value={value} onChange={onChange} />
+      <PresetPicker presets={presets} onApply={onChange} onClear={() => onChange({})} viewer={viewer} />
+      <PermissionEditor catalogue={catalogue} value={value} onChange={onChange} viewer={viewer} />
+      <p className="text-xs text-muted-foreground">
+        Holding write or delete on a section includes read of it.
+      </p>
     </fieldset>
   );
 }
@@ -325,19 +437,23 @@ function RoleSelect({ value, onChange, ...props }: RoleSelectProps) {
 }
 
 function InviteDialog({
-  allowed,
+  catalogue,
+  presets,
   onClose,
   onSaved,
 }: {
-  allowed: Permissions;
+  catalogue: CatalogueResource[];
+  presets: Preset[];
   onClose: () => void;
   onSaved: () => void;
 }) {
   const [email, setEmail] = React.useState("");
+  const [password, setPassword] = React.useState("");
   const [role, setRole] = React.useState<Role>("admin");
-  const [permissions, setPermissions] = React.useState<Permissions>({ analytics: ["read"] });
+  const [permissions, setPermissions] = React.useState<Permissions>({});
   const [saving, setSaving] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
+  const pwTooShort = password.length > 0 && password.length < MIN_PASSWORD_LENGTH;
 
   async function submit() {
     setSaving(true);
@@ -346,24 +462,26 @@ function InviteDialog({
       const res = await fetch("/api/admin/members", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email: email.trim(), role, permissions }),
+        body: JSON.stringify({ email: email.trim(), password, role, permissions }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || `Request failed (${res.status})`);
       onSaved();
     } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : "Could not create admin");
+      setErr(e instanceof Error ? e.message : "Could not add the member");
     } finally {
       setSaving(false);
     }
   }
 
+  const canSubmit = !!email.trim() && password.length >= MIN_PASSWORD_LENGTH;
+
   return (
     <Dialog
       open
       onClose={onClose}
-      title="Invite an admin"
-      description="They receive an email invite to set a password, then can sign in with the access you grant."
+      title="Add a member"
+      description="Set their email and a password; they can sign in straight away and change the password from their profile."
       size="lg"
       closeOnBackdrop={false}
       dismissible={!saving}
@@ -372,8 +490,8 @@ function InviteDialog({
           <Button variant="secondary" onClick={onClose} disabled={saving}>
             Cancel
           </Button>
-          <Button onClick={() => void submit()} disabled={!email.trim()} loading={saving}>
-            {saving ? "Inviting…" : "Send invite"}
+          <Button onClick={() => void submit()} disabled={!canSubmit} loading={saving}>
+            {saving ? "Adding…" : "Add member"}
           </Button>
         </>
       }
@@ -393,6 +511,21 @@ function InviteDialog({
         </Field>
 
         <Field
+          label="Password"
+          hint={`At least ${MIN_PASSWORD_LENGTH} characters. Share it with them securely; they can change it from their profile.`}
+          error={pwTooShort ? `Use at least ${MIN_PASSWORD_LENGTH} characters` : undefined}
+        >
+          <Input
+            id="invite-password"
+            type="password"
+            autoComplete="new-password"
+            placeholder="Set a password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </Field>
+
+        <Field
           label="Role"
           hint={
             role === "super_admin"
@@ -403,7 +536,9 @@ function InviteDialog({
           <RoleSelect id="invite-role" value={role} onChange={setRole} />
         </Field>
 
-        {role === "admin" && <PermissionsField allowed={allowed} value={permissions} onChange={setPermissions} />}
+        {role === "admin" && (
+          <PermissionsField catalogue={catalogue} presets={presets} value={permissions} onChange={setPermissions} />
+        )}
       </div>
     </Dialog>
   );
@@ -412,13 +547,15 @@ function InviteDialog({
 function EditDialog({
   member,
   viewer,
-  allowed,
+  catalogue,
+  presets,
   onClose,
   onSaved,
 }: {
   member: Member;
   viewer: Viewer;
-  allowed: Permissions;
+  catalogue: CatalogueResource[];
+  presets: Preset[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -507,7 +644,7 @@ function EditDialog({
           </Field>
 
           {role === "admin" ? (
-            <PermissionsField allowed={allowed} value={permissions} onChange={setPermissions} />
+            <PermissionsField catalogue={catalogue} presets={presets} value={permissions} onChange={setPermissions} viewer={viewer} />
           ) : (
             <p className="text-[13px] text-muted-foreground">
               Super admins have full access; individual permissions don&apos;t apply.

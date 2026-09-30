@@ -110,7 +110,10 @@ function parseIds(value: unknown): { ids: string[] } | { error: string } {
 export async function DELETE(req: Request) {
   let admin;
   try {
-    admin = await requireAdmin("documents:write");
+    // Destroys documents (chunks + collection memberships cascade). Single (?id=)
+    // and bulk ({ ids }) share this handler; both require documents:delete, so an
+    // uploader with only documents:write can never delete.
+    admin = await requireAdmin("documents:delete");
   } catch (e) {
     const err = e as AdminAuthError;
     return Response.json({ error: err.message }, { status: err.status ?? 401 });
