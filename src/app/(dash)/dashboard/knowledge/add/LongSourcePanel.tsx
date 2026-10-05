@@ -45,7 +45,7 @@ import {
 import { MAX_TEXT_CHARS } from "@/lib/ingest-adapters/pure";
 import { slugify, humanize, type IntelligenceClass, type RealityBucket } from "@/lib/intelligence-taxonomy";
 
-type SectionStatus = "idle" | "queued" | "compiling" | "new" | "enriched" | "duplicate" | "conflict" | "blocked" | "failed";
+type SectionStatus = "idle" | "queued" | "compiling" | "new" | "enriched" | "duplicate" | "conflict" | "blocked" | "failed" | "submitted";
 const FINISHED: SectionStatus[] = ["new", "enriched", "duplicate", "conflict"];
 const CONCURRENCY = 2;
 
@@ -84,6 +84,8 @@ interface CompileReply {
   taxonomy?: { status: string }[];
   object: { id: string; ref: string; name: string } | null;
   target: { id: string; ref: string; name: string } | null;
+  /** Set when a non-approver's section was parked for review instead of ingested. */
+  pending?: boolean;
 }
 
 /** What is filed in localStorage per source (no source text — only the outline and the outcomes). */
@@ -165,6 +167,7 @@ const STATUS_BADGE: Record<SectionStatus, { tone: BadgeTone; label: string }> = 
   conflict: { tone: dedupTone("conflict"), label: "Conflict" },
   blocked: { tone: dedupTone("blocked"), label: "Blocked" },
   failed: { tone: dedupTone("failed"), label: "Failed" },
+  submitted: { tone: "info", label: "Sent for approval" },
 };
 
 export function LongSourcePanel({
@@ -387,7 +390,8 @@ export function LongSourcePanel({
           }),
         });
         const proposed = (res.taxonomy ?? []).some((t) => t.status === "proposed");
-        if (res.blocked) patch(s.index, { status: "blocked", note: res.blocked.reason });
+        if (res.pending) patch(s.index, { status: "submitted", ref: undefined, id: undefined, note: "Awaiting a super admin's approval before it goes live.", proposed: false });
+        else if (res.blocked) patch(s.index, { status: "blocked", note: res.blocked.reason });
         else if (res.object) patch(s.index, { status: res.dedup?.decision === "conflict" ? "conflict" : "new", ref: res.object.ref, id: res.object.id, note: undefined, proposed });
         else if (res.target) patch(s.index, { status: res.dedup?.decision === "duplicate" ? "duplicate" : "enriched", ref: res.target.ref, id: res.target.id, note: undefined, proposed });
         else patch(s.index, { status: "failed", note: "The compiler returned no object." });
@@ -485,6 +489,7 @@ export function LongSourcePanel({
     count("duplicate") ? `${count("duplicate")} duplicate` : "",
     count("conflict") ? `${count("conflict")} conflict` : "",
     count("blocked") ? `${count("blocked")} blocked` : "",
+    count("submitted") ? `${count("submitted")} sent for approval` : "",
     failed ? `${failed} failed` : "",
   ].filter(Boolean).join(" · ");
 

@@ -74,7 +74,7 @@ const SUPPORTED = [".md", ".markdown", ".txt", ".text", ".pdf"];
 // How many files may be in flight at once (keeps the embedder from being swamped).
 const CONCURRENCY = 3;
 
-type Status = "queued" | "uploading" | "processing" | "done" | "error";
+type Status = "queued" | "uploading" | "processing" | "done" | "submitted" | "error";
 
 interface FileEntry {
   id: string;
@@ -84,6 +84,8 @@ interface FileEntry {
   status: Status;
   progress: number; // 0-100 during upload; 100 while processing
   result?: { documentId: string; chunks: number; skipped: boolean };
+  /** Set when the upload was parked for approval instead of ingested (non-approver). */
+  submissionId?: string;
   error?: string;
 }
 
@@ -115,6 +117,7 @@ const STATUS_KEY: Record<Status, string> = {
   uploading: "in_progress",
   processing: "processing",
   done: "done",
+  submitted: "pending_review",
   error: "failed",
 };
 
@@ -144,6 +147,13 @@ function StatusPill({ entry }: { entry: FileEntry }) {
           {entry.result?.skipped
             ? "Already ingested"
             : `Done · ${entry.result?.chunks ?? 0} chunks`}
+        </Badge>
+      );
+    case "submitted":
+      return (
+        <Badge tone={tone}>
+          <CheckCircle2 size={12} aria-hidden="true" />
+          Sent for approval
         </Badge>
       );
     case "error":
@@ -209,6 +219,17 @@ export function UploadsClient({ collections = [] }: { collections?: CollectionOp
       xhr.onload = () => {
         const json = parseJson(xhr.responseText || "");
         if (xhr.status >= 200 && xhr.status < 300) {
+          if (json.pending === true) {
+            // Non-approver: parked for review, NOT ingested. Do not claim it's live.
+            patch(entry.id, {
+              status: "submitted",
+              progress: 100,
+              submissionId: typeof json.submissionId === "string" ? json.submissionId : undefined,
+            });
+            setLive(`${entry.name}: sent for approval`);
+            done();
+            return;
+          }
           const result = {
             documentId: typeof json.documentId === "string" ? json.documentId : "",
             chunks: typeof json.chunks === "number" ? json.chunks : Number(json.chunks) || 0,
@@ -354,6 +375,7 @@ export function UploadsClient({ collections = [] }: { collections?: CollectionOp
     (e) => e.status === "queued" || e.status === "uploading" || e.status === "processing"
   ).length;
   const doneCount = entries.filter((e) => e.status === "done").length;
+  const submittedCount = entries.filter((e) => e.status === "submitted").length;
   const errorCount = entries.filter((e) => e.status === "error").length;
   const retryable = entries.filter(isRetryable);
   const totalChunks = entries.reduce(
@@ -490,7 +512,7 @@ export function UploadsClient({ collections = [] }: { collections?: CollectionOp
           meta={
             inFlight > 0
               ? `${inFlight} in progress…`
-              : `${doneCount} done${errorCount ? `, ${errorCount} failed` : ""} · ${totalChunks} chunks added`
+              : `${doneCount} done${submittedCount ? `, ${submittedCount} sent for approval` : ""}${errorCount ? `, ${errorCount} failed` : ""} · ${totalChunks} chunks added`
           }
           actions={
             <>
@@ -500,7 +522,7 @@ export function UploadsClient({ collections = [] }: { collections?: CollectionOp
                   Retry all failed ({retryable.length})
                 </Button>
               )}
-              <Button variant="ghost" size="sm" onClick={clearFinished} disabled={doneCount + errorCount === 0}>
+              <Button variant="ghost" size="sm" onClick={clearFinished} disabled={doneCount + submittedCount + errorCount === 0}>
                 Clear finished
               </Button>
             </>
@@ -580,6 +602,18 @@ export function UploadsClient({ collections = [] }: { collections?: CollectionOp
                 Ingested files are now searchable.{" "}
                 <Link href="/dashboard/documents" className="font-medium text-accent-strong underline underline-offset-2">
                   View documents
+                </Link>
+                .
+              </Alert>
+            </div>
+          )}
+
+          {submittedCount > 0 && (
+            <div className="border-t border-border p-4">
+              <Alert tone="warning">
+                {submittedCount} file{submittedCount === 1 ? "" : "s"} sent for approval — a super admin will review before they go live (not searchable yet).{" "}
+                <Link href="/dashboard/knowledge/approvals" className="font-medium text-accent-strong underline underline-offset-2">
+                  View approvals
                 </Link>
                 .
               </Alert>

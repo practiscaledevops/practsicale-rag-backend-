@@ -17,6 +17,7 @@ import { supabaseAdmin } from "@/lib/supabase";
 import { pdfToText } from "@/lib/ingest";
 import { compileKnowledge, type CompileInput, type CompilePreview, type DraftOverrides } from "@/lib/knowledge-compiler";
 import { isIntelligenceClass, isRealityBucket } from "@/lib/intelligence-taxonomy";
+import { isApprover, writeSubmission, type CompileSubmissionPayload } from "@/lib/knowledge-submissions";
 import { guard, dbError, str } from "../_shared";
 
 export const runtime = "nodejs";
@@ -42,6 +43,7 @@ export async function POST(req: Request) {
   let payload: Record<string, unknown> = {};
   let text = "";
   let title = "";
+  let hasFile = false;
   const contentType = req.headers.get("content-type") ?? "";
 
   if (contentType.includes("multipart/form-data")) {
@@ -60,6 +62,7 @@ export async function POST(req: Request) {
     }
     const file = form.get("file");
     if (file instanceof File) {
+      hasFile = true;
       if (file.size > MAX_UPLOAD_BYTES) return Response.json({ error: "File too large (max 25 MB)." }, { status: 413 });
       const ext = extOf(file.name || "");
       try {
@@ -93,7 +96,91 @@ export async function POST(req: Request) {
   const overrides = (payload.overrides && typeof payload.overrides === "object" ? payload.overrides : null) as DraftOverrides | null;
   const preview = (payload.preview && typeof payload.preview === "object" ? payload.preview : null) as CompilePreview | null;
 
+  // Everything compileKnowledge needs, resolved once — shared by the direct commit
+  // and by the pending submission a non-approver's commit is parked as.
+  const resolvedText = text || preview?.draft.teaching_core || "";
+  const forceNew = payload.forceNew === true || payload.forceNew === "true";
+  const dedupTargetRef = str(payload.dedupTargetRef, 32) || null;
+  const confirmTruth = payload.confirmTruth === true || payload.confirmTruth === "true";
+  const storeRaw =
+    typeof payload.storeRaw === "boolean" ? payload.storeRaw : payload.storeRaw === "true" ? true : payload.storeRaw === "false" ? false : undefined;
+
   const db = supabaseAdmin();
+
+  // APPROVAL GATE: a commit by someone who is NOT (super_admin OR documents:approve)
+  // does not ingest. Park a pending submission carrying the full replay payload + the
+  // compiled proposal, and return { pending } WITHOUT writing an ingestion_runs row or
+  // calling compileKnowledge. Preview still runs for everyone (nothing is written).
+  // Who-approves is resolved from the session, never the request body.
+  if (mode === "commit" && !isApprover(admin)) {
+    try {
+      // Governance escalation is approver-only: a non-approver cannot silently set the
+      // object's authority or founder endorsement, nor bypass the Company-Truth guard.
+      const safeOverrides: DraftOverrides | null = overrides ? { ...overrides } : null;
+      if (safeOverrides) {
+        delete safeOverrides.authority;
+        delete safeOverrides.founder_endorsement;
+      }
+      // Do NOT trust the client-supplied preview for the reviewer's view. Recompute the
+      // proposal server-side with the (sanitised) edits already folded in, so the stored
+      // preview is EXACTLY what the approver sees AND what replay will ingest — the client
+      // can no longer show a benign proposal while different `overrides` / raw text go live.
+      // With a client preview this reuses it (no extra model calls); otherwise it runs the
+      // normal preview pipeline. It writes no chunk / document / object (mode "preview").
+      const faithful = await compileKnowledge(db, {
+        orgId: admin.orgId,
+        intelligenceClass: cls,
+        bucket,
+        text: resolvedText,
+        title: title || null,
+        hints,
+        overrides: safeOverrides,
+        preview,
+        mode: "preview",
+        forceNew,
+        dedupTargetRef,
+        confirmTruth: false,
+        storeRaw,
+      });
+      if (faithful.blocked) return Response.json({ error: faithful.blocked.reason }, { status: 422 });
+      const reviewedPreview = faithful as CompilePreview;
+      const reviewedDraft = reviewedPreview.draft as { teaching_core?: string; name?: string } | undefined;
+      // The stored payload carries NO overrides, NO raw-archive lane and no truth
+      // confirmation: on approve, replay ingests only the reviewed preview — nothing hidden.
+      const submissionPayload: CompileSubmissionPayload = {
+        intelligenceClass: cls,
+        bucket,
+        text: reviewedDraft?.teaching_core || resolvedText,
+        title: title || null,
+        hints,
+        overrides: null,
+        forceNew,
+        dedupTargetRef,
+        confirmTruth: false,
+        storeRaw: false,
+      };
+      const submissionId = await writeSubmission(db, {
+        orgId: admin.orgId,
+        submittedBy: admin.memberId,
+        submittedByEmail: admin.email,
+        title: title || reviewedDraft?.name || null,
+        kind: hasFile ? "file" : "paste",
+        commitVia: "compile",
+        intelligenceClass: cls,
+        bucket,
+        payload: submissionPayload,
+        preview: reviewedPreview,
+      });
+      return Response.json({
+        pending: true,
+        submissionId,
+        message: "Sent for approval — a super admin will review it before it goes live.",
+      });
+    } catch (e) {
+      return dbError(e);
+    }
+  }
+
   let runId: string | null = null;
   if (mode === "commit") {
     const { data: run } = await db
@@ -109,16 +196,16 @@ export async function POST(req: Request) {
       orgId: admin.orgId,
       intelligenceClass: cls,
       bucket,
-      text: text || preview?.draft.teaching_core || "",
+      text: resolvedText,
       title: title || null,
       hints,
       overrides,
       preview,
       mode,
-      forceNew: payload.forceNew === true || payload.forceNew === "true",
-      dedupTargetRef: str(payload.dedupTargetRef, 32) || null,
-      confirmTruth: payload.confirmTruth === true || payload.confirmTruth === "true",
-      storeRaw: typeof payload.storeRaw === "boolean" ? payload.storeRaw : payload.storeRaw === "true" ? true : payload.storeRaw === "false" ? false : undefined,
+      forceNew,
+      dedupTargetRef,
+      confirmTruth,
+      storeRaw,
       runId,
       createdBy: admin.email,
     });

@@ -38,6 +38,7 @@ import {
   Settings,
   Share2,
   ShieldAlert,
+  ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   Sun,
@@ -103,6 +104,7 @@ const NAV_GROUPS: NavGroup[] = [
       { href: "/dashboard/collections", label: "Collections", icon: FolderTree },
       { href: "/dashboard/learning", label: "Learning Lab", icon: Lightbulb },
       { href: "/dashboard/performance", label: "Performance memory", icon: LineChart },
+      { href: "/dashboard/knowledge/approvals", label: "Approvals", icon: ShieldCheck, keywords: "approve review submissions queue" },
     ],
   },
   {
@@ -175,7 +177,7 @@ function activeGroupId(pathname: string): string | undefined {
 
 // Layout contract for pages (see revamp plan §4).
 const FULL_BLEED = new Set(["/dashboard/collections", "/dashboard/playground"]);
-const WIDE_EXACT = new Set(["/dashboard/documents", "/dashboard/knowledge", "/dashboard/sources"]);
+const WIDE_EXACT = new Set(["/dashboard/documents", "/dashboard/knowledge", "/dashboard/knowledge/approvals", "/dashboard/sources"]);
 const WIDE_PREFIX = [
   "/dashboard/learning",
   "/dashboard/processing",

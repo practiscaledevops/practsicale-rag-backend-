@@ -195,6 +195,9 @@ interface CompileResponse {
   chunks: number;
   error?: string;
   migrationMissing?: boolean;
+  /** Set when the commit was parked for approval instead of ingested (non-approver). */
+  pending?: boolean;
+  submissionId?: string;
 }
 
 /** A taxonomy value the org added (domain / object_type / subtype …). */
@@ -308,6 +311,8 @@ export function AddKnowledgeWizard() {
   const [confirmTruth, setConfirmTruth] = React.useState(false);
   const [blocked, setBlocked] = React.useState<string | null>(null);
   const [result, setResult] = React.useState<CompileResponse | null>(null);
+  // The commit was parked for approval (a non-approver) instead of going live.
+  const [pending, setPending] = React.useState(false);
   const stepperRef = React.useRef<HTMLDivElement>(null);
   const shownStep = React.useRef(step);
   // A step change unmounts the button that held focus: move focus to the new current step.
@@ -522,10 +527,18 @@ export function AddKnowledgeWizard() {
           confirmTruth,
         }),
       });
+      if (res.pending) {
+        // A non-approver: parked for review, NOT live. Show the approval state.
+        setPending(true);
+        setResult(res);
+        setStep(4);
+        return;
+      }
       if (res.blocked) {
         setBlocked(res.blocked.reason);
         return;
       }
+      setPending(false);
       setResult(res);
       setStep(4);
       void loadTaxonomy();
@@ -542,7 +555,7 @@ export function AddKnowledgeWizard() {
     setUpload(null); setRetryFile(null); setSingleAnyway(false); setLongActive(false); setLongRunning(false);
     setHints({ sourceExpert: "", sourcePlatform: "", sourceType: "", sourceUrl: "", sourceDate: "", isFounderVoice: false });
     setClassify("auto"); setPick({ domain: "", objectType: "", subtype: "" });
-    setPreview(null); setDraft(null); setResult(null); setError(null); setBlocked(null); setForceNew(false); setConfirmTruth(false);
+    setPreview(null); setDraft(null); setResult(null); setPending(false); setError(null); setBlocked(null); setForceNew(false); setConfirmTruth(false);
   }
 
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft((d) => (d ? { ...d, [k]: v } : d));
@@ -834,7 +847,24 @@ export function AddKnowledgeWizard() {
         />
       )}
 
-      {step === 4 && result && (
+      {step === 4 && result && pending && (
+        <SectionCard icon={ListChecks} title="Sent for approval">
+          <div className="space-y-3" role="status">
+            <p className="text-[13px] text-foreground">
+              Submitted for review — a super admin will approve it before it goes live. It is{" "}
+              <span className="font-medium">not searchable yet</span>.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Track its status in <Link href="/dashboard/knowledge/approvals" className={TEXT_LINK}>Approvals</Link>.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="secondary" size="toolbar" onClick={reset}>Add another</Button>
+            </div>
+          </div>
+        </SectionCard>
+      )}
+
+      {step === 4 && result && !pending && (
         <SectionCard icon={Check} title="Saved to the Brain">
           <div className="space-y-3" role="status">
             {result.object ? (

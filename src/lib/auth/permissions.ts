@@ -66,6 +66,11 @@ export const PERMISSION_CATALOGUE: CatalogueResource[] = [
       READ,
       { id: "write", label: "Write", description: "Upload, create, edit, curate and confirm knowledge." },
       {
+        id: "approve",
+        label: "Approve",
+        description: "Review and approve or reject knowledge other members submit. An authority, not a destructive action.",
+      },
+      {
         id: "delete",
         label: "Delete",
         description: "Permanently delete documents, knowledge objects and entities (single and in bulk).",
@@ -74,6 +79,10 @@ export const PERMISSION_CATALOGUE: CatalogueResource[] = [
     ],
     nav: [
       { href: "/dashboard/knowledge/add", label: "Add knowledge", action: "write" },
+      // Readable by anyone with documents:read: an uploader opens it to see their own
+      // submissions' status; approvers additionally get the review queue + approve/reject
+      // (gated by documents:approve in the page and enforced by the POST route).
+      { href: "/dashboard/knowledge/approvals", label: "Approvals" },
       { href: "/dashboard/knowledge", label: "Knowledge objects" },
       { href: "/dashboard/documents", label: "Documents" },
       { href: "/dashboard/learning", label: "Learning Lab" },
@@ -353,12 +362,23 @@ export const PRESETS: Preset[] = [
     },
   },
   {
+    id: "knowledge_approver",
+    label: "Knowledge approver",
+    description:
+      "Upload and curate knowledge, and review and approve or reject what other members submit. No deletes, and no access to keys, connectors, members, prompts or settings.",
+    permissions: {
+      documents: ["read", "write", "approve"],
+      collections: ["read"],
+      analytics: ["read"],
+    },
+  },
+  {
     id: "operator_admin",
     label: "Admin",
     description:
-      "Full operational access, including deletes — everything except members, API keys and settings. For a full owner, choose the Super admin role instead.",
+      "Full operational access, including deletes and approving submitted knowledge — everything except members, API keys and settings. For a full owner, choose the Super admin role instead.",
     permissions: {
-      documents: ["read", "write", "delete"],
+      documents: ["read", "write", "approve", "delete"],
       collections: ["read", "write", "delete"],
       data_sources: ["read", "write"],
       prompts: ["read", "write"],

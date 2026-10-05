@@ -183,8 +183,68 @@ describe("presets", () => {
       "knowledge_uploader",
       "content_copywriter",
       "readonly_analyst",
+      "knowledge_approver",
       "operator_admin",
     ]);
+  });
+
+  it("the Knowledge uploader preset does NOT grant approve (the whole point)", () => {
+    const p = presetById("knowledge_uploader")!;
+    expect(p.permissions.documents).not.toContain("approve");
+  });
+
+  it("the Knowledge approver preset grants documents:approve but no deletes", () => {
+    const p = presetById("knowledge_approver")!;
+    expect(p.permissions.documents).toContain("approve");
+    expect(Object.values(p.permissions).flat()).not.toContain("delete");
+    for (const r of ["members", "api_keys", "settings", "prompts", "connectors"]) {
+      expect(p.permissions).not.toHaveProperty(r);
+    }
+  });
+
+  it("the Admin preset grants documents:approve", () => {
+    expect(presetById("operator_admin")!.permissions.documents).toContain("approve");
+  });
+});
+
+describe("documents:approve action", () => {
+  it("is a grantable, non-destructive authority on documents", () => {
+    expect(GRANTABLE_PERMISSIONS.documents).toContain("approve");
+    const documents = PERMISSION_CATALOGUE.find((r) => r.id === "documents")!;
+    const approve = documents.actions.find((a) => a.id === "approve")!;
+    expect(approve).toBeDefined();
+    expect(approve.destructive ?? false).toBe(false);
+  });
+
+  it("is independent of write — an uploader with [read,write] does NOT get approve", () => {
+    const uploader = admin({ documents: ["read", "write"] });
+    expect(can(uploader, "documents:approve")).toBe(false);
+    // ...but approve still implies read, and a writer still reads.
+    expect(hasAction({ documents: ["approve"] }, "documents", "read")).toBe(true);
+    expect(can(admin({ documents: ["approve"] }), "documents:read")).toBe(true);
+  });
+
+  it("super_admin bypasses the approve check", () => {
+    expect(can(SUPER, "documents:approve")).toBe(true);
+  });
+
+  it("sanitize keeps approve and clampToGranter blocks escalating it", () => {
+    expect(sanitizePermissions({ documents: ["read", "write", "approve"] })).toEqual({
+      documents: ["read", "write", "approve"],
+    });
+    // A granter who lacks approve cannot hand it out.
+    const granter = admin({ documents: ["read", "write"] });
+    expect(clampToGranter({ documents: ["read", "write", "approve"] }, granter)).toEqual({
+      documents: ["read", "write"],
+    });
+    // An approver can hand out approve.
+    const approver = admin({ documents: ["read", "write", "approve"] });
+    expect(clampToGranter({ documents: ["approve"] }, approver)).toEqual({ documents: ["approve"] });
+  });
+
+  it("maps the approvals nav route to documents:read (visible to uploaders, not just approvers)", () => {
+    expect(NAV_PERMISSIONS["/dashboard/knowledge/approvals"]).toBe("documents:read");
+    expect(canAccessRoute(admin(presetById("knowledge_uploader")!.permissions), "/dashboard/knowledge/approvals")).toBe(true);
   });
 });
 

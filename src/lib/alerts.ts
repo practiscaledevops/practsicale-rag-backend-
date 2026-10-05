@@ -41,13 +41,16 @@ export async function getAlerts(session: AdminSession): Promise<Alert[]> {
   const seeSources = can(session, "data_sources:read");
   const seeDocs = can(session, "documents:read");
   const seeCollections = can(session, "collections:read");
+  // Only an approver (super_admin / documents:approve) ever sees the approval queue,
+  // so only they get the "awaiting approval" alert — matching the never-leak rule above.
+  const canApprove = can(session, "documents:approve");
   const db = supabaseAdmin();
   const now = Date.now();
   const staleCut = new Date(now - STALE_DAYS * 86_400_000).toISOString();
   const dayAgo = new Date(now - 86_400_000).toISOString();
   const todayISO = new Date(now).toISOString();
 
-  const [sourcesRes, staleCount, reviewDue, noOwner, failedRuns] = await Promise.all([
+  const [sourcesRes, staleCount, reviewDue, noOwner, failedRuns, pendingSubs] = await Promise.all([
     db
       .from("data_sources")
       .select("id, name, is_active, last_status, last_run_at, schedule_cron")
@@ -69,6 +72,12 @@ export async function getAlerts(session: AdminSession): Promise<Alert[]> {
     safeCount((d) =>
       d.from("ingestion_runs").select("*", { count: "exact", head: true }).eq("org_id", orgId).eq("status", "error").gte("started_at", dayAgo)
     ),
+    // safeCount returns 0 if the table is missing (pre-migration 0020), so this is deploy-safe.
+    canApprove
+      ? safeCount((d) =>
+          d.from("knowledge_submissions").select("*", { count: "exact", head: true }).eq("org_id", orgId).eq("status", "pending")
+        )
+      : Promise.resolve(0),
   ]);
 
   const alerts: Alert[] = [];
@@ -115,6 +124,15 @@ export async function getAlerts(session: AdminSession): Promise<Alert[]> {
       title: `${failedRuns} ingestion run${failedRuns === 1 ? "" : "s"} failed in the last day`,
       body: "Review the failures and retry them safely.",
       href: "/dashboard/quality-data",
+    });
+  }
+  if (canApprove && pendingSubs > 0) {
+    alerts.push({
+      id: "knowledge-approvals",
+      priority: "warning",
+      title: `${pendingSubs} knowledge submission${pendingSubs === 1 ? "" : "s"} awaiting approval`,
+      body: "Review and approve or reject submitted knowledge.",
+      href: "/dashboard/knowledge/approvals",
     });
   }
   if (seeDocs && reviewDue > 0) {

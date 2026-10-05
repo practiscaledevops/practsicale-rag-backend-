@@ -23,6 +23,7 @@
 import { supabaseAdmin } from "@/lib/supabase";
 import { requireAdmin, AdminAuthError } from "@/lib/auth/admin";
 import { ingestOne, pdfToText } from "@/lib/ingest";
+import { isApprover, writeSubmission, type IngestSubmissionPayload } from "@/lib/knowledge-submissions";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
@@ -125,6 +126,53 @@ export async function POST(req: Request) {
 
   const db = supabaseAdmin();
 
+  // The ingestOne params, resolved once — shared by the direct ingest and by the
+  // pending submission a non-approver's upload is parked as.
+  const tags = tagsRaw
+    ? tagsRaw.split(",").map((t) => t.trim()).filter(Boolean)
+    : undefined;
+  const ingestParams: IngestSubmissionPayload = {
+    sourceType: "document",
+    title: titleOverride || name,
+    text,
+    metadata: {
+      mime,
+      filename: name,
+      uploaded_by: admin.email,
+      ...(category ? { category } : {}),
+      ...(department ? { department } : {}),
+      ...(access ? { confidentiality: access } : {}),
+      ...(owner ? { source_owner: owner } : {}),
+      ...(reviewDate ? { review_date: reviewDate } : {}),
+      ...(tags && tags.length ? { tags } : {}),
+    },
+    collectionIds: collectionId ? [collectionId] : undefined,
+  };
+
+  // APPROVAL GATE: a bulk upload by someone who is NOT (super_admin OR
+  // documents:approve) does not ingest. Park a pending submission carrying the
+  // ingestOne params and return { pending } WITHOUT writing an ingestion_runs row.
+  // Bulk never touches storage (bytes are read in-memory), so there is nothing to
+  // stage or clean up. Who-approves is resolved from the session, never the request.
+  if (!isApprover(admin)) {
+    try {
+      const submissionId = await writeSubmission(db, {
+        orgId: admin.orgId,
+        submittedBy: admin.memberId,
+        submittedByEmail: admin.email,
+        title: titleOverride || name,
+        kind: "bulk",
+        commitVia: "ingest_one",
+        sourceType: "document",
+        payload: ingestParams,
+      });
+      return Response.json({ pending: true, submissionId });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Could not submit for approval";
+      return Response.json({ error: message }, { status: 500 });
+    }
+  }
+
   // Provenance row for this upload (one per uploaded file).
   const { data: run } = await db
     .from("ingestion_runs")
@@ -133,28 +181,7 @@ export async function POST(req: Request) {
     .single();
 
   try {
-    const tags = tagsRaw
-      ? tagsRaw.split(",").map((t) => t.trim()).filter(Boolean)
-      : undefined;
-
-    const res = await ingestOne(db, {
-      orgId: admin.orgId,
-      sourceType: "document",
-      title: titleOverride || name,
-      text,
-      metadata: {
-        mime,
-        filename: name,
-        uploaded_by: admin.email,
-        ...(category ? { category } : {}),
-        ...(department ? { department } : {}),
-        ...(access ? { confidentiality: access } : {}),
-        ...(owner ? { source_owner: owner } : {}),
-        ...(reviewDate ? { review_date: reviewDate } : {}),
-        ...(tags && tags.length ? { tags } : {}),
-      },
-      collectionIds: collectionId ? [collectionId] : undefined,
-    });
+    const res = await ingestOne(db, { ...ingestParams, orgId: admin.orgId });
 
     await db
       .from("ingestion_runs")

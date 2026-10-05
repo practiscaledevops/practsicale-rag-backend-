@@ -19,6 +19,7 @@ import {
   type KnowledgeObjectRow,
 } from "@/lib/knowledge-store";
 import { realityBucketOf, isAuthority, isDomain, slugify } from "@/lib/intelligence-taxonomy";
+import { isApprover } from "@/lib/knowledge-submissions";
 import { guard, dbError, objectStubs, str, strOrNull, strList, uuid } from "../../_shared";
 import {
   persistObjectPatch,
@@ -138,6 +139,19 @@ export async function PATCH(req: Request, ctx: Ctx) {
     const md = typeof body.compiled_markdown === "string" ? body.compiled_markdown : null;
     const nextMeta = { ...current, ...patch } as KnowledgeObjectRow;
     if (md && md.trim()) {
+      // A markdown edit DELETES this object's chunks and re-indexes fresh chunks built
+      // from the supplied markdown, which hybrid retrieval returns immediately — the same
+      // "make knowledge live" power the upload routes gate behind approval. A
+      // documents:write-only curator must NOT be able to push arbitrary live content (or
+      // inherit this object's authority / founder_endorsement) through the edit path, so
+      // re-ingest requires documents:approve. Metadata / governance edits (no re-chunk)
+      // stay documents:write via the branch below.
+      if (!isApprover(admin)) {
+        return Response.json(
+          { error: "Editing compiled markdown re-indexes this object for retrieval — it requires documents:approve. Edit metadata only, or ask a super admin to make this change." },
+          { status: 403 }
+        );
+      }
       const parts = splitSections(md);
       const version = (current.version ?? 1) + 1;
       const rebuilt = assembleMarkdown(buildFrontmatter({ ...nextMeta, version }), parts.title || nextMeta.name, parts.sections);

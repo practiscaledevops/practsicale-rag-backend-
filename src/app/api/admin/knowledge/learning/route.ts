@@ -15,6 +15,7 @@
 
 import { supabaseAdmin } from "@/lib/supabase";
 import { compileKnowledge } from "@/lib/knowledge-compiler";
+import { isApprover, writeSubmission, type CompileSubmissionPayload } from "@/lib/knowledge-submissions";
 import { getObjectByRef, upsertRelationship, logDecision, isMissingRelation, OBJECT_COLUMNS } from "@/lib/knowledge-store";
 import { LEARNING_RECORD_TYPES, LEARNING_STATUSES } from "@/lib/intelligence-taxonomy";
 import { loadSettings } from "@/lib/settings";
@@ -135,34 +136,63 @@ export async function POST(req: Request) {
     .filter((l) => l !== "")
     .join("\n");
   const db = supabaseAdmin();
+
+  // The CompileInput (minus org/mode/createdBy), resolved once — shared by the
+  // direct commit and by the pending submission a non-approver's record is parked as.
+  const compilePayload: CompileSubmissionPayload = {
+    intelligenceClass: "organizational_learning",
+    text,
+    title: title || null,
+    forceNew: true,
+    storeRaw: false,
+    hints: {
+      objectType: kind,
+      learning: {
+        recordType: kind,
+        lifecycleStatus: LEARNING_STATUSES.some((s) => s.id === str(body.lifecycleStatus, 20)) ? str(body.lifecycleStatus, 20) : undefined,
+        department,
+        owner: strOrNull(body.owner, 120),
+        relatedPlaybookRefs: relatedRefs,
+        missingEvidence: missing,
+        confidence: ["low", "medium", "high"].includes(str(body.confidence, 10)) ? (str(body.confidence, 10) as "low" | "medium" | "high") : null,
+        changes: body.changes && typeof body.changes === "object" ? (body.changes as Record<string, unknown>) : {},
+        metricsBefore: body.metricsBefore && typeof body.metricsBefore === "object" ? (body.metricsBefore as Record<string, unknown>) : {},
+        metricsAfter: body.metricsAfter && typeof body.metricsAfter === "object" ? (body.metricsAfter as Record<string, unknown>) : {},
+        evidenceDocumentIds: strList(body.evidenceDocumentIds, 20),
+        parentRecordId: strOrNull(body.parentRecordId, 64),
+        source: "manual",
+      },
+    },
+  };
+
+  // APPROVAL GATE: recording a learning becomes a retrievable knowledge_object, so a
+  // non-approver (documents:write without documents:approve) is deferred to the queue
+  // exactly like the Add-knowledge wizard. The follow-up actions above act on already-
+  // confirmed evidence and are review actions, so they are left unchanged.
+  if (!isApprover(admin)) {
+    try {
+      const submissionId = await writeSubmission(db, {
+        orgId: admin.orgId,
+        submittedBy: admin.memberId,
+        submittedByEmail: admin.email,
+        title: title || null,
+        kind: "learning",
+        commitVia: "compile",
+        intelligenceClass: "organizational_learning",
+        payload: compilePayload,
+      });
+      return Response.json({ pending: true, submissionId, message: "Sent for approval — a super admin will review it before it goes live." });
+    } catch (e) {
+      return dbError(e);
+    }
+  }
+
   try {
     const res = await compileKnowledge(db, {
+      ...compilePayload,
       orgId: admin.orgId,
-      intelligenceClass: "organizational_learning",
-      text,
-      title: title || null,
       mode: "commit",
-      forceNew: true,
-      storeRaw: false,
       createdBy: admin.email,
-      hints: {
-        objectType: kind,
-        learning: {
-          recordType: kind,
-          lifecycleStatus: LEARNING_STATUSES.some((s) => s.id === str(body.lifecycleStatus, 20)) ? str(body.lifecycleStatus, 20) : undefined,
-          department,
-          owner: strOrNull(body.owner, 120),
-          relatedPlaybookRefs: relatedRefs,
-          missingEvidence: missing,
-          confidence: ["low", "medium", "high"].includes(str(body.confidence, 10)) ? (str(body.confidence, 10) as "low" | "medium" | "high") : null,
-          changes: body.changes && typeof body.changes === "object" ? (body.changes as Record<string, unknown>) : {},
-          metricsBefore: body.metricsBefore && typeof body.metricsBefore === "object" ? (body.metricsBefore as Record<string, unknown>) : {},
-          metricsAfter: body.metricsAfter && typeof body.metricsAfter === "object" ? (body.metricsAfter as Record<string, unknown>) : {},
-          evidenceDocumentIds: strList(body.evidenceDocumentIds, 20),
-          parentRecordId: strOrNull(body.parentRecordId, 64),
-          source: "manual",
-        },
-      },
     });
     if (res.blocked) return Response.json({ error: res.blocked.reason }, { status: 422 });
     return Response.json({ ok: true, object: res.object, ref: res.object?.ref ?? null });
@@ -183,6 +213,13 @@ export async function POST(req: Request) {
 async function followup(admin: AdminSession, action: string, edgeId: string): Promise<Response> {
   if (!["attach_evidence", "compute_result", "ignore"].includes(action)) return Response.json({ error: "Unknown action" }, { status: 400 });
   if (!edgeId) return Response.json({ error: "edgeId required" }, { status: 400 });
+  // compute_result compiles a brand-new, immediately-retrievable Result knowledge_object
+  // (compileKnowledge mode "commit" below). That is the one follow-up action that creates
+  // live knowledge, so — like every other commit path — it requires documents:approve.
+  // attach_evidence / ignore are pure review actions (no new chunks) and stay documents:write.
+  if (action === "compute_result" && !isApprover(admin)) {
+    return Response.json({ error: "Computing a Result creates retrievable knowledge — only an approver (documents:approve) can do this. Ask a super admin to review this follow-up." }, { status: 403 });
+  }
   const db = supabaseAdmin();
   try {
     const ctx = await loadFollowupContext(db, admin.orgId, edgeId);
