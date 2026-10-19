@@ -69,7 +69,7 @@ export async function checkFaithfulness(
   context: string,
   answer: string,
   systemPrompt: string,
-  tier: "fast" | "recommended" | "max" = "fast"
+  tier: "fast" | "recommended" | "max" = "recommended"
 ): Promise<FaithfulnessVerdict> {
   const permissive: FaithfulnessVerdict = { grounded: true, unsupported: [], checked: false };
   if (isDemo() || !answer.trim() || !context.trim()) return permissive;
@@ -102,7 +102,8 @@ function safeParseVerdict(
       grounded?: unknown;
       unsupported?: unknown;
     };
-    const grounded = obj.grounded !== false; // default to grounded unless explicitly false
+    if (typeof obj.grounded !== "boolean" || !Array.isArray(obj.unsupported)) return null;
+    const grounded = obj.grounded && obj.unsupported.length === 0;
     const unsupported = Array.isArray(obj.unsupported)
       ? obj.unsupported.filter((x): x is string => typeof x === "string").slice(0, 20)
       : [];

@@ -24,12 +24,11 @@ import type { Job, JobTask, JobHandler, JobStatus, PlannedTask } from "@/lib/job
 const BATCH_SIZE = 8;
 const MAX_TRANSCRIPT_CHARS = 14_000; // per call, keeps each task's context bounded
 
-// Model tier for the per-batch audit extraction. Defaults to "max" (Opus) to keep
-// current quality; set AUDIT_MODEL_TIER=recommended for the ~4-5x cheaper + faster
-// Sonnet, which is usually plenty for this structured, transcript-grounded pass.
+// Use Sol for transcript-grounded batch extraction; Astra requires an explicit
+// AUDIT_MODEL_TIER=max override rather than becoming a recurring default cost.
 function auditModelTier(): "fast" | "recommended" | "max" {
   const t = (process.env.AUDIT_MODEL_TIER ?? "").toLowerCase();
-  return t === "fast" || t === "recommended" || t === "max" ? t : "max";
+  return t === "fast" || t === "recommended" || t === "max" ? t : "recommended";
 }
 
 function paramsToFilter(params: Record<string, unknown>): CallReviewFilter {

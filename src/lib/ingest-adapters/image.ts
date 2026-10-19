@@ -1,4 +1,4 @@
-// Screenshot / photo → the text in it, via OpenAI vision (gpt-4o-mini). The
+// Screenshot / photo → the text in it, via OpenAI vision (GPT-6.1 Sol). The
 // model is told to transcribe only — tables as Markdown, charts as their data,
 // no commentary — so what lands in the Brain is the source, not an opinion.
 // The image is untrusted data: anything it "says" is transcribed, never obeyed.
@@ -8,7 +8,7 @@ import { getProviderKey } from "@/lib/secrets";
 import { ExtractError, type Extracted } from "./types";
 
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-const MODEL = "gpt-4o-mini";
+const MODEL = "gpt-6.1-sol";
 const INSTRUCTION =
   "Transcribe every piece of text in this image faithfully, in reading order. Render tables as Markdown tables and charts as their data. Do not add commentary.";
 
@@ -37,8 +37,8 @@ export async function extractImageText(buffer: Buffer, mime: string): Promise<Ex
   try {
     const r = await client.chat.completions.create({
       model: MODEL,
-      temperature: 0,
-      max_tokens: 4096,
+      reasoning_effort: "low",
+      max_completion_tokens: 6144,
       // The instruction lives in the system turn so text inside the screenshot
       // ("ignore the above…") is data the model transcribes, not a peer instruction.
       messages: [

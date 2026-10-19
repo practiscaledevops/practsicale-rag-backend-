@@ -31,7 +31,7 @@ export interface RetrievalSettings {
 export interface FeatureSettings {
   /** Rewrite/expand the user query before retrieval (recall ↑). */
   queryRewrite: boolean;
-  /** Anthropic contextual retrieval: situate each chunk before embed + FTS. */
+  /** Situate each chunk before embedding + full-text search. */
   contextualRetrieval: boolean;
   /** Use an LLM to pick source_type(s); off ⇒ fast keyword router. */
   llmRouter: boolean;
@@ -110,15 +110,10 @@ export const DEFAULT_SETTINGS: RagSettings = {
     queryRewrite: true,
     contextualRetrieval: true,
     llmRouter: false,
-    // Off by default for speed: ground-or-refuse + citation validation already
-    // guard hallucination instantly and for free. Turn on in Settings for a
-    // stricter (but slower, +1 LLM call per answer) post-generation check.
-    faithfulnessCheck: false,
-    // Off by default: this is a general-purpose assistant, not a data-only bot.
-    // With this off, an empty retrieval doesn't hard-refuse — the assistant still
-    // helps (brainstorm, content, ideas) and only avoids fabricating specific
-    // company facts (enforced by the prompt). Turn ON for a strict data-only mode.
-    groundOrRefuse: false,
+    // A post-generation quality signal; it annotates an answer after streaming.
+    faithfulnessCheck: true,
+    // Strict company-data grounding. Greetings use their separate short path.
+    groundOrRefuse: true,
     rerank: true,
     orchestrator: true,
     autoWorkMode: true,
@@ -128,7 +123,7 @@ export const DEFAULT_SETTINGS: RagSettings = {
   generation: {
     defaultTier: "recommended",
     temperature: 0,
-    maxTokens: 1024,
+    maxTokens: 4096,
   },
   contextual: {
     maxChunksPerDoc: 200,

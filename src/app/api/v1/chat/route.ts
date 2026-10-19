@@ -252,10 +252,11 @@ export async function POST(req: Request) {
     deepAnalysis = true;
   }
 
+  const settingsPromise = loadSettings(ctx.orgId);
   const [{ settings }, groundingPrompt, resolvedModel] = await Promise.all([
-    loadSettings(ctx.orgId),
+    settingsPromise,
     getActivePrompt(ctx.orgId, "chat"),
-    getModel(effectiveTier ?? "recommended"),
+    effectiveTier ? getModel(effectiveTier) : settingsPromise.then(({ settings }) => getModel(settings.generation.defaultTier)),
   ]);
   const modelId = resolvedModel.modelId;
   const provider = modelId.startsWith("claude") ? "anthropic" : "openai";

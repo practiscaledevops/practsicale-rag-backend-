@@ -26,7 +26,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { RetrievedChunk } from "@/lib/retrieval";
-import { callStatusLabel, closingTypeLabel } from "@/lib/call-status";
+import { callStatusLabel, closingTypeLabel, originalOutcomeLabel, callSequenceLabel } from "@/lib/call-status";
 import { DEFAULT_TIME_ZONE, localDate, localDateTime, resolveTimeZone, zonedDayBoundsUTC } from "@/lib/timezone";
 
 // ---------------------------------------------------------------------------
@@ -60,6 +60,8 @@ export interface ScorecardRow {
   band: string | null;
   outcome: string | null;
   closingType?: string;
+  originalOutcome?: string;
+  callSequence?: string;
   duration: number | null;
 }
 
@@ -158,6 +160,8 @@ function toScorecardRow(m: Record<string, unknown>, timeZone: string): Scorecard
     band: typeof m.performance_band === "string" ? m.performance_band : null,
     outcome: callStatusLabel(m),
     closingType: closingTypeLabel(m),
+    originalOutcome: originalOutcomeLabel(m),
+    callSequence: callSequenceLabel(m),
     duration: m.call_duration_minutes != null ? Number(m.call_duration_minutes) : null,
   };
 }

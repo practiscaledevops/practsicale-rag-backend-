@@ -11,6 +11,16 @@ export function closingTypeLabel(meta: Record<string, unknown>): string {
   return meta.ticket_category === "high_ticket" ? "High Ticket" : meta.ticket_category === "low_ticket" ? "Low Ticket" : "Unclassified";
 }
 
+export function originalOutcomeLabel(meta: Record<string, unknown>): string {
+  const value = typeof meta.call_outcome === "string" ? meta.call_outcome.toUpperCase() : "";
+  return ({ CLOSED: "Closed", FOLLOW_UP: "Follow Up", LOST: "Lost" } as Record<string, string>)[value] ?? "Unknown";
+}
+
+export function callSequenceLabel(meta: Record<string, unknown>): string {
+  const n = Number(meta.call_sequence);
+  return Number.isInteger(n) && n > 0 ? `Call ${n}${n > 1 ? " (follow-up call)" : " (initial call)"}` : "Unknown";
+}
+
 /** Keep current CRM truth inside the numbered, citeable evidence itself. Legacy
  * transcript headers can still contain the model's original "Outcome: CLOSED"
  * while a historical backfill is pending. A separate roster alone isn't enough
@@ -19,6 +29,8 @@ export function currentCallEvidence(content: string, sourceType: string | null |
   if (sourceType !== "call_score" && sourceType !== "transcript") return content;
   const historical = content.replace(/(^|\n)Outcome:\s*(CLOSED|FOLLOW_UP|LOST)(?=\r?\n|$)/g, "$1Original model outcome (historical; not CRM status): $2");
   return [
+    `Call sequence: ${callSequenceLabel(meta)}`,
+    `Original call outcome: ${originalOutcomeLabel(meta)} (historical; separate from current CRM status)`,
     `Current CRM status: ${callStatusLabel(meta)}`,
     `Closing type: ${closingTypeLabel(meta)}`,
     "These current CRM/QA fields are authoritative. Outcomes in the original report or transcript below are historical model interpretations and cannot override these fields.",

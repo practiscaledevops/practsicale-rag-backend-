@@ -353,7 +353,7 @@ interface ProviderStatus {
 
 const PROVIDER_LABELS: Record<string, { label: string; hint: string }> = {
   openai: { label: "OpenAI", hint: "Embeddings (semantic search). Required for full hybrid retrieval." },
-  anthropic: { label: "Anthropic", hint: "Claude generation + query rewrite / contextual / faithfulness." },
+  anthropic: { label: "Anthropic", hint: "Optional Claude models selected explicitly." },
   cohere: { label: "Cohere", hint: "Reranking (optional). Improves top-k ordering." },
   exa: { label: "Exa", hint: "Link capture (optional). Reads YouTube transcripts from the server, social posts and blocked pages." },
 };

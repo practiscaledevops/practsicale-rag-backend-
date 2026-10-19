@@ -31,12 +31,15 @@ export interface CatalogModel extends ModelEntry {
 }
 
 // The selectable models. Order is provider-grouped, fast -> max within a group.
-// The three tier-tagged Anthropic entries mirror the tier defaults in llm.ts.
+// Tier defaults mirror llm.ts. Existing Claude selections remain available.
 export const MODELS: ModelEntry[] = [
+  { id: "gpt-6-luna", provider: "openai", label: "GPT-6 Luna", tier: "fast" },
+  { id: "gpt-6.1-sol", provider: "openai", label: "GPT-6.1 Sol", tier: "recommended" },
+  { id: "gpt-6-astra", provider: "openai", label: "GPT-6 Astra", tier: "max" },
   // Anthropic (Claude)
-  { id: "claude-haiku-4-5", provider: "anthropic", label: "Claude Haiku 4.5", tier: "fast" },
-  { id: "claude-sonnet-4-6", provider: "anthropic", label: "Claude Sonnet 4.6", tier: "recommended" },
-  { id: "claude-opus-4-8", provider: "anthropic", label: "Claude Opus 4.8", tier: "max" },
+  { id: "claude-haiku-4-5", provider: "anthropic", label: "Claude Haiku 4.5" },
+  { id: "claude-sonnet-4-6", provider: "anthropic", label: "Claude Sonnet 4.6" },
+  { id: "claude-opus-4-8", provider: "anthropic", label: "Claude Opus 4.8" },
   { id: "claude-sonnet-5", provider: "anthropic", label: "Claude Sonnet 5 (new)" },
   { id: "claude-opus-5", provider: "anthropic", label: "Claude Opus 5 (new)" },
   // OpenAI (GPT)
@@ -77,6 +80,7 @@ const NO_TEMPERATURE_IDS = new Set<string>([
  */
 export function supportsTemperature(modelId: string | undefined | null): boolean {
   if (!modelId) return true;
+  if (/^gpt-[6-9](?:[.-]|$)/.test(modelId)) return false;
   if (NO_TEMPERATURE_IDS.has(modelId)) return false;
   // Claude 5+ (any variant) deprecates temperature; be safe for future ids.
   if (/^claude-(?:opus|sonnet|haiku)-(?:[5-9]|\d{2,})/.test(modelId)) return false;

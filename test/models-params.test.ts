@@ -4,6 +4,12 @@ import { supportsTemperature, generationParams } from "@/lib/models-catalog";
 // Regression guard for the model-switch bug: the newest Anthropic models reject
 // `temperature`, so it must be stripped for them and kept for everything else.
 describe("supportsTemperature", () => {
+  it("omits sampling for the GPT-6 reasoning models", () => {
+    for (const id of ["gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra"]) {
+      expect(supportsTemperature(id)).toBe(false);
+      expect(generationParams(id, { temperature: 0.3, maxTokens: 40 })).toEqual({ maxTokens: 40 });
+    }
+  });
   it("returns false for the models that reject temperature", () => {
     expect(supportsTemperature("claude-opus-4-8")).toBe(false);
     expect(supportsTemperature("claude-sonnet-5")).toBe(false);

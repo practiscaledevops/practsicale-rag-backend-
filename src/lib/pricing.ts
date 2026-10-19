@@ -19,6 +19,10 @@ export const PRICING: Record<string, Rate> = {
   // OpenAI (GPT) — the "gpt-4o-mini" key wins over "gpt-4o" via longest-prefix.
   "gpt-4o-mini": { inputPer1M: 0.15, outputPer1M: 0.6 },
   "gpt-4o": { inputPer1M: 2.5, outputPer1M: 10 },
+  // Official OpenAI list rates, checked 2026-10-20. Billing remains authoritative.
+  "gpt-6-luna": { inputPer1M: 0.1, outputPer1M: 0.5 },
+  "gpt-6.1-sol": { inputPer1M: 2, outputPer1M: 10 },
+  "gpt-6-astra": { inputPer1M: 10, outputPer1M: 50 },
   "gpt-5": { inputPer1M: 5, outputPer1M: 30 }, // estimate — no public list rate yet
 };
 

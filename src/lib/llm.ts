@@ -1,5 +1,5 @@
 import { anthropic, createAnthropic } from "@ai-sdk/anthropic";
-import { openai, createOpenAI } from "@ai-sdk/openai";
+import { createOpenAI } from "@ai-sdk/openai";
 import { wrapLanguageModel, type LanguageModelV1, type LanguageModelV1Middleware } from "ai";
 import { getProviderKey } from "@/lib/secrets";
 import { supportsTemperature } from "@/lib/models-catalog";
@@ -9,9 +9,9 @@ import { supportsTemperature } from "@/lib/models-catalog";
 export type Tier = "fast" | "recommended" | "max";
 
 const TIER_ENV: Record<Tier, string> = {
-  fast: process.env.FAST_CHAT_MODEL ?? "claude-haiku-4-5",
-  recommended: process.env.RECOMMENDED_CHAT_MODEL ?? "claude-sonnet-4-6",
-  max: process.env.MAX_CHAT_MODEL ?? "claude-opus-4-8",
+  fast: process.env.FAST_CHAT_MODEL ?? "gpt-6-luna",
+  recommended: process.env.RECOMMENDED_CHAT_MODEL ?? "gpt-6.1-sol",
+  max: process.env.MAX_CHAT_MODEL ?? "gpt-6-astra",
 };
 
 function isTier(v: unknown): v is Tier {
@@ -43,6 +43,32 @@ function guardSamplingParams(model: LanguageModelV1): LanguageModelV1 {
     : wrapLanguageModel({ model, middleware: stripSamplingParams });
 }
 
+// AI SDK v4 recognizes GPT-5 reasoning models but predates GPT-6. Adapt its
+// request at the model boundary so every caller (including generateObject and
+// tiny helper calls) uses the supported completion budget and reasoning params.
+function openAIModel(id: string, apiKey?: string): LanguageModelV1 {
+  const provider = createOpenAI({ apiKey, compatibility: "strict" });
+  if (!/^gpt-[6-9](?:[.-]|$)/.test(id)) return guardSamplingParams(provider(id));
+  const base = provider.chat(id, { structuredOutputs: true, reasoningEffort: "low" });
+  return wrapLanguageModel({ model: base, middleware: {
+    transformParams: async ({ params }) => ({
+      ...params,
+      temperature: undefined, topP: undefined, topK: undefined,
+      maxTokens: undefined,
+      providerMetadata: {
+        ...params.providerMetadata,
+        openai: {
+          ...params.providerMetadata?.openai,
+          // Completion budget includes hidden reasoning. A 40-token router or
+          // 300-token verifier must still have room to reason and emit its JSON.
+          maxCompletionTokens: (params.maxTokens ?? 4096) + 2048,
+          reasoningEffort: "low",
+        },
+      },
+    }),
+  } });
+}
+
 /** Resolve a concrete model id from a tier name, an explicit id, or the default. */
 function resolveId(tierOrId?: string): string {
   if (isTier(tierOrId)) return TIER_ENV[tierOrId];
@@ -66,7 +92,7 @@ export async function getModel(tierOrId?: string) {
   // The v1 provider defaults to OpenAI-compatible mode, which omits
   // stream_options.include_usage. Official OpenAI streams then have NaN token
   // counts: metering inserts fail and the spoke records zero usage/cost.
-  return guardSamplingParams(createOpenAI({ apiKey, compatibility: "strict" })(id));
+  return openAIModel(id, apiKey);
 }
 
 // ---- Env-only variants (kept for callers/scripts that don't resolve DB keys) ----
@@ -79,7 +105,7 @@ export function modelForTier(tierOrId?: string) {
 /** Choose a provider model by id using the default (env) credentials. */
 export function model(name?: string) {
   const id = name ?? TIER_ENV.recommended;
-  return guardSamplingParams(id.startsWith("claude") ? anthropic(id) : openai(id));
+  return id.startsWith("claude") ? guardSamplingParams(anthropic(id)) : openAIModel(id);
 }
 
 // TODO: route through the Vercel AI Gateway for automatic provider failover
