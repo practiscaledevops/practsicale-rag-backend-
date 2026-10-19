@@ -587,7 +587,7 @@ export async function POST(req: Request) {
             try {
               const fp = await getActivePrompt(ctx.orgId, "faithfulness");
               // Judge against everything the model was given, numbers included.
-              const verdict = await checkFaithfulness(`${context}${performanceSection}`, fullText, fp, "fast");
+              const verdict = await checkFaithfulness(`${context}${performanceSection}`, fullText, fp);
               grounded = verdict.checked ? verdict.grounded : null;
             } catch (e) {
               console.error("[faithfulness] check failed:", e instanceof Error ? e.message : e);

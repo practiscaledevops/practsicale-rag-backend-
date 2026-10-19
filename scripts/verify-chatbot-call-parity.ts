@@ -41,7 +41,7 @@ async function main() {
   if (login.error || (await auth.auth.getUser()).error) throw Error("Live chatbot sign-in failed");
   const headers = { "content-type": "application/json", cookie: [...cookies].map(([k, v]) => `${k}=${v}`).join("; ") };
   const results: Record<string, unknown>[] = [];
-  const models = process.env.VERIFY_MODELS?.split(",") ?? ["fast", "gpt-4o-mini"];
+  const models = process.env.VERIFY_MODELS?.split(",") ?? ["fast", "recommended"];
   const tasks = [...examples].filter(([combination]) => !process.env.VERIFY_COMBINATION || combination === process.env.VERIFY_COMBINATION)
     .flatMap(([combination, row]) => models.map(model => ({ combination, row, model })));
   for (let i = 0; i < tasks.length; i += 2) {

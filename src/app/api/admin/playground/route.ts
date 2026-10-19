@@ -206,7 +206,7 @@ export async function POST(req: Request) {
         let unsupported: string[] = [];
         if (settings.features.faithfulnessCheck) {
           const fp = await getActivePrompt(admin.orgId, "faithfulness");
-          const verdict = await checkFaithfulness(context, answer, fp, "fast");
+          const verdict = await checkFaithfulness(context, answer, fp);
           grounded = verdict.grounded;
           unsupported = verdict.unsupported;
         }

@@ -1,5 +1,5 @@
 // Copy the source's immutable call number into existing Brain metadata without
-// regenerating embeddings. Compare-and-swap preserves concurrent status updates.
+// regenerating embeddings. The existing atomic RPC preserves newer revisions.
 import { loadEnvConfig } from "@next/env";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -21,39 +21,50 @@ async function main() {
     if (rows.length < 100) break;
   }
   const totals: Record<string, unknown> = { calls: records.size, numbered: [...records.values()].filter(n => n != null).length, tables: {} };
-  for (const table of ["documents", "chunks"]) {
-    let examined = 0, updated = 0, mismatches = 0;
-    for (let offset = 0; ; offset += 1000) {
-      const query = await db.from(table).select("id,metadata").eq("org_id", source.org_id).eq("data_source_id", source.id).order("id").range(offset, offset + 999);
-      if (query.error) throw Error(query.error.message);
-      const rows = query.data;
-      for (let i = 0; i < rows.length; i += 20) {
-        const settled = await Promise.allSettled(rows.slice(i, i + 20).map(async row => {
-          examined++;
-          const expected = records.get(row.metadata?.source_record_id);
-          if (expected === undefined || row.metadata?.call_sequence === expected) return;
-          mismatches++;
-          if (!process.argv.includes("--apply")) return;
-          for (let attempt = 0; attempt < 3; attempt++) {
-            const saved = await db.from(table).update({ metadata: { ...row.metadata, call_sequence: expected } })
-              .eq("org_id", source.org_id).eq("id", row.id).eq("metadata", JSON.stringify(row.metadata)).select("id");
-            if (saved.error) throw Error(saved.error.message);
-            if (saved.data.length) { updated++; return; }
-            const fresh = await db.from(table).select("metadata").eq("org_id", source.org_id).eq("id", row.id).maybeSingle();
-            if (fresh.error) throw Error(fresh.error.message);
-            if (!fresh.data || fresh.data.metadata?.call_sequence === expected) return;
-            row.metadata = fresh.data.metadata;
-          }
-          throw Error("Concurrent call metadata changed repeatedly; retry this backfill");
-        }));
-        const failed = settled.find(r => r.status === "rejected");
-        if (failed?.status === "rejected") throw failed.reason;
-      }
-      if (rows.length < 1000) break;
-    }
-    (totals.tables as Record<string, unknown>)[table] = { examined, updated, mismatches };
-    console.log(JSON.stringify({ table, examined, updated, mismatches, apply: process.argv.includes("--apply") }));
+  const documents = new Map<string, any>();
+  for (let offset = 0; ; offset += 1000) {
+    const q = await db.from("documents").select("id,metadata,source_type,content_hash,title,intelligence_class,domain")
+      .eq("org_id", source.org_id).eq("data_source_id", source.id).order("id").range(offset, offset + 999);
+    if (q.error) throw Error(q.error.message);
+    for (const d of q.data) documents.set(d.id, d);
+    if (q.data.length < 1000) break;
   }
+  const needed = new Set<string>();
+  for (const d of documents.values()) if (records.has(d.metadata.source_record_id) && (d.metadata.call_sequence ?? null) !== records.get(d.metadata.source_record_id)) needed.add(d.id);
+  let examined = 0, mismatches = 0;
+  for (let offset = 0; ; offset += 1000) {
+    const q = await db.from("chunks").select("id,document_id,record:metadata->>source_record_id,sequence:metadata->call_sequence")
+      .eq("org_id", source.org_id).eq("data_source_id", source.id).order("id").range(offset, offset + 999);
+    if (q.error) throw Error(q.error.message);
+    for (const c of q.data) { examined++; if (records.has(c.record) && c.sequence !== records.get(c.record)) { mismatches++; needed.add(c.document_id); } }
+    if (q.data.length < 1000) break;
+  }
+  const targets = [...needed]; let updated = 0;
+  if (process.argv.includes("--apply")) for (let i = 0; i < targets.length; i += 30) {
+    const settled = await Promise.allSettled(targets.slice(i, i + 30).map(async id => {
+      let d = documents.get(id); if (!d) throw Error("Call chunk has no source document");
+      for (let attempt = 0; attempt < 3; attempt++) {
+        // Existing atomic RPC merges the document metadata into ALL its chunks,
+        // preserving per-chunk locators/tokens and every stored embedding. Its
+        // revision guard rejects stale status snapshots; advisory locks serialize
+        // with normal ingestion. A changed body rejects this metadata-only call.
+        const result = await db.rpc("sync_source_document", {
+          p_org_id: source.org_id, p_source_id: source.id, p_source_type: d.source_type,
+          p_record_id: d.metadata.source_record_id, p_content_hash: d.content_hash, p_title: d.title,
+          p_metadata: { ...d.metadata, call_sequence: records.get(d.metadata.source_record_id) },
+          p_lane: { intelligence_class: d.intelligence_class, domain: d.domain }, p_chunks: null,
+        });
+        if (!result.error) { updated++; return; }
+        if (attempt === 2) throw Error(result.error.message);
+        const fresh = await db.from("documents").select("id,metadata,source_type,content_hash,title,intelligence_class,domain").eq("org_id", source.org_id).eq("id", id).single();
+        if (fresh.error) throw Error(fresh.error.message); d = fresh.data;
+      }
+    }));
+    const failed = settled.find(r => r.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
+    console.log(JSON.stringify({ refreshedDocuments: Math.min(i + 30, targets.length), total: targets.length }));
+  }
+  totals.tables = { documents: documents.size, chunks: examined, chunkMismatches: mismatches, documentsNeedingRefresh: targets.length, refreshed: updated };
   const directory = resolve("../verification"); mkdirSync(directory, { recursive: true });
   const path = resolve(directory, `call-sequences-${Date.now()}.json`);
   writeFileSync(path, JSON.stringify({ checkedAt: new Date().toISOString(), apply: process.argv.includes("--apply"), ...totals }, null, 2));

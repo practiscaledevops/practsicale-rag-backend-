@@ -85,3 +85,13 @@ calls. `scripts/verify-chatbot-call-parity.ts` checks every observed status/tick
 combination through both Claude and OpenAI on the live chatbot without saving
 conversations. These live model checks send real source context to the configured
 providers and create the usual usage records.
+## GPT defaults and complete call reports (2026-10-20)
+
+The default chat and knowledge compiler use GPT-6.1 Sol (`recommended`), lightweight retrieval helpers use GPT-6 Luna (`fast`), and GPT-6 Astra is an optional `max` selection. Deep call audits default to Sol. Embeddings and audio transcription retain their specialized OpenAI models. GPT-6 requests use `max_completion_tokens` with a reasoning allowance; unsupported sampling parameters are stripped at the shared model boundary, including SDK v4's implicit temperature.
+
+All ten Prompt Studio defaults include evidence and source-instruction boundaries. Ground-or-refuse and the post-generation faithfulness check are enabled; faithfulness is a quality annotation, not a guarantee that a streamed answer is error-free. Publish versioned prompt defaults with `npx tsx scripts/publish-gpt-defaults.ts --apply`; it backs up settings, retains existing versions, verifies readback, and attempts rollback on failure.
+
+Call reports include separate Call / Follow-up, Original Call Outcome, Current CRM Status, and Closing Type columns. `call_sequence` comes from the scoring app's immutable number, not row position. Call 2+ denotes a subsequent conversation; `call_outcome=FOLLOW_UP` describes the original call outcome, even on Call 1. Ticket classification never establishes a confirmed CRM close. Missing source sequence stays Unknown.
+
+The scoring feed now exports `call_sequence`. Use `npx tsx scripts/backfill-call-sequences.ts --apply` to propagate it through the existing atomic metadata refresh without regenerating embeddings. Run again without `--apply` to audit parity. `npx tsx scripts/verify-live-daily-report.ts` checks the ordinary production request without specifying a model or columns, compares every requested classification to the source, and saves a report under the sibling verification directory.
+
