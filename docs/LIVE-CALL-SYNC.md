@@ -30,6 +30,10 @@ organization + source + source type + source record ID. Embeddings are prepared
 before a transaction swaps chunks. Document IDs remain stable, old append-only
 duplicates are repaired, and older source revisions cannot overwrite newer ones.
 The worker rebuilds Performance Memory before marking an event complete.
+At query time, every cited call/transcript excerpt also includes its current CRM
+status and ticket classification from chunk metadata. Legacy `Outcome: CLOSED`
+headers are labeled as historical model outcomes in the model context. This
+prevents old archive text from overriding current fields while backfill runs.
 
 ## Activation
 
@@ -70,3 +74,14 @@ For a production smoke test, update a clearly labeled test call through the
 scoring UI or CRM endpoint, confirm both queues finish, compare the report and
 transcript metadata, and ask the chatbot for that call's current status and
 closing type. Restore/remove test data afterward.
+
+For exhaustive checks, run `npx tsx scripts/verify-call-parity.ts`. It compares
+every source report and transcript with all Brain documents and retrieval chunks,
+and writes an ID-only report under the sibling `verification/` directory. Missing
+revisions are reported separately from status/classification mismatches.
+`scripts/repair-call-parity.ts <report.json>` prioritizes confirmed gaps using
+the existing organization lease and atomic refresh path; it never edits source
+calls. `scripts/verify-chatbot-call-parity.ts` checks every observed status/ticket
+combination through both Claude and OpenAI on the live chatbot without saving
+conversations. These live model checks send real source context to the configured
+providers and create the usual usage records.

@@ -25,6 +25,7 @@ import { supabaseAdmin } from "@/lib/supabase";
 import { embed } from "@/lib/embeddings";
 import { hybridSearchLane, expandParents, expandTranscripts, LANE_RPC_MISSING, type LaneChunk, type RetrievedChunk } from "@/lib/retrieval";
 import { resolveReviewFilterWithHistory, isReviewFollowUp, isConversationSummary, summaryCarriesCallFilter, fetchCallsByFilter, describeFilter, knownConsultants, looksLikeReview, type CallReviewFilter, type ScorecardRow } from "@/lib/call-review";
+import { currentCallEvidence } from "@/lib/call-status";
 import { currentDateLine, resolveTimeZone, todayIn } from "@/lib/timezone";
 import { rerank } from "@/lib/rerank";
 import { rewriteQueries, type ChatTurn } from "@/lib/query-transform";
@@ -895,7 +896,7 @@ export function buildLaneContext(chunks: OrchestratedChunk[]): string {
   for (const lane of LANE_ORDER) {
     const list = groups.get(lane);
     if (!list || !list.length) continue;
-    parts.push(`### ${LANE_HEADER[lane]}\n\n${list.map((c) => `[${c.id}] ${chunkHeader(c)}\n${c.content}`).join("\n\n---\n\n")}`);
+    parts.push(`### ${LANE_HEADER[lane]}\n\n${list.map((c) => `[${c.id}] ${chunkHeader(c)}\n${currentCallEvidence(c.content, c.source_type, (c.metadata ?? {}) as Record<string, unknown>)}`).join("\n\n---\n\n")}`);
   }
   return parts.join("\n\n\n");
 }

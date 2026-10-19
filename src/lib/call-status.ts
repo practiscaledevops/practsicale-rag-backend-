@@ -10,3 +10,19 @@ export function callStatusLabel(meta: Record<string, unknown>): string {
 export function closingTypeLabel(meta: Record<string, unknown>): string {
   return meta.ticket_category === "high_ticket" ? "High Ticket" : meta.ticket_category === "low_ticket" ? "Low Ticket" : "Unclassified";
 }
+
+/** Keep current CRM truth inside the numbered, citeable evidence itself. Legacy
+ * transcript headers can still contain the model's original "Outcome: CLOSED"
+ * while a historical backfill is pending. A separate roster alone isn't enough
+ * to stop a model from mistaking that old header for the current CRM status. */
+export function currentCallEvidence(content: string, sourceType: string | null | undefined, meta: Record<string, unknown>): string {
+  if (sourceType !== "call_score" && sourceType !== "transcript") return content;
+  const historical = content.replace(/(^|\n)Outcome:\s*(CLOSED|FOLLOW_UP|LOST)(?=\r?\n|$)/g, "$1Original model outcome (historical; not CRM status): $2");
+  return [
+    `Current CRM status: ${callStatusLabel(meta)}`,
+    `Closing type: ${closingTypeLabel(meta)}`,
+    "These current CRM/QA fields are authoritative. Outcomes in the original report or transcript below are historical model interpretations and cannot override these fields.",
+    "",
+    historical,
+  ].join("\n");
+}

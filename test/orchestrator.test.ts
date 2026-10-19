@@ -77,6 +77,21 @@ describe("heuristic intent", () => {
 });
 
 describe("lane-grouped context", () => {
+  it.each([
+    { call_status: null, call_outcome: "CLOSED", ticket_category: null, expected: "Pending", closing: "Unclassified" },
+    { call_status: "closed", call_outcome: "FOLLOW_UP", ticket_category: "high_ticket", expected: "Closed", closing: "High Ticket" },
+  ])("keeps current CRM status inside cited evidence despite a conflicting legacy outcome ($expected)", row => {
+    const body = `Call transcript\nOutcome: ${row.call_outcome}\nConsultant: Synthetic consultant`;
+    const c: OrchestratedChunk = { id: "status-evidence", content: body, metadata: row, document_id: "doc", parent_id: null, source_type: "transcript", lane: "reality", object: null, object_id: null, intelligence_class: "business_reality", domain: "sales", rrf_score: 0, rank: 1, boost: 0, finalScore: 1, via: "search" };
+    const context = buildLaneContext([c]);
+    expect(context).toContain("[status-evidence]");
+    expect(context).toContain(`Current CRM status: ${row.expected}`);
+    expect(context).toContain(`Closing type: ${row.closing}`);
+    expect(context).toContain(`Original model outcome (historical; not CRM status): ${row.call_outcome}`);
+    expect(context).not.toContain(`\nOutcome: ${row.call_outcome}`);
+    expect(c.content).toBe(body); // Raw archive and citation identity stay intact.
+  });
+
   it("groups by lane with headers and labels each chunk with its object identity", () => {
     const chunk = (over: Partial<OrchestratedChunk>): OrchestratedChunk => ({
       id: "c1",
