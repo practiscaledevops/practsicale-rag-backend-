@@ -68,8 +68,8 @@ describe("parseCallReviewFilter — the isReview gate (review intent AND ≥1 fi
   it("date + review verb", () => {
     expect(parse("review the calls from 22 September")).toEqual({ isReview: true, date: "2026-09-22" });
   });
-  it.each(["check yesterdays calls", "check yesterday's calls", "check on yesterday’s calls", "report on yesterday calls", "how did yesterday's calls go"])("routes casual dated reports: %s", (query) => {
-    expect(parseCallReviewFilter(query, { referenceDate: "2026-10-20" })).toEqual({ isReview: true, date: "2026-10-19" });
+  it.each(["check yesterdays calls", "check yesterdaycalls", "check yesterdayscalls", "yesterdaycalls", "todaycalls", "check yesterday's calls", "check on yesterday’s calls", "report on yesterday calls", "how did yesterday's calls go", "how many yesterday calls"])("routes casual dated reports: %s", (query) => {
+    expect(parseCallReviewFilter(query, { referenceDate: "2026-10-20" })).toEqual({ isReview: true, date: query.includes("today") ? "2026-10-20" : "2026-10-19" });
   });
   it.each(["check tips for NEMT calls", "check how James handles calls", "write a post about yesterday calls"])("does not mistake coaching or content creation for a report: %s", (query) => {
     expect(parse(query).isReview).toBe(false);

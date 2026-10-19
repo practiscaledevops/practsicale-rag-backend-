@@ -109,7 +109,7 @@ describe("runOrchestratedRetrieval — the user's time zone", () => {
     expect(org).toBe("org-1");
     expect(filter).toEqual({ isReview: true, date: "2026-09-24" });
     expect(opts).toEqual({ maxCalls: 25, maxTokens: 140_000, timeZone: NY });
-    expect(out.callReview).toEqual({ count: 0, note: null, filter: { isReview: true, date: "2026-09-24" }, timeZone: NY });
+    expect(out.callReview).toEqual({ count: 0, note: null, filter: { isReview: true, date: "2026-09-24" }, timeZone: NY, scorecard: [], complete: true });
   });
 
   it("a Karachi user at the same instant: Karachi's date", async () => {

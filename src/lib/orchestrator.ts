@@ -21,6 +21,8 @@
 // classifier can't run. Used by /api/v1/chat (and /retrieve when enabled).
 
 import { z } from "zod";
+import { isCreativeRequest, searchHistoryForRequest } from "@/lib/creative-quality";
+import { uniqueEvidence } from "@/lib/evidence-diversity";
 import { supabaseAdmin } from "@/lib/supabase";
 import { embed } from "@/lib/embeddings";
 import { hybridSearchLane, expandParents, expandTranscripts, LANE_RPC_MISSING, type LaneChunk, type RetrievedChunk } from "@/lib/retrieval";
@@ -138,7 +140,7 @@ export async function classifyIntent(opts: {
   tier: string;
 }): Promise<Intent> {
   const fallback = heuristicIntent(opts.query);
-  const recent = opts.history
+  const recent = searchHistoryForRequest(opts.query, opts.history)
     .filter((m) => m.role === "user" || m.role === "assistant")
     .slice(-4)
     .map((m) => `${m.role}: ${m.content.slice(0, 500)}`)
@@ -343,7 +345,7 @@ export interface OrchestrationOutput extends RetrievalOutput {
    * so the answer can say "Reviewing all N calls from …". Undefined otherwise.
    * `timeZone` is the IANA zone the filter's dates (and the scorecard) are in.
    */
-  callReview?: { count: number; note: string | null; filter: CallReviewFilter; timeZone: string };
+  callReview?: { count: number; note: string | null; filter: CallReviewFilter; timeZone: string; scorecard?: ScorecardRow[]; complete?: boolean };
 }
 
 export interface OrchestrateOptions {
@@ -540,7 +542,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   // above, "forced" (Consultant calls) = skip the probe and let the roster-aware
   // resolve decide, "off" (Playbooks / Learnings) = never.
   const reviewAllowed = gates.callReview && (plan.callReview === "forced" || (plan.callReview === "gated" && reviewGate));
-  const reviewPromise: Promise<{ filter: CallReviewFilter; chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number } | null> =
+  const reviewPromise: Promise<{ filter: CallReviewFilter; chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number; complete?: boolean } | null> =
     reviewAllowed && transcriptsInScope
       ? (async () => {
           // Anchor "yesterday" / "last 3 days" / an omitted year to the user's
@@ -715,6 +717,8 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   }
 
   const confidence = confidenceFrom(top);
+  // Fresh creative work should see more than one document when alternatives exist.
+  if (isCreativeRequest(query)) top = uniqueEvidence([...top, ...pool], true).slice(0, retrieval.rerankTopN);
 
   // 8. Parent expansion for fuller context (keeps the annotation).
   let final = top;
@@ -723,6 +727,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     const parents = await expandParents(top);
     final = top.map((c, i) => ({ ...c, id: parents[i].id, content: parents[i].content, metadata: parents[i].metadata, parent_id: parents[i].parent_id }));
   }
+  final = uniqueEvidence(final, isCreativeRequest(query));
 
   // 8.5 Full-call transcript depth. Two sources of full calls converge here:
   //     (a) the STRUCTURED review path (step 1b) — EVERY call matching a named
@@ -819,7 +824,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   // (all N calls, not a sample) so the answer reviews every one, and surface the
   // count/note/filter on the output. The note leads the context, before the
   // Business Reality lane where the transcripts sit.
-  const callReview = review ? { count: review.callCount, note: review.note, filter: review.filter, timeZone } : undefined;
+  const callReview = review ? { count: review.callCount, note: review.note, filter: review.filter, timeZone, scorecard: review.scorecard, complete: review.complete !== false } : undefined;
   const structuredNote =
     review && review.scorecard.length
       ? [

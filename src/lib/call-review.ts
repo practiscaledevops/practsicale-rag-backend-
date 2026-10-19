@@ -90,7 +90,13 @@ const REVIEW_RE = new RegExp(
 
 /** True when the query carries a review/audit/analyse verb (no filter required). */
 export function looksLikeReview(query: string): boolean {
-  return REVIEW_RE.test(query ?? "");
+  const q = normalizeCallReportQuery(query);
+  return REVIEW_RE.test(q) || /^\s*(?:please\s+)?(?:today|yesterday)(?:['’]?s)?\s+calls?\s*[?.!]?\s*$/i.test(q) || /\bhow many\s+(?:[\w'’-]+\s+){0,3}calls?\b/i.test(q);
+}
+
+/** Common mobile typing joins must not turn a live report into a semantic sample. */
+export function normalizeCallReportQuery(query: string): string {
+  return (query ?? "").replace(/\b(today|yesterday)(?:['’]?s)?(calls?)\b/gi, "$1 $2");
 }
 
 const MONTHS: Record<string, number> = {
@@ -179,7 +185,7 @@ function toScorecardRow(m: Record<string, unknown>, timeZone: string): Scorecard
 export function resolveDate(query: string, referenceDate: string, timeZone?: string): string | undefined {
   const ref = isISODate(referenceDate) ? referenceDate : todayISO(timeZone);
   const refYear = Number(ref.slice(0, 4));
-  const q = query;
+  const q = normalizeCallReportQuery(query);
 
   // 1) ISO.
   const iso = /\b(20\d{2})-(\d{1,2})-(\d{1,2})\b/.exec(q);
@@ -364,7 +370,7 @@ export function parseCallReviewFilter(
   // Normalize dashed / slashed word-dates ("24-sep-2026", "sep-24-2026") so the
   // month-name parsers below see spaces; digit-digit dates (9/22, 2026-09-24) are
   // left intact.
-  const q = (query ?? "")
+  const q = normalizeCallReportQuery(query)
     .trim()
     .replace(/(\d)[-/](?=[a-z])/gi, "$1 ")
     .replace(/([a-z])[-/](?=\d)/gi, "$1 ");
@@ -390,7 +396,7 @@ export function parseCallReviewFilter(
     if (hits.size) consultants = [...hits];
   }
   const hasFilter = !!date || !!range || !!practiceType || consultants.length > 0;
-  const isReview = hasFilter && REVIEW_RE.test(q);
+  const isReview = hasFilter && looksLikeReview(q) && !GENERATION_RE.test(q);
 
   const filter: CallReviewFilter = { isReview };
   if (range) { filter.dateFrom = range.from; filter.dateTo = range.to; }
@@ -926,8 +932,8 @@ export async function fetchCallsByFilter(
   db: SupabaseClient,
   orgId: string,
   filter: CallReviewFilter,
-  opts: { maxCalls: number; maxTokens: number; timeZone?: string }
-): Promise<{ chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number }> {
+  opts: { maxCalls: number; maxTokens: number; timeZone?: string; metadataOnly?: boolean }
+): Promise<{ chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number; complete?: boolean }> {
   const timeZone = resolveTimeZone(opts.timeZone);
   const applyFilters = <T extends { eq: Function; ilike: Function; or: Function; gte: Function; lte: Function; lt: Function }>(q: T): T => {
     let out = q.eq("org_id", orgId).eq("source_type", "transcript");
@@ -953,15 +959,18 @@ export async function fetchCallsByFilter(
     // 1) Which calls match — document_id + summary metadata (never `select *`).
     //    Also builds the COMPLETE scorecard (every matching call), so a 50-call
     //    day is fully enumerated even though we deep-read only a subset.
-    const idQuery = applyFilters(db.from("chunks").select("document_id, metadata, created_at"))
-      .order("document_id", { ascending: true })
-      .order("created_at", { ascending: true })
-      .limit(MAX_MATCH_ROWS);
-    const { data: idRows, error: idErr } = await idQuery;
-    if (idErr) {
-      console.error("[call-review] match scan failed:", idErr.message);
-      return { chunks: [], callCount: 0, note: null, scorecard: [], totalMatched: 0 };
+    // One document per transcript, not dozens of repeated chunk metadata rows.
+    // Page explicitly: a single large limit is still clipped by PostgREST's row cap.
+    const idRows: { document_id: string; metadata: Record<string, unknown> }[] = [];
+    let complete = false;
+    for (let offset = 0; offset < 10_000; offset += 500) {
+      const { data: page, error } = await applyFilters(db.from("documents").select("id, metadata"))
+        .order("id", { ascending: true }).range(offset, offset + 499);
+      if (error) throw new Error(`Call roster read failed: ${error.message}`);
+      idRows.push(...(page ?? []).map(r => ({ document_id: String(r.id), metadata: r.metadata ?? {} })));
+      if ((page ?? []).length < 500) { complete = true; break; }
     }
+    if (!complete) return { chunks: [], callCount: 0, note: "The call roster exceeded the report limit. Narrow the date range; this is not a complete count.", scorecard: [], totalMatched: 0, complete: false };
     const orderedDocs: string[] = [];
     const cardByDoc = new Map<string, ScorecardRow>();
     for (const r of (idRows ?? []) as { document_id: string; metadata: Record<string, unknown>; created_at?: string }[]) {
@@ -976,6 +985,7 @@ export async function fetchCallsByFilter(
     if (totalMatched === 0) {
       return { chunks: [], callCount: 0, note: `No calls found for ${describeFilter(filter)} in the Brain.`, scorecard: [], totalMatched: 0 };
     }
+    if (opts.metadataOnly) return { chunks: [], callCount: 0, note: null, scorecard, totalMatched, complete: true };
 
     // 2) Full chunks for the chosen calls only, in reading order (created_at ASC
     //    = summary → body by timestamp). Select just the pipeline's fields — never
@@ -1023,6 +1033,6 @@ export async function fetchCallsByFilter(
     return { chunks: assembled.chunks, callCount: assembled.callCount, note, scorecard, totalMatched };
   } catch (e) {
     console.error("[call-review] fetch error:", e instanceof Error ? e.message : e);
-    return { chunks: [], callCount: 0, note: null, scorecard: [], totalMatched: 0 };
+    return { chunks: [], callCount: 0, note: "The call database could not be read. This does not mean there were zero calls.", scorecard: [], totalMatched: 0, complete: false };
   }
 }

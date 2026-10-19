@@ -48,7 +48,7 @@ function guardSamplingParams(model: LanguageModelV1): LanguageModelV1 {
 // tiny helper calls) uses the supported completion budget and reasoning params.
 function openAIModel(id: string, apiKey?: string): LanguageModelV1 {
   const provider = createOpenAI({ apiKey, compatibility: "strict" });
-  if (!/^gpt-[6-9](?:[.-]|$)/.test(id)) return guardSamplingParams(provider(id));
+  if (!/^gpt-[5-9](?:[.-]|$)/.test(id)) return guardSamplingParams(provider(id));
   const base = provider.chat(id, { structuredOutputs: true, reasoningEffort: "low" });
   return wrapLanguageModel({ model: base, middleware: {
     transformParams: async ({ params }) => ({

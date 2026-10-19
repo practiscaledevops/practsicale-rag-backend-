@@ -10,6 +10,7 @@ import { generateText } from "ai";
 import { getModel } from "@/lib/llm";
 import { generationParams } from "@/lib/models-catalog";
 import { isDemo } from "@/lib/demo/mode";
+import { searchHistoryForRequest } from "@/lib/creative-quality";
 
 export interface ChatTurn {
   role: string;
@@ -38,7 +39,7 @@ export async function rewriteQuery(
   if (!query.trim()) return query;
 
   // Only the last few turns matter for reference resolution; keep the prompt small.
-  const recent = history
+  const recent = searchHistoryForRequest(query, history)
     .filter((m) => m.role === "user" || m.role === "assistant")
     .slice(-6)
     .map((m) => `${m.role}: ${m.content.slice(0, MAX_REWRITE_TURN_CHARS)}`)
@@ -81,7 +82,7 @@ export async function rewriteQueries(
 ): Promise<string[]> {
   if (isDemo() || !query.trim()) return [query];
 
-  const recent = history
+  const recent = searchHistoryForRequest(query, history)
     .filter((m) => m.role === "user" || m.role === "assistant")
     .slice(-6)
     .map((m) => `${m.role}: ${m.content.slice(0, MAX_REWRITE_TURN_CHARS)}`)

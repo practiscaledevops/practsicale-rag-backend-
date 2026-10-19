@@ -243,12 +243,12 @@ type Call = { method: string; args: unknown[] };
 function fakeDb(idRows: unknown[], rows: unknown[] = []) {
   const calls: Call[][] = [];
   const db = {
-    from: () => {
+    from: (table: string) => {
       const log: Call[] = [];
       calls.push(log);
       let selected = "";
       const q: Record<string, unknown> = {};
-      for (const method of ["eq", "ilike", "or", "gte", "lt", "lte", "order", "limit", "in", "not"]) {
+      for (const method of ["eq", "ilike", "or", "gte", "lt", "lte", "order", "limit", "range", "in", "not"]) {
         q[method] = (...args: unknown[]) => {
           log.push({ method, args });
           return q;
@@ -259,7 +259,7 @@ function fakeDb(idRows: unknown[], rows: unknown[] = []) {
         return q;
       };
       q.then = (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) =>
-        Promise.resolve({ data: selected.startsWith("id,") ? rows : idRows, error: null }).then(res, rej);
+        Promise.resolve({ data: table === "documents" ? idRows.map(r => ({ ...(r as object), id: (r as { document_id: string }).document_id })) : selected.startsWith("id,") ? rows : idRows, error: null }).then(res, rej);
       return q;
     },
   };

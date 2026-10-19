@@ -26,7 +26,7 @@ describe("supportsTemperature", () => {
     expect(supportsTemperature("claude-haiku-4-5")).toBe(true);
     expect(supportsTemperature("claude-sonnet-4-6")).toBe(true);
     expect(supportsTemperature("gpt-4o")).toBe(true);
-    expect(supportsTemperature("gpt-5")).toBe(true);
+    expect(supportsTemperature("gpt-5")).toBe(false);
   });
 
   it("defaults to true for unknown/empty ids", () => {

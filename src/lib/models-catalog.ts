@@ -45,7 +45,7 @@ export const MODELS: ModelEntry[] = [
   // OpenAI (GPT)
   { id: "gpt-4o-mini", provider: "openai", label: "GPT-4o mini" },
   { id: "gpt-4o", provider: "openai", label: "GPT-4o" },
-  { id: "gpt-5", provider: "openai", label: "GPT-5 (new)" },
+  { id: "gpt-5", provider: "openai", label: "GPT-5 (previous generation)" },
 ];
 
 // Which env var holds each provider's API key. Presence == available.
@@ -80,7 +80,7 @@ const NO_TEMPERATURE_IDS = new Set<string>([
  */
 export function supportsTemperature(modelId: string | undefined | null): boolean {
   if (!modelId) return true;
-  if (/^gpt-[6-9](?:[.-]|$)/.test(modelId)) return false;
+  if (/^gpt-[5-9](?:[.-]|$)/.test(modelId)) return false;
   if (NO_TEMPERATURE_IDS.has(modelId)) return false;
   // Claude 5+ (any variant) deprecates temperature; be safe for future ids.
   if (/^claude-(?:opus|sonnet|haiku)-(?:[5-9]|\d{2,})/.test(modelId)) return false;

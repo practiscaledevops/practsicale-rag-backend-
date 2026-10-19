@@ -16,6 +16,7 @@ const m = vi.hoisted(() => ({
   planJob: vi.fn(),
   dispatchJob: vi.fn(),
   runRetrieval: vi.fn(),
+  fetchCalls: vi.fn(),
 }));
 
 vi.mock("@/lib/auth/context", async (orig) => ({
@@ -52,6 +53,7 @@ vi.mock("@/lib/jobs/dispatch", () => ({ dispatchJob: m.dispatchJob }));
 vi.mock("@/lib/call-review", async (orig) => ({
   ...(await orig<typeof import("@/lib/call-review")>()),
   knownConsultants: vi.fn(async () => ["David Miller", "James Ephrim"]),
+  fetchCallsByFilter: m.fetchCalls,
 }));
 
 import { POST as chat } from "@/app/api/v1/chat/route";
@@ -138,7 +140,17 @@ afterEach(() => {
 });
 
 describe("POST /api/v1/chat — timeZone", () => {
-  const messages = [{ role: "user", content: "list all today's calls" }];
+  const messages = [{ role: "user", content: "analyze today's calls" }];
+
+  it("renders the exact dated roster without a model or semantic search, for any model selection", async () => {
+    m.fetchCalls.mockResolvedValue({ chunks: [], callCount: 0, note: null, totalMatched: 1, complete: true,
+      scorecard: [{ consultant: "James", prospect: "Acme", date: "2026-09-24", time: "20:00", practice: "NEMT", score: 75, band: "Strong", outcome: "Closed", closingType: "High Ticket", originalOutcome: "Follow Up", callSequence: "Call 2", duration: 20 }] });
+    const res = await chat(post("/api/v1/chat", { messages: [{ role: "user", content: "check todaycalls" }], timeZone: NY }));
+    const text = await res.text();
+    expect(m.orchestrate).not.toHaveBeenCalled(); expect(m.streamText).not.toHaveBeenCalled();
+    expect(m.fetchCalls.mock.calls[0][2].date).toBe("2026-09-24");
+    expect(text).toContain("Consultant-wise Summary"); expect(text).toContain("| Total | 1 | 1 | 1 | 0 | 1 | 0 | 0 |");
+  });
 
   it("forwards the user's zone to the orchestrator", async () => {
     const res = await chat(post("/api/v1/chat", { messages, timeZone: NY }));
@@ -155,7 +167,7 @@ describe("POST /api/v1/chat — timeZone", () => {
   it("absent or invalid → the default zone, never a 400", async () => {
     for (const timeZone of [undefined, "Mars/Olympus_Mons", "+05:00", 42, { tz: NY }, "x".repeat(500)]) {
       m.orchestrate.mockClear();
-      const res = await chat(post("/api/v1/chat", { messages, ...(timeZone === undefined ? {} : { timeZone }) }));
+      const res = await chat(post("/api/v1/chat", { messages: [{ role: "user", content: "analyze today's calls" }], ...(timeZone === undefined ? {} : { timeZone }) }));
       expect(res.status).toBe(200);
       await res.text();
       expect(m.orchestrate.mock.calls[0][0].timeZone).toBe(DEFAULT_TIME_ZONE);
@@ -191,7 +203,7 @@ describe("POST /api/v1/chat — timeZone", () => {
     for (const [timeZone, note] of cases) {
       m.streamText.mockClear();
       vi.mocked(loadSettings).mockResolvedValueOnce({ settings, updatedAt: null });
-      const res = await chat(post("/api/v1/chat", { messages, ...(timeZone === undefined ? {} : { timeZone }) }));
+      const res = await chat(post("/api/v1/chat", { messages: [{ role: "user", content: "analyze today's calls" }], ...(timeZone === undefined ? {} : { timeZone }) }));
       expect(res.status).toBe(200);
       await res.text();
       expect(m.orchestrate).not.toHaveBeenCalled();

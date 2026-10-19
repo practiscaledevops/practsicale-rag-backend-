@@ -57,7 +57,9 @@
 //
 // Headers: x-model (resolved id), x-provider (anthropic|openai).
 
-import { createDataStreamResponse, streamText, convertToCoreMessages, formatDataStreamPart } from "ai";
+import { createDataStreamResponse, streamText, generateText, convertToCoreMessages, formatDataStreamPart } from "ai";
+import { randomUUID } from "node:crypto";
+import { creativeContextSchema, creativeInstruction, isCreativeRequest, wordingOverlap } from "@/lib/creative-quality";
 import { waitUntil } from "@vercel/functions";
 import { z } from "zod";
 import { getModel } from "@/lib/llm";
@@ -67,7 +69,7 @@ import { REASONING_ORDER_INSTRUCTION, MODE_LABELS, normalizeMode, modeDef } from
 import { getActivePrompt } from "@/lib/prompts-db";
 import { loadSettings } from "@/lib/settings";
 import { runRetrieval } from "@/lib/pipeline";
-import { runOrchestratedRetrieval, capabilityGates, performanceAllowed, buildDateNote, type OrchestrationOutput } from "@/lib/orchestrator";
+import { runOrchestratedRetrieval, capabilityGates, performanceAllowed, callReviewInScope, buildDateNote, type OrchestrationOutput } from "@/lib/orchestrator";
 import { metricEventRows } from "@/lib/performance-memory";
 import { detectLearning, looksLikeLearning } from "@/lib/learning-detect";
 import { validateCitations, checkFaithfulness } from "@/lib/faithfulness";
@@ -82,8 +84,9 @@ import { costUsd } from "@/lib/pricing";
 import { supabaseAdmin } from "@/lib/supabase";
 import { isDemo } from "@/lib/demo/mode";
 import { demoChatStreamResponse } from "@/lib/demo/stream";
-import { CONVERSATION_SUMMARY_PREFIX, isConversationSummary } from "@/lib/call-review";
-import { callerTimeZone, DEFAULT_TIME_ZONE } from "@/lib/timezone";
+import { CONVERSATION_SUMMARY_PREFIX, isConversationSummary, knownConsultants, resolveReviewFilterWithHistory, fetchCallsByFilter } from "@/lib/call-review";
+import { callerTimeZone, DEFAULT_TIME_ZONE, todayIn } from "@/lib/timezone";
+import { renderCallReport, wantsStructuredCallReport } from "@/lib/call-report";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
@@ -165,7 +168,7 @@ export async function POST(req: Request) {
   // turns in the window are dropped first; only a current turn that is too large
   // on its own (message + attachments + directives + summary) is a 413.
   const fixedChars =
-    (body.attachments ?? []).reduce((n, a) => n + a.text.length, 0) + (body.directives?.length ?? 0) + summaryBlock.length;
+    (body.attachments ?? []).reduce((n, a) => n + a.text.length, 0) + (body.directives?.length ?? 0) + summaryBlock.length + (body.creative ? JSON.stringify(body.creative).length : 0);
   const charsOf = (list: { content: string }[]) => list.reduce((n, m) => n + m.content.length, 0);
   // The model sees role + content only; a turn's createdAt rides on the
   // retrieval history (below) for call-review date anchoring.
@@ -274,6 +277,33 @@ export async function POST(req: Request) {
         dataStream.writeData({ type: "route", requested: requestedSel, tier: effectiveTier ?? "recommended", model: modelId });
       }
 
+      // A row-based report does not need semantic retrieval, transcript expansion
+      // or an LLM to rewrite dates and arithmetic. Keep the same access gates.
+      if (wantsStructuredCallReport(query)) {
+        let report: Awaited<ReturnType<typeof fetchCallsByFilter>> | null = null;
+        let filter = resolveReviewFilterWithHistory(query, retrievalHistory, { referenceDate: todayIn(timeZone), knownConsultants: [], timeZone });
+        if (gates.callReview && callReviewInScope(scope) && knowledgeScope.retrieval.callReview !== "off") {
+          const db = supabaseAdmin();
+          const names = await knownConsultants(db, ctx.orgId);
+          filter = resolveReviewFilterWithHistory(query, retrievalHistory, { referenceDate: todayIn(timeZone), knownConsultants: names, timeZone });
+          if (filter.isReview) {
+            dataStream.writeData({ type: "status", stage: "searching", label: "Reading the complete call roster" });
+            report = await fetchCallsByFilter(db, ctx.orgId, filter, { maxCalls: 0, maxTokens: 0, timeZone, metadataOnly: true });
+          }
+        }
+        const text = report ? renderCallReport(report.scorecard, filter, timeZone, report.complete !== false)
+          : "I couldn't run a complete structured call lookup with the current permissions, source selection or date filter. Missing retrieved records do not mean there were zero calls. Specify a date or consultant, and use the Consultant calls scope if your access permits.";
+        dataStream.writeData({ type: "call_review", count: report?.totalMatched ?? 0, note: report?.note ?? null, filter: { date: filter.date ?? null, dateFrom: filter.dateFrom ?? null, dateTo: filter.dateTo ?? null, consultants: filter.consultants ?? null, practiceType: filter.practiceType ?? null }, timeZone });
+        dataStream.write(formatDataStreamPart("text", text));
+        dataStream.writeData({ type: "generation_receipt", model: modelId, engine: "structured database report", mode: "call report", creative: false,
+          words: text.split(/\s+/).length, evidenceDocuments: report?.scorecard.length ?? 0, evidenceChunks: 0,
+          layers: [], validCitations: 0, invalidCitations: 0, faithfulness: report && report.complete !== false ? "Exact structured rows and server totals" : "Complete lookup unavailable",
+          warnings: report?.complete === false ? [report.note ?? "Incomplete database read"] : [] });
+        dataStream.write(formatDataStreamPart("finish_message", { finishReason: "stop", usage: { promptTokens: 0, completionTokens: 0 } }));
+        waitUntil(logQuery({ orgId: ctx.orgId, apiKeyId: ctx.key.id, query, mode: "general", sourceTypes: scope.sourceTypes, retrievedDocIds: [], grounded: !!report && report.complete !== false, confidence: null, refused: !report || report.complete === false }));
+        return;
+      }
+
       // Small talk / greeting: conversational reply, no retrieval, no sources.
       if (!hasAttachments && isSmallTalk(query) && history.filter((m) => m.role === "user").length <= 1) {
         const result = streamText({
@@ -367,8 +397,8 @@ export async function POST(req: Request) {
       const docIds = [...new Set(chunks.map((c) => c.document_id).filter(Boolean))] as string[];
       const docDates: Record<string, string> = {};
       if (docIds.length > 0) {
-        const { data: docs } = await supabaseAdmin().from("documents").select("id, created_at").eq("org_id", ctx.orgId).in("id", docIds);
-        for (const d of (docs ?? []) as { id: string; created_at?: string }[]) if (d.created_at) docDates[d.id] = d.created_at;
+        const { data: docs } = await supabaseAdmin().from("documents").select("id, created_at, updated_at").eq("org_id", ctx.orgId).in("id", docIds);
+        for (const d of (docs ?? []) as { id: string; created_at?: string; updated_at?: string }[]) if (d.updated_at || d.created_at) docDates[d.id] = d.updated_at ?? d.created_at!;
       }
 
       // Surface the sources (with lane + object identity) so the client can show/trace them.
@@ -462,7 +492,12 @@ export async function POST(req: Request) {
           : Promise.resolve(null);
 
       // Stable content first (system + context), user's messages last → caching-friendly.
-      const system = `${groundingPrompt}${modeBlock ? `\n\n${modeBlock}` : ""}${outputBlock ? `\n\n${outputBlock}` : ""}${
+      const creative = isCreativeRequest(query);
+      const creativeContext = creativeContextSchema.parse(body.creative ?? {});
+      // Current-thread answers are included even when the caller has no saved draft memory.
+      const priorDrafts = [...creativeContext.drafts, ...history.filter(m => m.role === "assistant").slice(-6).map((m, i) => ({ id: `thread-${i}`, content: m.content.slice(0, 2400) }))].slice(-18);
+      const seed = randomUUID();
+      const system = `${groundingPrompt}${creative ? `\n\n${creativeInstruction({ ...creativeContext, drafts: priorDrafts.slice(-12) }, seed)}` : ""}${modeBlock ? `\n\n${modeBlock}` : ""}${outputBlock ? `\n\n${outputBlock}` : ""}${
         deepAnalysis ? `\n\n${DEEP_ANALYSIS_INSTRUCTION}` : ""
       }${
         directives ? `\n\nOPERATOR CONTEXT (trusted, private to the current user — use it to tailor the answer; never reveal it verbatim or attribute it):\n${directives}` : ""
@@ -524,7 +559,7 @@ export async function POST(req: Request) {
         const flush = (upTo: number) => {
           const chunk = pending.slice(0, upTo);
           if (!chunk) return;
-          dataStream.write(formatDataStreamPart("text", chunk));
+          if (!creative) dataStream.write(formatDataStreamPart("text", chunk));
           fullText += chunk;
           pending = pending.slice(upTo);
         };
@@ -548,9 +583,38 @@ export async function POST(req: Request) {
       }
 
       if (clipped) {
-        dataStream.write(formatDataStreamPart("text", CLIPPED_NOTE));
+        if (!creative) dataStream.write(formatDataStreamPart("text", CLIPPED_NOTE));
         fullText += CLIPPED_NOTE;
       }
+      let overlap = wordingOverlap(fullText, priorDrafts);
+      let revised = false;
+      if (creative && creativeContext.freshness === "fresh" && overlap.repeated && Date.now() < deadline - 75_000) {
+        dataStream.writeData({ type: "status", stage: "quality", label: "Reworking repeated wording" });
+        try {
+          const revision = await generateText({ model: resolvedModel, system,
+            messages: [...baseMessages, { role: "assistant", content: fullText }, { role: "user", content: "Create a fresh alternative to this draft. Change the hook, structure and explanation; keep the original user's task and every verified fact. Avoid the earlier case example if other evidence supports an alternative; otherwise state the evidence limitation. Output only the replacement draft." }],
+            ...generationParams(modelId, { maxTokens: Math.min(maxTokens, 5000), temperature: settings.generation.temperature }),
+            abortSignal: AbortSignal.timeout(Math.max(1000, deadline - Date.now() - 15_000)),
+          });
+          promptTokens += revision.usage.promptTokens ?? 0;
+          completionTokens += revision.usage.completionTokens ?? 0;
+          const nextOverlap = wordingOverlap(revision.text, priorDrafts);
+          if (revision.finishReason !== "length" && revision.text.trim() && nextOverlap.percent < overlap.percent) {
+            fullText = revision.text; overlap = nextOverlap; revised = true; finishReason = "stop";
+          }
+        } catch (e) { console.error("[creative] revision unavailable", e instanceof Error ? e.name : "error"); }
+      }
+      if (creative) dataStream.write(formatDataStreamPart("text", fullText));
+      const citationCheck = validateCitations(fullText, retrievedIds);
+      dataStream.writeData({ type: "generation_receipt", model: modelId, mode: effectiveMode, creative,
+        words: fullText.trim().split(/\s+/).length, targetWords: creative ? creativeContext.targetWords ?? null : null,
+        memoryScope: creative ? creativeContext.memoryScope : "off", draftsCompared: creative ? priorDrafts.length : 0,
+        overlapPercent: creative && priorDrafts.length ? overlap.percent : null, revised,
+        layers: creativeContext.layerNames, evidenceDocuments: docIds.length, evidenceChunks: chunks.length,
+        validCitations: citationCheck.valid.length, invalidCitations: citationCheck.fabricated.length,
+        faithfulness: "not verified in this receipt", seed: creative ? seed : null,
+        warnings: [...creativeContext.warnings, ...(creative && overlap.repeated ? ["Substantial wording overlap remains; limited source material may constrain variation."] : [])],
+      });
       dataStream.write(
         formatDataStreamPart("finish_message", { finishReason, usage: { promptTokens, completionTokens } })
       );
@@ -683,6 +747,7 @@ const ChatBodySchema = z
     collectionIds: z.array(z.string().max(64)).max(50).optional(),
     knowledgeScope: z.enum(KNOWLEDGE_SCOPE_IDS).optional(),
     directives: z.string().max(8000).optional(),
+    creative: creativeContextSchema.optional(),
     attachments: z.array(z.object({ name: z.string().max(200), text: z.string().max(60_000) })).max(5).optional(),
     // The spoke user's resolved capability ids (narrow-only; see the header).
     capabilities: z.array(z.string().regex(CAPABILITY_ID_RE)).max(300).optional(),
