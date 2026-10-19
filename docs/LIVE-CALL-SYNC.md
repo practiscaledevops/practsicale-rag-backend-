@@ -44,6 +44,8 @@ The worker rebuilds Performance Memory before marking an event complete.
    Brain source to `cursor_field=updated_at`, `cursor_param=updated_since`, and
    reset `cursor_value` to null for one reconciliation sweep. The API returns
    update-cursor results oldest-first to preserve partial-run progress.
+   Report/transcript pages are capped at 25 records in the connector; this keeps
+   legacy `limit=500` configurations below the bounded HTTP response limit.
 
 Without webhook environment variables the integration remains disabled; normal
 scoring works and durable source events wait for activation. Migration 018 queues

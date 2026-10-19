@@ -53,6 +53,19 @@ afterEach(() => {
 });
 
 describe("pull connector — call dates", () => {
+  it("bounds transcript-heavy pages and still fetches the complete backfill", async () => {
+    const records = Array.from({ length: 26 }, (_, i) => ({ id: `r${i}`, transcript: "Consultant: Synthetic pagination check" }));
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input);
+      expect(url.searchParams.get("limit")).toBe("25");
+      const offset = Number(url.searchParams.get("offset"));
+      return Response.json(records.slice(offset, offset + 25));
+    }));
+    const result = await backfillTranscripts({ ...SOURCE, query_params: { limit: "500" } }, { db: {} as SupabaseClient });
+    expect(result.calls).toBe(26);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it("refreshes the exact current source row and its transcript, ignoring the old creation cursor", async () => {
     respondWith([{ id: "r1", consultant_name: "Test consultant", created_at: "2026-09-01T10:00:00Z", updated_at: "2026-10-19T10:00:00Z", call_status: "closed", call_outcome: "FOLLOW_UP", ticket_category: "high_ticket", transcript: "Consultant: A synthetic transcript" }]);
     await syncScoringRecord({} as SupabaseClient, { ...SOURCE, cursor_field: "created_at", cursor_param: "since", cursor_value: "2026-10-18T00:00:00Z" }, "r1");

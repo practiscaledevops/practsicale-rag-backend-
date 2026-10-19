@@ -524,6 +524,13 @@ async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: Fe
   }
   if (opts.limit && opts.limit > 0) baseParams.set("limit", String(opts.limit));
   if (opts.recordId) baseParams.set("report_id", opts.recordId);
+  // A report plus its transcript can be tens of KB. An old limit=500 config
+  // exceeds the bounded response reader on a full reconciliation/backfill.
+  // Keep pages small and let the existing offset loop fetch the complete set.
+  if (source.source_type === "call_score") {
+    const requested = Number(baseParams.get("limit"));
+    baseParams.set("limit", String(Math.min(25, requested > 0 && Number.isFinite(requested) ? Math.max(1, Math.floor(requested)) : 25)));
+  }
   const cursorParamName = source.cursor_param ?? source.cursor_field;
   if (!opts.ignoreCursor && cursorParamName && source.cursor_value) {
     baseParams.set(cursorParamName, source.cursor_value);
