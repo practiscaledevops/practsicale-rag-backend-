@@ -69,12 +69,22 @@ async function main() {
           const json = answer.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] ?? answer.slice(answer.indexOf("{"), answer.lastIndexOf("}") + 1);
           parsed = JSON.parse(json || "null");
         } catch { /* refusal/malformed output fails below */ }
-        if (!parsed && process.env.VERIFY_DIAGNOSTICS === "1") {
+        // Accept the explicit CRM label alias without treating absent/null
+        // model fields as Pending (only the source uses null for Pending).
+        if (parsed && typeof parsed === "object") {
+          const fields = Object.fromEntries(Object.entries(parsed).map(([key, value]) => [normalize(key), value]));
+          parsed.current_status = fields.currentstatus ?? fields.currentcrmstatus;
+          parsed.closing_type = fields.closingtype;
+        }
+        const explicitLabels = typeof parsed?.current_status === "string" && typeof parsed?.closing_type === "string"
+          && ["closed", "notclosed", "pending", "disqualified"].includes(normalize(parsed.current_status))
+          && ["highticket", "lowticket", "unclassified"].includes(normalize(parsed.closing_type));
+        const matches = explicitLabels && status(parsed.current_status) === status(row.call_status) && ticket(parsed.closing_type) === ticket(row.ticket_category);
+        if (!matches && process.env.VERIFY_DIAGNOSTICS === "1") {
           const { redactPII } = await import("../src/lib/redact");
           console.log(JSON.stringify({ diagnostic: combination, model, answer: redactPII(answer).slice(0, 1800) }));
         }
         const sourceCount = events.find(e => e.type === "sources")?.sources?.length ?? 0;
-        const matches = !!parsed && status(parsed.current_status) === status(row.call_status) && ticket(parsed.closing_type) === ticket(row.ticket_category);
         const result = { recordId: row.id, combination, model, httpStatus: res.status, matches, sourceCount, usage, errorCount: errors.length, outputStatus: parsed?.current_status ?? null, outputTicket: parsed?.closing_type ?? null,
           passed: res.ok && !errors.length && sourceCount > 0 && matches && usage?.promptTokens > 0 && usage?.completionTokens > 0 };
         results.push(result); console.log(JSON.stringify(result));
