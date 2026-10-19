@@ -21,6 +21,8 @@ import { ingestOne, type IngestResult } from "@/lib/ingest";
 import { redactPII } from "@/lib/redact";
 import { assertPublicUrl } from "@/lib/net-guard";
 import { isAllowedSecretRef } from "@/lib/connectors/secret-ref";
+import { syncSourceDocument } from "@/lib/connectors/sync-document";
+import { callStatusLabel, closingTypeLabel } from "@/lib/call-status";
 
 // Big free-text fields belong in the chunked BODY, not in metadata. The raw
 // `transcript` is a ~46 KB field that gets its own document (see runPull), so it
@@ -87,6 +89,11 @@ function recordMetadata(rec: Record<string, unknown>): Record<string, unknown> {
     if (reported && reported !== eff) out.reported_call_date = reported;
     out.call_date = eff;
   }
+  // Keep explicit nulls: clearing a CRM status/classification is an update too.
+  out.call_status = rec.call_status ?? null;
+  out.ticket_category = rec.ticket_category ?? null;
+  out.closing_type = rec.closing_type ?? null;
+  out.source_updated_at = rec.updated_at ?? null;
   return out;
 }
 
@@ -100,6 +107,10 @@ function buildTitle(rec: Record<string, unknown>, sourceType: string, recordId?:
     return `${who || sourceType}${score != null ? ` (${score})` : ""}`.trim();
   }
   return recordId ? `${sourceType} ${recordId}` : sourceType;
+}
+
+function scoringText(record: Record<string, unknown>): string {
+  return `Current CRM status: ${callStatusLabel(record)}\nClosing type: ${closingTypeLabel(record)}\nThe call_outcome in the original report is historical, not current CRM truth.\n\n${serializeRecord(record)}`;
 }
 
 // ---- transcript document -----------------------------------------------------
@@ -155,7 +166,9 @@ async function ingestTranscript(
     `Prospect: ${prospect}`,
     practice ? `Practice type: ${practice}` : "",
     callDate ? `Call date: ${callDate}` : "",
-    str(rec.call_outcome) ? `Outcome: ${str(rec.call_outcome)}` : "",
+    `Current CRM status: ${callStatusLabel(rec)}`,
+    `Closing type: ${closingTypeLabel(rec)}`,
+    str(rec.call_outcome) ? `Model's original outcome (not current CRM status): ${str(rec.call_outcome)}` : "",
     score ? `Score: ${score}/100${band ? ` (${band})` : ""}` : band ? `Band: ${band}` : "",
     str(rec.call_duration_minutes) ? `Duration: ${str(rec.call_duration_minutes)} min` : "",
     recording ? `Recording: ${recording}` : "",
@@ -165,7 +178,7 @@ async function ingestTranscript(
 
   const title = `Transcript — ${consultant} → ${prospect}${callDate ? ` (${callDate})` : ""}`;
 
-  return ingestOne(db, {
+  const input = {
     orgId: source.org_id,
     sourceType: "transcript",
     // Transcripts are lived experience, not doctrine → Business Reality / sales.
@@ -183,7 +196,10 @@ async function ingestTranscript(
       linked_call_score_id: recordId ?? null,
     },
     dataSourceId: source.id,
-  });
+  };
+  return recordId && source.source_type === "call_score"
+    ? syncSourceDocument(db, { ...input, recordId })
+    : ingestOne(db, input);
 }
 
 export interface DataSourceRow {
@@ -299,11 +315,13 @@ export async function runPull(
 
       const title = buildTitle(recNoTx, source.source_type, recordId);
 
-      const res = await ingestOne(db, {
+      const input = {
         orgId: source.org_id,
         sourceType: source.source_type,
         title,
-        text,
+        text: source.source_type === "call_score"
+          ? scoringText(recNoTx)
+          : text,
         // Provenance + the record's structured fields (consultant, score, band,
         // outcome, phase_scores, practice type as `category`…). Kept structurally
         // separate from any instruction; string values are PII-redacted in
@@ -315,7 +333,10 @@ export async function runPull(
           ...recordMetadata(recNoTx),
         },
         dataSourceId: source.id,
-      });
+      };
+      const res = source.source_type === "call_score" && recordId
+        ? await syncSourceDocument(db, { ...input, recordId })
+        : await ingestOne(db, input);
 
       if (res.skipped) result.documentsSkipped += 1;
       else result.documentsIngested += 1;
@@ -479,6 +500,7 @@ interface FetchOpts {
   ignoreCursor?: boolean;
   forceTranscript?: boolean;
   limit?: number;
+  recordId?: string;
 }
 
 async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: FetchOpts = {}): Promise<unknown[]> {
@@ -501,6 +523,7 @@ async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: Fe
     baseParams.set("include_transcript", "true");
   }
   if (opts.limit && opts.limit > 0) baseParams.set("limit", String(opts.limit));
+  if (opts.recordId) baseParams.set("report_id", opts.recordId);
   const cursorParamName = source.cursor_param ?? source.cursor_field;
   if (!opts.ignoreCursor && cursorParamName && source.cursor_value) {
     baseParams.set(cursorParamName, source.cursor_value);
@@ -556,7 +579,7 @@ async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: Fe
     }
 
     all.push(...batch);
-    if (!paged || batch.length < limit) break; // last page reached
+    if (opts.recordId || !paged || batch.length < limit) break; // exact lookup or last page reached
     // Out of time for this run: stop paging. Records are ingested in order and
     // the cursor advances to the last one processed, so the next run resumes.
     if (deadlineAt && Date.now() > deadlineAt) break;
@@ -564,6 +587,21 @@ async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: Fe
   }
 
   return all;
+}
+
+/** Fetch the authoritative CURRENT row, never an untrusted webhook snapshot. */
+export async function syncScoringRecord(db: SupabaseClient, source: DataSourceRow, recordId: string): Promise<void> {
+  const records = await fetchRecords(source, Date.now() + 120_000, { ignoreCursor: true, forceTranscript: true, recordId, limit: 1 });
+  const rec = records.find((row) => !!row && typeof row === "object" && String((row as Record<string, unknown>)[source.record_id_field ?? "id"]) === recordId) as Record<string, unknown> | undefined;
+  if (!rec) throw new Error("The scoring API did not return the requested report; its report_id filter must be deployed");
+  if (!rec.updated_at || !Number.isFinite(Date.parse(String(rec.updated_at)))) throw new Error("Scoring report has no revision; apply scoring migration 018 and deploy its API");
+  const { transcript, ...report } = rec;
+  const meta = recordMetadata(report);
+  await syncSourceDocument(db, { orgId: source.org_id, dataSourceId: source.id, recordId, sourceType: "call_score",
+    title: buildTitle(report, "call_score", recordId), intelligenceClass: "business_reality", domain: "sales",
+    text: scoringText(report),
+    metadata: { data_source: source.name, data_source_slug: source.slug ?? null, source_record_id: recordId, ...meta } });
+  if (typeof transcript === "string" && transcript.trim()) await ingestTranscript(db, source, report, transcript, recordId);
 }
 
 function buildHeaders(source: DataSourceRow): Record<string, string> {

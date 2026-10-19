@@ -51,6 +51,7 @@ interface CallRow {
   consultantId: string | null;
   score: number | null;
   won: boolean;
+  decided: boolean;
   outcome: string;
   band: string;
   practice: string;
@@ -64,6 +65,7 @@ interface Agg {
   scoreSum: number;
   scoreN: number;
   won: number;
+  decided: number;
   phaseSum: Record<string, number>;
   phaseN: Record<string, number>;
   bands: Record<string, number>;
@@ -83,10 +85,9 @@ function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : v == null ? "" : String(v);
 }
 /** A call counts as WON when the pipeline marks it closed/won (not a follow-up). */
-function isWon(status: string, outcome: string): boolean {
-  const s = (status + " " + outcome).toLowerCase();
-  if (/follow.?up|not.?clos|no.?show|lost|reschedul|pending|disqualif/.test(s)) return false;
-  return /clos|won|deal|signed|booked|converted/.test(s);
+function isWon(status: string): boolean {
+  // Model outcome is historical. Only an actual CRM/QA close is a closed deal.
+  return status.toLowerCase() === "closed";
 }
 function avg(sum: number, n: number): number {
   return n > 0 ? sum / n : 0;
@@ -141,7 +142,8 @@ export async function rebuildCallScoreMetrics(
         consultant,
         consultantId: str(m.consultant_id) || null,
         score: num(m.overall_score),
-        won: isWon(str(m.call_status), str(m.call_outcome)),
+        won: isWon(str(m.call_status)),
+        decided: ["closed", "not_closed"].includes(str(m.call_status).toLowerCase()),
         outcome: str(m.call_outcome),
         band: str(m.performance_band) || "Unrated",
         practice: str(m.practice_type) || "Unspecified",
@@ -159,11 +161,12 @@ export async function rebuildCallScoreMetrics(
   }
 
   // 2. Aggregate.
-  const blank = (): Agg => ({ calls: 0, scoreSum: 0, scoreN: 0, won: 0, phaseSum: {}, phaseN: {}, bands: {}, durSum: 0, durN: 0, talkSum: 0, talkN: 0 });
+  const blank = (): Agg => ({ calls: 0, scoreSum: 0, scoreN: 0, won: 0, decided: 0, phaseSum: {}, phaseN: {}, bands: {}, durSum: 0, durN: 0, talkSum: 0, talkN: 0 });
   const add = (a: Agg, r: CallRow) => {
     a.calls++;
     if (r.score != null) { a.scoreSum += r.score; a.scoreN++; }
     if (r.won) a.won++;
+    if (r.decided) a.decided++;
     for (const [p, v] of Object.entries(r.phases)) { a.phaseSum[p] = (a.phaseSum[p] ?? 0) + v; a.phaseN[p] = (a.phaseN[p] ?? 0) + 1; }
     a.bands[r.band] = (a.bands[r.band] ?? 0) + 1;
     if (r.durationMin != null) { a.durSum += r.durationMin; a.durN++; }
@@ -188,7 +191,7 @@ export async function rebuildCallScoreMetrics(
   const strongestPhases = (a: Agg, k = 3) => Object.entries(phaseAvg(a)).sort((x, y) => y[1] - x[1]).slice(0, k);
 
   const companyAvgScore = round(avg(company.scoreSum, company.scoreN), 1);
-  const companyCloseRate = round((company.won / company.calls) * 100, 1);
+  const companyCloseRate = round(avg(company.won, company.decided) * 100, 1);
 
   // 3. Consultant entities.
   let entitiesUpserted = 0;
@@ -202,7 +205,7 @@ export async function rebuildCallScoreMetrics(
         consultant_id: a.id ?? undefined,
         calls_scored: a.calls,
         avg_score: round(avg(a.scoreSum, a.scoreN), 1),
-        close_rate_pct: round((a.won / a.calls) * 100, 1),
+        close_rate_pct: round(avg(a.won, a.decided) * 100, 1),
       },
     });
     consultantEntityId.set(ck, id);
@@ -224,7 +227,7 @@ export async function rebuildCallScoreMetrics(
 
   // Company-wide
   metric("avg_call_score", companyAvgScore, { label: "Average call score (all consultants)", unit: "/100" });
-  metric("close_rate", companyCloseRate, { label: "Close rate (all calls)", unit: "%" });
+  metric("close_rate", companyCloseRate, { label: "Close rate (closed / decided calls; pending and disqualified excluded)", unit: "%", dimensions: { decided_calls: company.decided } });
   metric("calls_scored", company.calls, { label: "Calls scored", unit: "calls" });
   if (company.durN) metric("avg_call_duration", round(avg(company.durSum, company.durN), 0), { label: "Average call duration", unit: "min" });
   if (company.talkN) metric("avg_consultant_talk_ratio", round(avg(company.talkSum, company.talkN), 0), { label: "Average consultant talk ratio", unit: "%" });
@@ -236,13 +239,13 @@ export async function rebuildCallScoreMetrics(
     const dims = { consultant: a.name, calls: a.calls, weakest_phase: weakestPhases(a, 1)[0]?.[0] ?? null };
     const eid = consultantEntityId.get(ck) ?? null;
     metric("consultant_avg_score", round(avg(a.scoreSum, a.scoreN), 1), { label: `${a.name} — average call score`, unit: "/100", entity_id: eid, dimensions: dims });
-    metric("consultant_close_rate", round((a.won / a.calls) * 100, 1), { label: `${a.name} — close rate`, unit: "%", entity_id: eid, dimensions: dims });
+    metric("consultant_close_rate", round(avg(a.won, a.decided) * 100, 1), { label: `${a.name} — close rate`, unit: "%", entity_id: eid, dimensions: { ...dims, decided_calls: a.decided } });
   }
 
   // Per segment (practice type)
   for (const [, a] of bySegment) {
     const dims = { practice_type: a.name, calls: a.calls };
-    metric("segment_close_rate", round((a.won / a.calls) * 100, 1), { label: `${a.name} — close rate`, unit: "%", dimensions: dims });
+    metric("segment_close_rate", round(avg(a.won, a.decided) * 100, 1), { label: `${a.name} — close rate`, unit: "%", dimensions: { ...dims, decided_calls: a.decided } });
     metric("segment_avg_score", round(avg(a.scoreSum, a.scoreN), 1), { label: `${a.name} — average call score`, unit: "/100", dimensions: dims });
   }
 
@@ -305,7 +308,7 @@ async function upsertSnapshotObject(db: SupabaseClient, orgId: string, d: Snapsh
       name: a.name,
       calls: a.calls,
       score: round(avg(a.scoreSum, a.scoreN), 1),
-      close: round((a.won / a.calls) * 100, 1),
+      close: round(avg(a.won, a.decided) * 100, 1),
       band: Object.entries(a.bands).sort((x, y) => y[1] - x[1])[0]?.[0] ?? "—",
       weakest: humanize(d.weakestFor(a) ?? ""),
     }))
@@ -314,7 +317,7 @@ async function upsertSnapshotObject(db: SupabaseClient, orgId: string, d: Snapsh
     .join("\n");
 
   const segmentRows = Array.from(d.bySegment.values())
-    .map((a) => `| ${a.name} | ${a.calls} | ${round((a.won / a.calls) * 100, 1)}% | ${round(avg(a.scoreSum, a.scoreN), 1)} |`)
+    .map((a) => `| ${a.name} | ${a.calls} | ${round(avg(a.won, a.decided) * 100, 1)}% | ${round(avg(a.scoreSum, a.scoreN), 1)} |`)
     .join("\n");
 
   const sections: MarkdownSection[] = [
@@ -337,7 +340,7 @@ async function upsertSnapshotObject(db: SupabaseClient, orgId: string, d: Snapsh
     { heading: "Phase Performance", body: `Average score per call phase (0–10), team-wide:\n\n| Phase | Team average |\n|---|---|\n${phaseRows}` },
     { heading: "Consultant Scorecard", body: `Per-consultant performance, best average first:\n\n| Consultant | Calls | Avg score | Close rate | Top band | Weakest phase |\n|---|---|---|---|---|---|\n${consultantRows}` },
     { heading: "Segment Performance", body: `Performance by practice type / market segment:\n\n| Segment | Calls | Close rate | Avg score |\n|---|---|---|---|\n${segmentRows}` },
-    { heading: "Evidence Notes", body: "Aggregated from the individual scored-call records in the call-scoring data (source_type call_score). Each call carries its own detailed QA report, cited separately. Treat these numbers as the current team baseline; they refresh whenever call scores are re-synced." },
+    { heading: "Evidence Notes", body: "Aggregated from the current scored-call records (source_type call_score). Close rate is closed / (closed + not_closed), using current CRM/QA call_status; pending and disqualified calls are excluded. The model's original call_outcome is historical and never overrides CRM status. Each call carries its own detailed QA report, cited separately. These numbers refresh when calls or their outcomes change." },
   ];
 
   const name = "Sales Call Performance — Team Snapshot";
@@ -396,7 +399,8 @@ async function upsertSnapshotObject(db: SupabaseClient, orgId: string, d: Snapsh
   let documentId: string | null = existing?.document_id ?? null;
   if (existing) {
     objectId = existing.id;
-    await db.from("knowledge_objects").update(objectPatch).eq("id", objectId).eq("org_id", orgId);
+    const { error } = await db.from("knowledge_objects").update(objectPatch).eq("id", objectId).eq("org_id", orgId);
+    if (error) throw new Error(`snapshot update: ${error.message}`);
   } else {
     const { data: ins, error } = await db.from("knowledge_objects").insert({ org_id: orgId, ...objectPatch, embedding: emb.some((v) => v !== 0) ? emb : null }).select(OBJECT_COLUMNS).single();
     if (error || !ins) throw new Error(error?.message ?? "snapshot object insert failed");

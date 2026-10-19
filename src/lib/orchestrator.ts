@@ -822,8 +822,9 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     review && review.scorecard.length
       ? [
           `STRUCTURED CALL SET — ${review.totalMatched} call${review.totalMatched === 1 ? "" : "s"} match ${describeFilter(review.filter)}. This roster is COMPLETE and authoritative (NOT a sample): report these exact counts and per-call scores. Full transcripts for ${review.callCount} of them are included below for deep review${review.totalMatched > review.callCount ? "; for any not deep-read, use the scorecard row and offer to pull that consultant's transcripts" : ""}.`,
-          `SCORECARD — every matching call (date time | consultant → prospect | practice | score | band | outcome | duration). Dates and times are ${timeZone} local and AUTHORITATIVE. A "Call date:" line or the date in a transcript [locator] is the source's UTC/reported value and can be a day off; always report the scorecard's date and time:`,
-          ...review.scorecard.map((r, i) => `${i + 1}. ${r.date || "?"}${r.time ? ` ${r.time}` : ""} | ${r.consultant} → ${r.prospect || "?"} | ${r.practice || "-"} | ${r.score ?? "?"}/100 | ${r.band || "-"} | ${r.outcome || "-"} | ${r.duration ?? "?"} min`),
+          `SCORECARD — every matching call (date time | consultant → prospect | practice | score | band | current CRM status | closing type | duration). Dates and times are ${timeZone} local and AUTHORITATIVE. A "Call date:" line or the date in a transcript [locator] is the source's UTC/reported value and can be a day off; always report the scorecard's date and time:`,
+          `Current CRM status and closing type override the model's original call_outcome in historical reports or transcripts. Pending means no confirmed outcome yet.`,
+          ...review.scorecard.map((r, i) => `${i + 1}. ${r.date || "?"}${r.time ? ` ${r.time}` : ""} | ${r.consultant} → ${r.prospect || "?"} | ${r.practice || "-"} | ${r.score ?? "?"}/100 | ${r.band || "-"} | ${r.outcome || "Pending"} | ${r.closingType || "Unclassified"} | ${r.duration ?? "?"} min`),
         ].join("\n")
       : "";
   return {

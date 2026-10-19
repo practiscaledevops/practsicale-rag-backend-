@@ -8,6 +8,7 @@
 
 import { timingSafeEqual } from "node:crypto";
 import { drainTasks } from "@/lib/jobs/engine";
+import { drainScoringEvents } from "@/lib/connectors/scoring-events";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
@@ -28,6 +29,9 @@ function authorized(req: Request): boolean {
 
 export async function GET(req: Request) {
   if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
-  const ran = await drainTasks({ deadlineAt: Date.now() + BUDGET_MS });
-  return Response.json({ ran });
+  const deadlineAt = Date.now() + BUDGET_MS;
+  // Reserve time for ordinary jobs while the initial call backfill drains.
+  const scoringRefreshed = await drainScoringEvents(Math.min(deadlineAt, Date.now() + 90_000));
+  const ran = await drainTasks({ deadlineAt });
+  return Response.json({ ran, scoringRefreshed });
 }

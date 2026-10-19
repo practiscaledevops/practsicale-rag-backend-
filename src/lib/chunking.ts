@@ -283,6 +283,8 @@ function transcriptSummary(turns: TranscriptTurn[], metadata: Record<string, unk
   const practice = metaStr(metadata, "practice_type");
   const callDate = metaStr(metadata, "call_date") || metaStr(metadata, "created_at");
   const outcome = metaStr(metadata, "call_outcome");
+  const status = metaStr(metadata, "call_status") || "pending";
+  const ticket = metaStr(metadata, "ticket_category") || "unclassified";
   const score = metaStr(metadata, "overall_score");
   const band = metaStr(metadata, "performance_band");
   const duration = metaStr(metadata, "call_duration_minutes");
@@ -292,7 +294,9 @@ function transcriptSummary(turns: TranscriptTurn[], metadata: Record<string, unk
     `Call transcript — ${consultant} → ${prospect}`,
     practice ? `Practice type: ${practice}` : "",
     callDate ? `Call date: ${callDate}` : "",
-    outcome ? `Outcome: ${outcome}` : "",
+    `Current CRM status: ${status}`,
+    `Closing type: ${ticket}`,
+    outcome ? `Model's original outcome: ${outcome}` : "",
     score ? `Score: ${score}/100${band ? ` (${band})` : ""}` : band ? `Band: ${band}` : "",
     duration ? `Duration: ${duration} min` : "",
     recording ? `Recording: ${recording}` : "",

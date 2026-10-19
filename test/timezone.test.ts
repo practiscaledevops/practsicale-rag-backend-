@@ -281,6 +281,15 @@ const CHUNK_ROW = { id: "c-1", content: "summary", metadata: { tokens: 10 }, doc
 describe("fetchCallsByFilter / matchingCallDocs — day bounds + scorecard dates in the user's zone", () => {
   const sep24: CallReviewFilter = parseCallReviewFilter("review the calls from 24 sep", { referenceDate: "2026-09-25" });
 
+  it("reviews use current CRM status and ticket classification even when the model outcome disagrees", async () => {
+    const row = { ...CALL_ROW, metadata: { ...CALL_ROW.metadata, call_status: "closed", call_outcome: "FOLLOW_UP", ticket_category: "high_ticket" } };
+    const result = await matchingCallDocs(fakeDb([row]).db, "org-1", sep24, { timeZone: NY });
+    expect(result.scorecard[0]).toMatchObject({ outcome: "Closed", closingType: "High Ticket" });
+    const pending = { ...row, metadata: { ...row.metadata, call_status: null, ticket_category: null, call_outcome: "CLOSED" } };
+    const next = await matchingCallDocs(fakeDb([pending]).db, "org-1", sep24, { timeZone: NY });
+    expect(next.scorecard[0]).toMatchObject({ outcome: "Pending", closingType: "Unclassified" });
+  });
+
   it("the explicit '24 sep' parses to the calendar date (zone-independent)", () => {
     expect(sep24).toEqual({ isReview: true, date: "2026-09-24" });
   });

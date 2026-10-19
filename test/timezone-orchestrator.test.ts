@@ -142,7 +142,7 @@ describe("runOrchestratedRetrieval — the user's time zone", () => {
     });
     const out = await run("list all today's calls", NY, true);
     expect(out.contextBlock).toContain(
-      "SCORECARD — every matching call (date time | consultant → prospect | practice | score | band | outcome | duration). Dates and times are America/New_York local and AUTHORITATIVE. A \"Call date:\" line or the date in a transcript [locator] is the source's UTC/reported value and can be a day off; always report the scorecard's date and time:"
+      "SCORECARD — every matching call (date time | consultant → prospect | practice | score | band | current CRM status | closing type | duration). Dates and times are America/New_York local and AUTHORITATIVE. A \"Call date:\" line or the date in a transcript [locator] is the source's UTC/reported value and can be a day off; always report the scorecard's date and time:"
     );
     expect(out.contextBlock).toContain("1. 2026-09-24 22:30 | James Ephrim → Acme | NEMT | 82/100");
     expect(out.contextBlock).toContain("2. 2026-09-24 | David Park → Beta | NEMT | 70/100");

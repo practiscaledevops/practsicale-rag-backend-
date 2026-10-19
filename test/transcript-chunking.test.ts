@@ -117,7 +117,8 @@ describe('chunkDocument(text, "transcript", meta)', () => {
     expect(s).toContain("Sherman Mathews → Cliff A");
     expect(s).toContain("Practice type: NEMT");
     expect(s).toContain("Call date: 2026-09-22");
-    expect(s).toContain("Outcome: follow_up");
+    expect(s).toContain("Current CRM status: pending");
+    expect(s).toContain("Model's original outcome: follow_up");
     expect(s).toContain("Score: 82/100 (Strong)");
     expect(s).toContain("Duration: 56 min");
     expect(s).toContain("Recording: https://fathom.video/calls/abc123");

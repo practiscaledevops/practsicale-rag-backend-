@@ -13,7 +13,7 @@ import { redactPII } from "@/lib/redact";
 import { loadSettings } from "@/lib/settings";
 import { getActivePrompt } from "@/lib/prompts-db";
 import { contextualizeChunks } from "@/lib/contextualize";
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 // Import the internal lib entry (not the package root) to avoid pdf-parse's
 // module-level "debug" branch that tries to read a bundled test PDF from disk.
 import pdfParse from "pdf-parse/lib/pdf-parse.js";
@@ -70,7 +70,7 @@ function laneColumns(lane: LaneIdentity): Record<string, unknown> {
   };
 }
 
-interface PersistContext extends LaneIdentity {
+export interface PersistContext extends LaneIdentity {
   orgId: string;
   documentId: string;
   cleanText: string;
@@ -89,14 +89,14 @@ interface PersistContext extends LaneIdentity {
  * chunking can emit PARENT chunks (full sections) alongside CHILD chunks;
  * parents are inserted first so children can carry a real parent_id.
  */
-async function persistChunks(db: SupabaseClient, ctx: PersistContext): Promise<number> {
+export async function prepareChunkRows(db: SupabaseClient, ctx: PersistContext): Promise<Record<string, unknown>[]> {
   const { orgId, documentId, cleanText, sourceType, metadata, dataSourceId, cols } = ctx;
 
   const chunks =
     ctx.chunkStrategy === "knowledge_object"
       ? chunkKnowledgeObject(cleanText, metadata)
       : chunkDocument(cleanText, sourceType, metadata);
-  if (chunks.length === 0) return 0;
+  if (chunks.length === 0) return [];
 
   // Context per chunk: a deterministic identity line for compiled objects, or
   // the LLM-generated situating blurb (Anthropic contextual retrieval) for
@@ -149,33 +149,33 @@ async function persistChunks(db: SupabaseClient, ctx: PersistContext): Promise<n
   const parents = withVec.filter((x) => x.chunk.metadata?.is_parent);
   const children = withVec.filter((x) => !x.chunk.metadata?.is_parent);
 
-  // 1) Persist parents first and map each new id back to its local key. PostgREST
-  //    returns inserted rows in input order, so we zip results with `parents`.
+  // Assign ids before writing. This also lets a source refresh swap the entire
+  // chunk set in one database transaction, after embeddings have succeeded.
   const parentIdByKey = new Map<string, string>();
-  if (parents.length > 0) {
-    const { data: pRows, error: pErr } = await db
-      .from("chunks")
-      .insert(parents.map((p) => baseRow(p.chunk, p.embedding, p.context)))
-      .select("id");
-    if (pErr) throw new Error(pErr.message);
-    (pRows ?? []).forEach((row: { id: string }, i: number) => {
-      const key = parents[i]?.chunk.key;
-      if (key) parentIdByKey.set(key, row.id);
-    });
-  }
+  const parentRows = parents.map((p) => {
+    const id = randomUUID();
+    if (p.chunk.key) parentIdByKey.set(p.chunk.key, id);
+    return { id, ...baseRow(p.chunk, p.embedding, p.context) };
+  });
 
   // 2) Persist children with parent_id resolved from the local parentKey.
   const childRows = children.map((x) => {
     const row = baseRow(x.chunk, x.embedding, x.context) as Record<string, unknown>;
+    row.id = randomUUID();
     const pk = x.chunk.parentKey;
     row.parent_id = pk ? parentIdByKey.get(pk) ?? null : null;
     return row;
   });
-  if (childRows.length > 0) {
-    const { error: cErr } = await db.from("chunks").insert(childRows);
-    if (cErr) throw new Error(cErr.message);
+  return [...parentRows, ...childRows];
+}
+
+async function persistChunks(db: SupabaseClient, ctx: PersistContext): Promise<number> {
+  const rows = await prepareChunkRows(db, ctx);
+  if (rows.length) {
+    const { error } = await db.from("chunks").insert(rows);
+    if (error) throw new Error(error.message);
   }
-  return parents.length + children.length;
+  return rows.length;
 }
 
 /**

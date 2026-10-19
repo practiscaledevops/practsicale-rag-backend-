@@ -60,7 +60,7 @@ async function verifyChatFlow() {
   if (verifiedSession.error || !verifiedSession.data.user) throw new Error("Chatbot session verification failed");
   const userId = data.user.id;
   const headers = { cookie: [...cookies].map(([name, value]) => `${name}=${value}`).join("; "), "content-type": "application/json" };
-  const base = "http://localhost:3011";
+  const base = (process.env.VERIFY_CHATBOT_URL ?? "http://localhost:3011").replace(/\/$/, "");
   for (const path of ["/", "/api/models", "/api/collections", "/api/chat-limits", "/api/conversations"]) {
     const res = await timedFetch(`${base}${path}`, { headers, redirect: "manual" });
     await res.arrayBuffer();
