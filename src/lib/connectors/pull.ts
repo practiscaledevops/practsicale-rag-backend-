@@ -532,8 +532,12 @@ async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: Fe
     baseParams.set("limit", String(Math.min(25, requested > 0 && Number.isFinite(requested) ? Math.max(1, Math.floor(requested)) : 25)));
   }
   const cursorParamName = source.cursor_param ?? source.cursor_field;
-  if (!opts.ignoreCursor && cursorParamName && source.cursor_value) {
-    baseParams.set(cursorParamName, source.cursor_value);
+  if (!opts.ignoreCursor && cursorParamName) {
+    // A reset update cursor must still select oldest-updated-first ordering.
+    // Without this parameter the scoring API defaults to newest-created-first,
+    // allowing a partial first sweep to advance past unprocessed older calls.
+    const cursor = source.cursor_value ?? (source.source_type === "call_score" && source.cursor_field === "updated_at" ? "1970-01-01T00:00:00.000Z" : null);
+    if (cursor) baseParams.set(cursorParamName, cursor);
   }
 
   // Auto-paging: when a numeric `limit` is configured, keep fetching with an

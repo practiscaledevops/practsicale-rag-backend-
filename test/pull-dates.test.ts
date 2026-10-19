@@ -11,7 +11,7 @@ vi.mock("@/lib/connectors/sync-document", () => ({ syncSourceDocument: m.ingestO
 vi.mock("@/lib/net-guard", () => ({ assertPublicUrl: vi.fn(async () => {}) }));
 vi.mock("@/lib/supabase", () => ({ supabaseAdmin: () => ({}) }));
 
-import { backfillTranscripts, syncScoringRecord, type DataSourceRow } from "@/lib/connectors/pull";
+import { backfillTranscripts, runPull, syncScoringRecord, type DataSourceRow } from "@/lib/connectors/pull";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const SOURCE: DataSourceRow = {
@@ -53,6 +53,18 @@ afterEach(() => {
 });
 
 describe("pull connector — call dates", () => {
+  it("requests oldest-updated-first ordering even on a reset reconciliation cursor", async () => {
+    respondWith([]);
+    const q = {
+      insert: () => q, select: () => q, update: () => q, eq: () => q,
+      single: async () => ({ data: { id: "run" }, error: null }),
+      then: (done: (value: unknown) => unknown) => Promise.resolve({ error: null }).then(done),
+    };
+    const result = await runPull({ ...SOURCE, kind: "pull_http", cursor_field: "updated_at", cursor_param: "updated_since", cursor_value: null }, { db: { from: () => q } as unknown as SupabaseClient });
+    expect(result.status).toBe("success");
+    expect(new URL(vi.mocked(fetch).mock.calls[0][0] as string).searchParams.get("updated_since")).toBe("1970-01-01T00:00:00.000Z");
+  });
+
   it("bounds transcript-heavy pages and still fetches the complete backfill", async () => {
     const records = Array.from({ length: 26 }, (_, i) => ({ id: `r${i}`, transcript: "Consultant: Synthetic pagination check" }));
     vi.stubGlobal("fetch", vi.fn(async (input: string) => {
