@@ -600,7 +600,7 @@ export async function POST(req: Request) {
           promptTokens += revision.usage.promptTokens ?? 0;
           completionTokens += revision.usage.completionTokens ?? 0;
           const nextOverlap = wordingOverlap(revision.text, priorDrafts);
-          if (revision.finishReason !== "length" && revision.text.trim() && nextOverlap.percent < overlap.percent) {
+          if (revision.finishReason !== "length" && revision.text.trim() && nextOverlap.percent < overlap.percent && validateCitations(revision.text, retrievedIds).fabricated.length === 0) {
             fullText = revision.text; overlap = nextOverlap; revised = true; finishReason = "stop";
           }
         } catch (e) { console.error("[creative] revision unavailable", e instanceof Error ? e.name : "error"); }

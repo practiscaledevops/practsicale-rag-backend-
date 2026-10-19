@@ -151,6 +151,17 @@ describe("POST /api/v1/chat — timeZone", () => {
     expect(m.fetchCalls.mock.calls[0][2].date).toBe("2026-09-24");
     expect(text).toContain("Consultant-wise Summary"); expect(text).toContain("| Total | 1 | 1 | 1 | 0 | 1 | 0 | 0 |");
   });
+  it("replaces a recycled creative draft before sending any of its text", async () => {
+    const old = Array.from({ length: 70 }, (_, i) => `oldword${i}`).join(" ");
+    const fresh = Array.from({ length: 70 }, (_, i) => `newword${i}`).join(" ");
+    m.streamText.mockImplementation(() => ({ textStream: (async function* () { yield old; })(), finishReason: Promise.resolve("stop"), usage: Promise.resolve({ promptTokens: 10, completionTokens: 5 }) }));
+    m.generateText.mockResolvedValue({ text: fresh, finishReason: "stop", usage: { promptTokens: 20, completionTokens: 10 } });
+    const res = await chat(post("/api/v1/chat", { messages: [{ role: "user", content: "write a LinkedIn post" }, { role: "assistant", content: old }, { role: "user", content: "write a fresh LinkedIn post about sales follow-up" }], timeZone: PK }));
+    const text = await res.text();
+    expect(text).not.toContain('0:"oldword'); expect(text).toContain('0:"newword');
+    expect(events(text).find(e => e.type === "generation_receipt")).toMatchObject({ revised: true, overlapPercent: 0 });
+    expect(text).toContain('"promptTokens":30');
+  });
 
   it("forwards the user's zone to the orchestrator", async () => {
     const res = await chat(post("/api/v1/chat", { messages, timeZone: NY }));

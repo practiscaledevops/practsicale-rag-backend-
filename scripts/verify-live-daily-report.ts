@@ -37,7 +37,9 @@ async function main() {
   const res = await fetch("https://practiscale-rag-chatbot.vercel.app/api/chat", { method: "POST",
     headers: { "content-type": "application/json", cookie: [...cookies].map(([k, v]) => `${k}=${v}`).join("; ") },
     // Deliberately omit model/tier and column instructions: test the live defaults.
-    body: JSON.stringify({ messages: [{ role: "user", content: process.env.REPORT_QUERY ?? (process.env.REPORT_DATE ? `give me report of calls on ${yesterday}` : "give me report of yesterday calls") }], ...(model ? { model } : {}), mode: process.env.REPORT_MODE ?? "general", timeZone: "Asia/Karachi" }), signal: AbortSignal.timeout(270_000) });
+    body: JSON.stringify({ messages: [
+      ...(process.env.REPORT_BAD_HISTORY ? [{ role: "user", content: "check yesterday calls", createdAt: "2026-10-19T12:00:00Z" }, { role: "assistant", content: "Yesterday was October 18. There were zero calls. The newest call is October 6." }] : []),
+      { role: "user", content: process.env.REPORT_QUERY ?? (process.env.REPORT_DATE ? `give me report of calls on ${yesterday}` : "give me report of yesterday calls"), createdAt: new Date().toISOString() }], ...(model ? { model } : {}), mode: process.env.REPORT_MODE ?? "general", timeZone: "Asia/Karachi" }), signal: AbortSignal.timeout(270_000) });
   const stream = await res.text(); let answer = ""; const errors: unknown[] = []; const events: any[] = [];
   for (const line of stream.split("\n")) { try { const value = JSON.parse(line.slice(2)); if (line.startsWith("0:")) answer += value; if (line.startsWith("3:")) errors.push(value); if (line.startsWith("2:") && Array.isArray(value)) events.push(...value); } catch { /* stream frames */ } }
   const tables: string[][] = []; let current: string[] = [];

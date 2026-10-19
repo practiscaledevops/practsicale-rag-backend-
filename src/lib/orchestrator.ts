@@ -758,7 +758,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   const semantic = reviewDocIds.size
     ? final.filter((c) => !(c.source_type === "transcript" && reviewDocIds.has(c.document_id)))
     : final;
-  if (semantic.some((c) => c.source_type === "transcript")) {
+  if (!isCreativeRequest(query) && semantic.some((c) => c.source_type === "transcript")) {
     emit({ stage: "expanding", label: "Reading the full call transcript" });
     const annByDoc = new Map<string, OrchestratedChunk>();
     for (const c of semantic) {

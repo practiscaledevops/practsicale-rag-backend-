@@ -40,7 +40,7 @@ vi.mock("@/lib/performance-memory", async (orig) => ({
 vi.mock("@/lib/llm", () => ({ getModel: vi.fn(async () => ({ modelId: "claude-haiku-4-5" })) }));
 
 import { runOrchestratedRetrieval, buildDateNote } from "@/lib/orchestrator";
-import { hybridSearchLane, LANE_RPC_MISSING } from "@/lib/retrieval";
+import { hybridSearchLane, expandTranscripts, LANE_RPC_MISSING } from "@/lib/retrieval";
 import { runRetrieval } from "@/lib/pipeline";
 import { deepCallAuditHandler, paramsTimeZone } from "@/lib/jobs/deep-call-audit";
 import { DEFAULT_TIME_ZONE, currentDateLine, todayIn } from "@/lib/timezone";
@@ -94,6 +94,12 @@ describe("buildDateNote", () => {
 });
 
 describe("runOrchestratedRetrieval — the user's time zone", () => {
+  it("keeps creative evidence bounded instead of expanding an entire call into repeated context", async () => {
+    vi.mocked(hybridSearchLane).mockResolvedValueOnce([{ id: "ch-1", document_id: "doc-1", content: "Verified call context.", metadata: {}, parent_id: null, source_type: "transcript", object_id: null, intelligence_class: "business_reality", domain: null, rrf_score: 0.1 }]);
+    const out = await run("write a NEMT outreach post", PK, true);
+    expect(out.chunks.length).toBeGreaterThan(0);
+    expect(expandTranscripts).not.toHaveBeenCalled();
+  });
   it("the screenshot's exact request uses the complete dated call query, even without prior history", async () => {
     vi.setSystemTime(new Date("2026-10-19T21:19:00Z"));
     const out = await run("check yesterdays calls", PK, true);
