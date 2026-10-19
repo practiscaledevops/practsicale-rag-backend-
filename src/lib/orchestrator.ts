@@ -21,7 +21,7 @@
 // classifier can't run. Used by /api/v1/chat (and /retrieve when enabled).
 
 import { z } from "zod";
-import { isCreativeRequest, searchHistoryForRequest } from "@/lib/creative-quality";
+import { isCreativeRequest, isCreativeRevision, searchHistoryForRequest } from "@/lib/creative-quality";
 import { uniqueEvidence } from "@/lib/evidence-diversity";
 import { supabaseAdmin } from "@/lib/supabase";
 import { embed } from "@/lib/embeddings";
@@ -359,6 +359,8 @@ export interface OrchestrateOptions {
    * optional `createdAt` (ISO) anchors its relative dates for call review.
    */
   history?: ChatTurn[];
+  /** Owned prior-draft citations, used only as a soft novelty penalty inside the permitted pool. */
+  avoidChunkIds?: string[];
   scope: ScopeFilters;
   settings: RagSettings;
   /** The caller's mode (canonical id, alias, "auto", or undefined = auto). */
@@ -699,7 +701,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     // first token) grows with the candidate count, and our finalScore already
     // pre-orders the pool, so the true top-N almost always lives in the window.
     const rerankInput = pool.slice(0, Math.max(retrieval.rerankTopN * 3, 24));
-    const ranked = await rerank(query, rerankInput, retrieval.rerankTopN);
+    const ranked = await rerank(query, rerankInput, isCreativeRequest(query) ? Math.min(rerankInput.length, retrieval.rerankTopN * 2) : retrieval.rerankTopN);
     const byId = new Map(pool.map((c) => [c.id, c]));
     top = ranked.map((r) => ({ ...(byId.get(r.id) ?? (r as OrchestratedChunk)), score: r.score }));
   } else {
@@ -718,7 +720,17 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
 
   const confidence = confidenceFrom(top);
   // Fresh creative work should see more than one document when alternatives exist.
-  if (isCreativeRequest(query)) top = uniqueEvidence([...top, ...pool], true).slice(0, retrieval.rerankTopN);
+  if (isCreativeRequest(query)) {
+    if (opts.avoidChunkIds?.length && !isCreativeRevision(query)) {
+      const { data } = await db.from("chunks").select("document_id").eq("org_id", orgId).in("id", opts.avoidChunkIds.slice(0, 80));
+      const seen = new Set((data ?? []).map(r => r.document_id));
+      // A soft penalty preserves highly relevant evidence, even when it is the
+      // only verified case. It never introduces out-of-scope sources.
+      top = top.map(c => ({ c, noveltyScore: (c.score ?? c.finalScore) * (seen.has(c.document_id) ? 0.8 : 1) }))
+        .sort((a, b) => b.noveltyScore - a.noveltyScore).map(x => x.c);
+    }
+    top = uniqueEvidence(top, true).slice(0, retrieval.rerankTopN);
+  }
 
   // 8. Parent expansion for fuller context (keeps the annotation).
   let final = top;

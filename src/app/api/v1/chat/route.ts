@@ -351,6 +351,7 @@ export async function POST(req: Request) {
         out = await runOrchestratedRetrieval({
           orgId: ctx.orgId, query, history: retrievalHistory, scope, settings, requestedMode, allowedModes,
           knowledgeScope: knowledgeScope.id, capabilities: body.capabilities, timeZone, timeZoneFromUser, onStatus,
+          avoidChunkIds: body.creative?.freshness === "fresh" ? body.creative.priorSourceIds : [],
         });
       } else {
         // The classic pipeline has no lanes: a lane scope is ignored here, and a

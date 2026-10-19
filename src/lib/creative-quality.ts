@@ -11,6 +11,7 @@ export const creativeContextSchema = z.object({
   memoryScope: z.enum(["account", "thread", "off"]).default("account"),
   layerNames: z.array(z.string().max(120)).max(4).default([]),
   drafts: z.array(z.object({ id: z.string().max(100), content: z.string().max(2400) })).max(12).default([]),
+  priorSourceIds: z.array(z.string().uuid()).max(80).default([]),
   warnings: z.array(z.string().max(200)).max(5).default([]),
 });
 export type CreativeContext = z.infer<typeof creativeContextSchema>;
