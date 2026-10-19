@@ -35,7 +35,7 @@ async function main() {
   const res = await fetch("https://practiscale-rag-chatbot.vercel.app/api/chat", { method: "POST",
     headers: { "content-type": "application/json", cookie: [...cookies].map(([k, v]) => `${k}=${v}`).join("; ") },
     // Deliberately omit model/tier and column instructions: test the live defaults.
-    body: JSON.stringify({ messages: [{ role: "user", content: process.env.REPORT_DATE ? `give me report of calls on ${yesterday}` : "give me report of yesterday calls" }], mode: "general", timeZone: "Asia/Karachi" }), signal: AbortSignal.timeout(270_000) });
+    body: JSON.stringify({ messages: [{ role: "user", content: process.env.REPORT_QUERY ?? (process.env.REPORT_DATE ? `give me report of calls on ${yesterday}` : "give me report of yesterday calls") }], mode: process.env.REPORT_MODE ?? "general", timeZone: "Asia/Karachi" }), signal: AbortSignal.timeout(270_000) });
   const stream = await res.text(); let answer = ""; const errors: unknown[] = []; const events: any[] = [];
   for (const line of stream.split("\n")) { try { const value = JSON.parse(line.slice(2)); if (line.startsWith("0:")) answer += value; if (line.startsWith("3:")) errors.push(value); if (line.startsWith("2:") && Array.isArray(value)) events.push(...value); } catch { /* stream frames */ } }
   const tables: string[][] = []; let current: string[] = [];

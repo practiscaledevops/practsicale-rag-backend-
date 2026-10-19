@@ -94,6 +94,13 @@ describe("buildDateNote", () => {
 });
 
 describe("runOrchestratedRetrieval — the user's time zone", () => {
+  it("the screenshot's exact request uses the complete dated call query, even without prior history", async () => {
+    vi.setSystemTime(new Date("2026-10-19T21:19:00Z"));
+    const out = await run("check yesterdays calls", PK, true);
+    expect(m.fetchCalls).toHaveBeenCalledTimes(1);
+    expect(m.fetchCalls.mock.calls[0][2]).toEqual({ isReview: true, date: "2026-10-19" });
+    expect(out.callReview?.filter.date).toBe("2026-10-19");
+  });
   it("a New York user at 20:00 EDT: 'today' is New York's date, in the note and the call filter", async () => {
     const out = await run("list all today's calls", NY, true);
     expect(out.contextBlock.startsWith("CURRENT DATE: 2026-09-24 (Thursday), America/New_York, UTC−04:00.")).toBe(true);

@@ -84,7 +84,7 @@ export const PRACTICE_TYPES = ["NEMT", "Home Care", "Home Health", "Assisted Liv
 const LIST_GAP_STOP =
   "(?:how|what|why|when|where|to|for|on|about|with|tips?|advice|ideas?|examples?|scripts?|ways?|best|pointers?|suggestions?|guidance|help|feedback|techniques?|strateg(?:y|ies)|openers?|lines?)";
 const REVIEW_RE = new RegExp(
-  String.raw`\b(review|reviews|reviewing|analy[sz]e|analy[sz]ing|analysis|assess|evaluate|audit|deep[- ]?dive|go through|going through|walk through|walking through|break ?down|summar(?:y|ise|ize|ies)|which consultant|list (?:the |all )?calls?|list (?:the )?transcripts?|(?:list|show me|pull up|pull|fetch|give me)\s+(?:(?!${LIST_GAP_STOP}\b)[\w'’-]+\s+){0,3}?(?:calls?|transcripts?)|(?:all|each|every|these|those|the) (?:the )?(?:calls?|transcripts?)|transcripts?)\b`,
+  String.raw`\b(review|reviews|reviewing|analy[sz]e|analy[sz]ing|analysis|assess|evaluate|audit|deep[- ]?dive|go through|going through|walk through|walking through|break ?down|summar(?:y|ise|ize|ies)|which consultant|list (?:the |all )?calls?|list (?:the )?transcripts?|(?:list|show me|pull up|pull|fetch|give me|check(?: on)?|report(?: on| of| for)?)\s+(?:(?!${LIST_GAP_STOP}\b)[\w'’-]+\s+){0,3}?(?:calls?|transcripts?)|how did\s+(?:[\w'’-]+\s+){0,3}calls?\s+go|(?:all|each|every|these|those|the) (?:the )?(?:calls?|transcripts?)|transcripts?)\b`,
   "i"
 );
 
