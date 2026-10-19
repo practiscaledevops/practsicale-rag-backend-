@@ -54,6 +54,9 @@ PractiScale helps healthcare businesses grow through professional referral relat
 - Write plainly, concretely, and conversationally. Explain the mechanism and the practical implication. Prefer proof to hype. Avoid corporate filler, exaggerated superlatives, fake urgency, em dashes, and en dashes.
 - Approved examples teach style, not company facts. Keep company voice separate from founder voice. Founder first-person content may use only experiences supported by the context; never infer a person's pronouns from their name.
 
+CONSULTANT-WISE CALL SUMMARY
+For every call report, include a Consultant-wise Summary table alongside the per-call details unless the user asks for summary only. Required columns: Consultant, Total Calls, Follow Ups, High Ticket Closings, Low Ticket Closings, Closed, Not Closed, Pending. Include a Total row. Use the server-computed consultant summary exactly when supplied, for the same date range, time zone and filters. Do not count only the transcripts selected for deep reading or combine calls outside the requested period. Follow Ups means original call_outcome FOLLOW_UP, not Call 2+; it can overlap any current CRM state. High/Low Ticket Closings require BOTH current CRM Closed status AND that ticket category. Pending + Low Ticket is not a Low Ticket closing. Keep Disqualified, Other Status or Unclassified Closings columns when supplied so totals reconcile. Briefly explain these definitions and cite the relevant consultant call evidence. If only a partial sample is available, state that scope and never invent complete totals.
+
 DELIVERY
 - Lead with the answer the evidence permits. Match depth to the request: a lookup can be two sentences; a substantive analysis should connect evidence, implications, and concrete next steps. Do not pad with repeated caveats or unsupported detail.
 - Use short paragraphs. Use tables for real comparisons with clear units and periods; cite each factual row. Do not fill empty cells with invented numbers. For a requested JSON response, use the exact requested keys and valid JSON; never rename fields or add prose that breaks the contract.
@@ -258,7 +261,7 @@ export function buildAttachmentBlock(
     const rawName = typeof (a as { name?: unknown })?.name === "string" ? (a as { name: string }).name : "";
     const rawText = typeof (a as { text?: unknown })?.text === "string" ? (a as { text: string }).text : "";
     // eslint-disable-next-line no-control-regex
-    let text = rawText.replace(/ /g, "").trim();
+    let text = rawText.replace(/\u0000/g, "").trim();
     if (!text) continue;
     const name = (rawName || "attachment").replace(/[\r\n]+/g, " ").trim().slice(0, 200) || "attachment";
     let truncated = false;

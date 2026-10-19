@@ -11,7 +11,8 @@ async function main() {
   if (error) throw Error(error.message);
   const localDate = (v: string | number) => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Karachi", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(v));
   const today = localDate(Date.now());
-  const yesterday = new Date(Date.parse(`${today}T12:00:00Z`) - 86400_000).toISOString().slice(0, 10);
+  const yesterday = process.env.REPORT_DATE ?? new Date(Date.parse(`${today}T12:00:00Z`) - 86400_000).toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(yesterday)) throw Error("REPORT_DATE must be YYYY-MM-DD");
   const records: any[] = [];
   for (let offset = 0; ; offset += 100) {
     const url = new URL(source.endpoint_url);
@@ -34,10 +35,15 @@ async function main() {
   const res = await fetch("https://practiscale-rag-chatbot.vercel.app/api/chat", { method: "POST",
     headers: { "content-type": "application/json", cookie: [...cookies].map(([k, v]) => `${k}=${v}`).join("; ") },
     // Deliberately omit model/tier and column instructions: test the live defaults.
-    body: JSON.stringify({ messages: [{ role: "user", content: "give me report of yesterday calls" }], mode: "general", timeZone: "Asia/Karachi" }), signal: AbortSignal.timeout(270_000) });
+    body: JSON.stringify({ messages: [{ role: "user", content: process.env.REPORT_DATE ? `give me report of calls on ${yesterday}` : "give me report of yesterday calls" }], mode: "general", timeZone: "Asia/Karachi" }), signal: AbortSignal.timeout(270_000) });
   const stream = await res.text(); let answer = ""; const errors: unknown[] = []; const events: any[] = [];
   for (const line of stream.split("\n")) { try { const value = JSON.parse(line.slice(2)); if (line.startsWith("0:")) answer += value; if (line.startsWith("3:")) errors.push(value); if (line.startsWith("2:") && Array.isArray(value)) events.push(...value); } catch { /* stream frames */ } }
-  const lines = answer.split("\n").map(l => l.trim()).filter(l => l.startsWith("|"));
+  const tables: string[][] = []; let current: string[] = [];
+  for (const line of [...answer.split("\n"), ""]) {
+    if (line.trim().startsWith("|")) current.push(line.trim());
+    else if (current.length) { tables.push(current); current = []; }
+  }
+  const lines = tables.find(t => /closing|ticket/i.test(t[0]) && /status/i.test(t[0]) && /prospect/i.test(t[0])) ?? [];
   const cells = (line: string) => line.split("|").slice(1, -1).map(s => s.trim());
   const index = lines.findIndex(l => /closing|ticket/i.test(l) && /status/i.test(l) && /consultant/i.test(l));
   const headers = index < 0 ? [] : cells(lines[index]); const normalized = headers.map(clean);
@@ -61,14 +67,41 @@ async function main() {
     return { recordId: r.id, passed, matches: matches.length,
       output: row ? { sequence: sequenceText, original: row[columns.original], status: row[columns.status], closingType: row[columns.ticket] } : null };
   });
+  // Independently compute expected summaries from the raw scoring feed; do not
+  // reuse the product's aggregation helper in this end-to-end comparison.
+  const groups = new Map<string, { consultant: string; counts: number[] }>();
+  for (const r of records) {
+    const key = r.consultant_id || clean(r.consultant_name);
+    const group = groups.get(key) ?? { consultant: r.consultant_name || "Unknown consultant", counts: Array(7).fill(0) };
+    const closed = r.call_status === "closed";
+    const increments = [1, Number(r.call_outcome === "FOLLOW_UP"), Number(closed && r.ticket_category === "high_ticket"), Number(closed && r.ticket_category === "low_ticket"), Number(closed), Number(r.call_status === "not_closed"), Number(!r.call_status || r.call_status === "pending")];
+    increments.forEach((n, i) => group.counts[i] += n); groups.set(key, group);
+  }
+  const summaryTable = tables.find(t => /total\s*calls/i.test(t[0]) && /consultant/i.test(t[0])) ?? [];
+  const summaryHeaders = summaryTable.length ? cells(summaryTable[0]) : [];
+  const normalizedSummaryHeaders = summaryHeaders.map(clean);
+  const countHeaders = ["totalcalls", "followups", "highticketclosings", "lowticketclosings", "closed", "notclosed", "pending"];
+  const countColumns = countHeaders.map(h => normalizedSummaryHeaders.indexOf(h));
+  const consultantColumn = normalizedSummaryHeaders.findIndex(h => h.includes("consultant"));
+  const summaryRows = summaryTable.slice(1).filter(l => !/^\|[\s:|\-]+\|$/.test(l)).map(cells);
+  const totals = Array(7).fill(0); for (const g of groups.values()) g.counts.forEach((n, i) => totals[i] += n);
+  const expectedSummaryRows = [...groups.values(), { consultant: "Total", counts: totals }];
+  const summaryResults = expectedSummaryRows.map(expected => {
+    const candidates = summaryRows.filter(row => clean(row[consultantColumn]) === clean(expected.consultant));
+    const values = candidates.length === 1 ? countColumns.map(col => clean(candidates[0][col])) : [];
+    return { consultant: expected.consultant, expected: expected.counts, actual: values,
+      passed: candidates.length === 1 && values.length === 7 && values.every((v, i) => /^\d+$/.test(v) && Number(v) === expected.counts[i]) };
+  });
+  const consultantSummaryPassed = consultantColumn >= 0 && countColumns.every(c => c >= 0) && summaryRows.length === expectedSummaryRows.length && summaryResults.every(r => r.passed);
   const summary = { date: yesterday, model: res.headers.get("x-model"), http: res.status, expectedCalls: records.length, reportedRows: rows.length,
     requiredColumnsPresent: Object.values(columns).every(c => c >= 0), matchedCalls: results.filter(r => r.passed).length, errors: errors.length,
-    passed: res.ok && res.headers.get("x-model") === "gpt-6.1-sol" && records.length > 0 && Object.values(columns).every(c => c >= 0) && rows.length === records.length && results.every(r => r.passed) && errors.length === 0 };
+    expectedConsultants: groups.size, consultantSummaryPassed,
+    passed: res.ok && res.headers.get("x-model") === "gpt-6.1-sol" && records.length > 0 && Object.values(columns).every(c => c >= 0) && rows.length === records.length && results.every(r => r.passed) && errors.length === 0 && consultantSummaryPassed };
   const directory = resolve("../verification"); mkdirSync(directory, { recursive: true });
   const path = resolve(directory, `live-daily-report-${Date.now()}.json`);
   const answerPath = path.replace(/\.json$/, ".md"); writeFileSync(answerPath, answer);
-  writeFileSync(path, JSON.stringify({ checkedAt: new Date().toISOString(), summary, headers, results, answerPath }, null, 2));
-  console.log(JSON.stringify({ summary, headers, failed: results.filter(r => !r.passed), report: path }));
+  writeFileSync(path, JSON.stringify({ checkedAt: new Date().toISOString(), summary, headers, summaryHeaders, summaryResults, results, answerPath }, null, 2));
+  console.log(JSON.stringify({ summary, headers, summaryHeaders, failed: results.filter(r => !r.passed), failedSummaryRows: summaryResults.filter(r => !r.passed), report: path }));
   if (!summary.passed) process.exitCode = 1;
 }
 main().catch(e => { console.error(e.message); process.exitCode = 1; });

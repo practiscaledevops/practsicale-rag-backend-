@@ -147,6 +147,12 @@ describe("runOrchestratedRetrieval — the user's time zone", () => {
     expect(out.contextBlock).toContain("1. 2026-09-24 22:30 | James Ephrim → Acme | NEMT | Unknown | Unknown | 82/100");
     expect(out.contextBlock).toContain("2. 2026-09-24 | David Park → Beta | NEMT | Unknown | Unknown | 70/100");
     expect(out.contextBlock).toContain("include separate table columns for Call / Follow-up");
+    // Even when no transcripts fit deep reading, the summary covers EVERY row
+    // in the full matching scorecard, using current CRM state for the totals.
+    expect(out.contextBlock).toContain("CONSULTANT SUMMARY — computed by the server");
+    expect(out.contextBlock).toContain("| David Park | 1 | 0 | 0 | 0 | 0 | 0 | 1 |");
+    expect(out.contextBlock).toContain("| James Ephrim | 1 | 0 | 0 | 0 | 0 | 0 | 1 |");
+    expect(out.contextBlock).toContain("| Total | 2 | 0 | 0 | 0 | 0 | 0 | 2 |");
   });
 
   it("the note calls the zone the user's only when the caller sent it", async () => {

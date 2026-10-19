@@ -54,6 +54,7 @@ export interface ScorecardRow {
   /** The call's local clock time ("HH:mm") in the review's zone; null when created_at is unusable. */
   time: string | null;
   consultant: string;
+  consultantId?: string;
   prospect: string;
   practice: string;
   score: number | null;
@@ -154,6 +155,7 @@ function toScorecardRow(m: Record<string, unknown>, timeZone: string): Scorecard
     date: local ? local.slice(0, 10) : (typeof m.call_date === "string" ? m.call_date : ""),
     time: local ? local.slice(11) : null,
     consultant: typeof m.consultant_name === "string" ? m.consultant_name : "Unknown",
+    consultantId: typeof m.consultant_id === "string" ? m.consultant_id : undefined,
     prospect: typeof m.prospect_name === "string" ? m.prospect_name : "",
     practice: typeof m.practice_type === "string" ? m.practice_type : (typeof m.category === "string" ? m.category : ""),
     score: m.overall_score != null ? Number(m.overall_score) : null,

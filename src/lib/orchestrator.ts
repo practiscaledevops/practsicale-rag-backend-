@@ -25,6 +25,7 @@ import { supabaseAdmin } from "@/lib/supabase";
 import { embed } from "@/lib/embeddings";
 import { hybridSearchLane, expandParents, expandTranscripts, LANE_RPC_MISSING, type LaneChunk, type RetrievedChunk } from "@/lib/retrieval";
 import { resolveReviewFilterWithHistory, isReviewFollowUp, isConversationSummary, summaryCarriesCallFilter, fetchCallsByFilter, describeFilter, knownConsultants, looksLikeReview, type CallReviewFilter, type ScorecardRow } from "@/lib/call-review";
+import { consultantSummaryContext } from "@/lib/call-report-summary";
 import { currentCallEvidence } from "@/lib/call-status";
 import { currentDateLine, resolveTimeZone, todayIn } from "@/lib/timezone";
 import { rerank } from "@/lib/rerank";
@@ -823,6 +824,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     review && review.scorecard.length
       ? [
           `STRUCTURED CALL SET — ${review.totalMatched} call${review.totalMatched === 1 ? "" : "s"} match ${describeFilter(review.filter)}. This roster is COMPLETE and authoritative (NOT a sample): report these exact counts and per-call scores. Full transcripts for ${review.callCount} of them are included below for deep review${review.totalMatched > review.callCount ? "; for any not deep-read, use the scorecard row and offer to pull that consultant's transcripts" : ""}.`,
+          consultantSummaryContext(review.scorecard),
           `SCORECARD — every matching call (date time | consultant → prospect | practice | call sequence | original call outcome | score | band | current CRM status | closing type | duration). Dates and times are ${timeZone} local and AUTHORITATIVE. A "Call date:" line or the date in a transcript [locator] is the source's UTC/reported value and can be a day off; always report the scorecard's date and time:`,
           `Current CRM status and closing type override the model's original call_outcome in historical reports or transcripts. Pending means no confirmed outcome yet.`,
           `For a call report/list, include separate table columns for Call / Follow-up, Original Call Outcome (Follow Up / Lost / Closed / Unknown), Current CRM Status, and Closing Type (High Ticket / Low Ticket / Unclassified), alongside time, consultant, prospect, practice, score, band and duration. Never drop these fields merely because values repeat. Call 2+ means a follow-up conversation; original outcome Follow Up means the call ended needing follow-up, including on Call 1. These are different facts. Unknown sequence must stay Unknown, never infer Call 1 from row order.`,
