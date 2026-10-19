@@ -355,7 +355,8 @@ export async function reingestDocument(db: SupabaseClient, params: ReingestParam
  * OCR is out of scope).
  */
 export async function pdfToText(buffer: Buffer): Promise<string> {
-  const parsed = await pdfParse(buffer);
+  // Keep Buffer.slice()'s shared-memory semantics out of the legacy PDF parser.
+  const parsed = await pdfParse(new Uint8Array(buffer));
   return parsed.text ?? "";
 }
 

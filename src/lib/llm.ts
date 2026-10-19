@@ -63,7 +63,10 @@ export async function getModel(tierOrId?: string) {
     return guardSamplingParams(createAnthropic({ apiKey })(id));
   }
   const apiKey = await getProviderKey("openai");
-  return guardSamplingParams(createOpenAI({ apiKey })(id));
+  // The v1 provider defaults to OpenAI-compatible mode, which omits
+  // stream_options.include_usage. Official OpenAI streams then have NaN token
+  // counts: metering inserts fail and the spoke records zero usage/cost.
+  return guardSamplingParams(createOpenAI({ apiKey, compatibility: "strict" })(id));
 }
 
 // ---- Env-only variants (kept for callers/scripts that don't resolve DB keys) ----

@@ -1,0 +1,2 @@
+# Preserve PDF byte offsets on checkout, including Windows with core.autocrlf.
+*.pdf binary

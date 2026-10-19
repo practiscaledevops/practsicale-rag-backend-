@@ -13,12 +13,19 @@ import { loadSettings } from "@/lib/settings";
 import { resolveContext, AuthError } from "@/lib/auth/context";
 import { requireCapability, scopeFilters } from "@/lib/auth/scope";
 import { checkRateLimit, rateLimitHeaders } from "@/lib/ratelimit";
+import { z } from "zod";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
 // Query rewrite + LLM rerank over 40 passages + two DB passes per sub-query can
 // exceed 30s on a cold function.
 export const maxDuration = 60;
+
+const RetrieveBody = z.object({
+  query: z.string().trim().min(1).max(40_000),
+  matchCount: z.unknown().optional(),
+  expandParents: z.boolean().optional(),
+});
 
 export async function POST(req: Request) {
   let ctx;
@@ -38,10 +45,11 @@ export async function POST(req: Request) {
     );
   }
 
-  const { query, matchCount, expandParents: expand } = await req.json();
-  if (!query || typeof query !== "string") {
-    return Response.json({ error: "query (string) is required" }, { status: 400 });
+  const parsed = RetrieveBody.safeParse(await req.json().catch(() => null));
+  if (!parsed.success) {
+    return Response.json({ error: "A JSON object with a non-empty query (up to 40,000 characters) is required." }, { status: 400 });
   }
+  const { query, matchCount, expandParents: expand } = parsed.data;
 
   const { settings } = await loadSettings(ctx.orgId);
 

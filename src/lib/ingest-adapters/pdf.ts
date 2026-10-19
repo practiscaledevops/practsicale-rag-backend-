@@ -17,7 +17,9 @@ export async function extractPdf(buffer: Buffer): Promise<Extracted> {
 
   let parsed: Awaited<ReturnType<typeof pdfParse>>;
   try {
-    parsed = await pdfParse(buffer);
+    // pdf.js expects TypedArray.slice() to copy. Buffer.slice() is a view;
+    // passing a Buffer corrupts its parsing state and rejects valid PDFs.
+    parsed = await pdfParse(new Uint8Array(buffer));
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/password|encrypt/i.test(msg)) throw new ExtractError("This PDF is password-protected. Remove the password and try again.", 422);
