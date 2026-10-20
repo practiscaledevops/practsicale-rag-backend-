@@ -5,6 +5,7 @@ vi.mock("@/lib/supabase",()=>({supabaseAdmin:()=>({from:m.from})}));
 vi.mock("@/lib/call-review",async importOriginal=>({...await importOriginal<typeof import("@/lib/call-review")>(),knownConsultants:async()=>[],fetchCallsByFilter:m.roster}));
 vi.mock("@/lib/ratelimit",()=>({checkRateLimit:()=>({ok:true}),rateLimitHeaders:()=>({})}));
 import { POST } from "@/app/api/v1/call-reports/route";
+import { AuthError } from "@/lib/auth/context";
 const request=(body:Record<string,unknown>={})=>new Request("https://brain.test/api/v1/call-reports",{method:"POST",body:JSON.stringify({query:"check calls on 2026-10-20",timeZone:"Asia/Karachi",...body})});
 beforeEach(()=>{
   vi.clearAllMocks(); m.version="old";m.count=2;m.dbError=null;m.capabilities=["chat"];m.sourceTypes=[];m.collections=[];m.sources=[];
@@ -14,7 +15,7 @@ beforeEach(()=>{
 });
 describe("live call reports",()=>{
   it("authenticates and refuses capabilities/source/collection scope widening before reading",async()=>{
-    m.ctx.mockRejectedValueOnce(Object.assign(Error("Unauthorized"),{status:401}));expect((await POST(request())).status).toBeGreaterThanOrEqual(400);
+    m.ctx.mockRejectedValueOnce(new AuthError("Unauthorized",401));expect((await POST(request())).status).toBe(401);
     m.capabilities=[];expect((await POST(request())).status).toBe(403);
     m.capabilities=["chat"];m.sourceTypes=["document"];expect((await POST(request())).status).toBe(403);
     m.sourceTypes=[];m.collections=["11111111-1111-4111-8111-111111111111"];expect((await POST(request())).status).toBe(403);
