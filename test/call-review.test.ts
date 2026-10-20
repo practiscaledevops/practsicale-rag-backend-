@@ -65,6 +65,13 @@ describe("detectConsultants — raw capitalised phrases in a consultant context"
 });
 
 describe("parseCallReviewFilter — the isReview gate (review intent AND ≥1 filter dim)", () => {
+  it.each([
+    "give me report of all calls from 2026-06-19 to 2026-10-20",
+    "show calls between 2026-06-19 and 2026-10-20",
+    "list calls from 2026-10-20 through 2026-06-19",
+  ])("preserves both endpoints of an explicit historical range: %s", query => {
+    expect(parse(query)).toEqual({ isReview: true, dateFrom: "2026-06-19", dateTo: "2026-10-20" });
+  });
   it("date + review verb", () => {
     expect(parse("review the calls from 22 September")).toEqual({ isReview: true, date: "2026-09-22" });
   });

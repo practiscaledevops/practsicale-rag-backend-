@@ -57,6 +57,23 @@ export async function embed(text: string): Promise<number[]> {
 // is invisible to re-indexing and silently dead on the semantic leg; a null
 // embedding keeps the chunk full-text searchable and lets Reprocess find it.
 const EMBED_BATCH = 100;
+// UTF-8 byte length is a conservative upper bound for byte-pair token count.
+// This avoids a tokenizer dependency and handles non-English/long parent chunks
+// without truncating stored evidence. Stay below 8192/input and 300k/request.
+const EMBED_INPUT_BYTES = 6000;
+const EMBED_REQUEST_BYTES = 240_000;
+export function splitEmbeddingInput(text: string): string[] {
+  if (Buffer.byteLength(text, "utf8") <= EMBED_INPUT_BYTES) return [text];
+  const parts: string[] = [];
+  let part = "", bytes = 0;
+  for (const character of text) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (bytes + size > EMBED_INPUT_BYTES) { parts.push(part); part = ""; bytes = 0; }
+    part += character; bytes += size;
+  }
+  if (part) parts.push(part);
+  return parts;
+}
 export async function embedForIngest(texts: string[]): Promise<(number[] | null)[]> {
   if (isDemo() || texts.length === 0) return texts.map(() => null);
   const c = await client();
@@ -64,18 +81,38 @@ export async function embedForIngest(texts: string[]): Promise<(number[] | null)
     onEmbedError(new Error("no OpenAI key configured"));
     return texts.map(() => null);
   }
-  const out: (number[] | null)[] = [];
-  for (let i = 0; i < texts.length; i += EMBED_BATCH) {
-    const batch = texts.slice(i, i + EMBED_BATCH);
+  const groups = texts.map(splitEmbeddingInput);
+  const inputs = groups.flat();
+  const vectors: (number[] | null)[] = inputs.map(() => null);
+  for (let i = 0; i < inputs.length;) {
+    let end = i, bytes = 0;
+    while (end < inputs.length && end - i < EMBED_BATCH && bytes + Buffer.byteLength(inputs[end], "utf8") <= EMBED_REQUEST_BYTES) {
+      bytes += Buffer.byteLength(inputs[end], "utf8"); end++;
+    }
+    const batch = inputs.slice(i, end);
     try {
       const res = await c.embeddings.create({ model: MODEL, input: batch, dimensions: DIM });
-      for (const d of res.data) out.push(d.embedding);
+      const ordered = [...res.data].sort((a, b) => a.index - b.index);
+      if (ordered.length !== batch.length || ordered.some((d, j) => d.index !== j || d.embedding.length !== DIM || d.embedding.some(n => !Number.isFinite(n)) || d.embedding.every(n => n === 0))) throw new Error("Embedding provider returned an incomplete or invalid vector set");
+      for (let j = 0; j < ordered.length; j++) vectors[i + j] = ordered[j].embedding;
     } catch (err) {
       onEmbedError(err);
-      for (let j = 0; j < batch.length; j++) out.push(null);
     }
+    i = end;
   }
-  return out;
+  let offset = 0;
+  return groups.map(parts => {
+    const group = vectors.slice(offset, offset + parts.length); offset += parts.length;
+    if (group.some(v => !v)) return null;
+    if (group.length === 1) return group[0];
+    // Length-weighted pooling retains contributions from the ENTIRE long input.
+    // Normalize the pooled vector for cosine/dot-product retrieval.
+    const pooled = new Array<number>(DIM).fill(0);
+    group.forEach((v, i) => { const weight = Buffer.byteLength(parts[i], "utf8"); v!.forEach((n, j) => pooled[j] += n * weight); });
+    const norm = Math.hypot(...pooled);
+    if (!norm) { onEmbedError(new Error("Long-input embedding has zero norm")); return null; }
+    return pooled.map(n => n / norm);
+  });
 }
 
 // Batch embed (query-time helpers / object embeddings). Demo/no-key/outage ->

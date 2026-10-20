@@ -185,7 +185,9 @@ async function ingestTranscript(
     intelligenceClass: "business_reality",
     domain: "sales",
     title,
-    text: `${header}\n\n${transcript}`,
+    // The sweep and webhook must hash the same canonical body. Sweeps already
+    // trim source padding; normalize here too so replays cannot alternate hashes.
+    text: `${header}\n\n${transcript.trim()}`,
     metadata: {
       data_source: source.name,
       data_source_slug: source.slug ?? null,

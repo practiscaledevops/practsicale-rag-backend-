@@ -53,6 +53,15 @@ afterEach(() => {
 });
 
 describe("pull connector — call dates", () => {
+  it("hashes an identical transcript body through backfill and webhook despite outer padding", async () => {
+    respondWith([{ id: "r1", created_at: "2026-10-19T10:00:00Z", updated_at: "2026-10-19T11:00:00Z", transcript: " \nConsultant: Complete evidence\nProspect: Answer\n " }]);
+    await backfillTranscripts(SOURCE, { db: {} as SupabaseClient });
+    const swept = ingested()[0].text;
+    m.ingestOne.mockClear();
+    await syncScoringRecord({} as SupabaseClient, SOURCE, "r1");
+    expect(ingested()[1].text).toBe(swept);
+    expect(swept.endsWith("Prospect: Answer")).toBe(true);
+  });
   it("requests oldest-updated-first ordering even on a reset reconciliation cursor", async () => {
     respondWith([]);
     const q = {

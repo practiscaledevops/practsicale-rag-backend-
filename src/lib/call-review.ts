@@ -84,7 +84,7 @@ export const PRACTICE_TYPES = ["NEMT", "Home Care", "Home Health", "Assisted Liv
 const LIST_GAP_STOP =
   "(?:how|what|why|when|where|to|for|on|about|with|tips?|advice|ideas?|examples?|scripts?|ways?|best|pointers?|suggestions?|guidance|help|feedback|techniques?|strateg(?:y|ies)|openers?|lines?)";
 const REVIEW_RE = new RegExp(
-  String.raw`\b(review|reviews|reviewing|analy[sz]e|analy[sz]ing|analysis|assess|evaluate|audit|deep[- ]?dive|go through|going through|walk through|walking through|break ?down|summar(?:y|ise|ize|ies)|which consultant|list (?:the |all )?calls?|list (?:the )?transcripts?|(?:list|show me|pull up|pull|fetch|give me|check(?: on)?|report(?: on| of| for)?)\s+(?:(?!${LIST_GAP_STOP}\b)[\w'’-]+\s+){0,3}?(?:calls?|transcripts?)|how did\s+(?:[\w'’-]+\s+){0,3}calls?\s+go|(?:all|each|every|these|those|the) (?:the )?(?:calls?|transcripts?)|transcripts?)\b`,
+  String.raw`\b(review|reviews|reviewing|analy[sz]e|analy[sz]ing|analysis|assess|evaluate|audit|deep[- ]?dive|go through|going through|walk through|walking through|break ?down|summar(?:y|ise|ize|ies)|which consultant|list (?:the |all )?calls?|list (?:the )?transcripts?|(?:list|show(?: me)?(?!\s+up\b)|pull up|pull|fetch|give me|check(?: on)?|report(?: on| of| for)?)\s+(?:(?!${LIST_GAP_STOP}\b)[\w'’-]+\s+){0,3}?(?:calls?|transcripts?)|how did\s+(?:[\w'’-]+\s+){0,3}calls?\s+go|(?:all|each|every|these|those|the) (?:the )?(?:calls?|transcripts?)|transcripts?)\b`,
   "i"
 );
 
@@ -236,6 +236,13 @@ export function resolveDateRange(
 ): { from: string; to: string } | undefined {
   const ref = isISODate(referenceDate) ? referenceDate : todayISO(timeZone);
   const q = (query ?? "").toLowerCase();
+  // Explicit ranges must precede single-date resolution; otherwise a report
+  // "from June to October" silently becomes a report of its first date only.
+  const explicit = /\b(?:from|between)\s+(20\d{2}-\d{1,2}-\d{1,2})\s+(?:to|through|until|and|[–—])\s+(20\d{2}-\d{1,2}-\d{1,2})\b/.exec(q);
+  if (explicit) {
+    const dates = explicit.slice(1).map(s => resolveDate(s, ref)).filter((s): s is string => !!s).sort();
+    if (dates.length === 2) return { from: dates[0], to: dates[1] };
+  }
   const ry = Number(ref.slice(0, 4));
   const rm = Number(ref.slice(5, 7));
   const firstOf = (y: number, mo: number) => `${y}-${pad2(mo)}-01`;

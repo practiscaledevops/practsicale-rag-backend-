@@ -18,9 +18,9 @@ async function main() {
   if (error) throw Error(error.message);
   const examples = new Map<string, Record<string, any>>();
   const priority = (r: Record<string, any>) => (status(r.call_status) === "closed" && r.call_outcome === "FOLLOW_UP") || (status(r.call_status) !== "closed" && r.call_outcome === "CLOSED") ? 1 : 0;
-  for (let offset = 0; ; offset += 50) {
+  for (let offset = 0; ; offset += 25) {
     const url = new URL(source.endpoint_url);
-    for (const [k, v] of Object.entries({ since: "1970-01-01T00:00:00.000Z", limit: "50", offset: String(offset), include_transcript: "false" })) url.searchParams.set(k, v);
+    for (const [k, v] of Object.entries({ since: "1970-01-01T00:00:00.000Z", limit: "25", offset: String(offset), include_transcript: "false" })) url.searchParams.set(k, v);
     const res = await fetch(url, { headers: { "x-api-key": process.env[source.auth_secret_ref] ?? "" }, signal: AbortSignal.timeout(45_000) });
     if (!res.ok) throw Error(`Source HTTP ${res.status}`);
     const rows = (await res.json()).data as Record<string, any>[];
@@ -28,7 +28,7 @@ async function main() {
       const key = `${status(row.call_status)}/${ticket(row.ticket_category)}`;
       if (!examples.has(key) || priority(row) > priority(examples.get(key)!)) examples.set(key, row);
     }
-    if (rows.length < 50) break;
+    if (rows.length < 25) break;
   }
   const env = Object.fromEntries(readFileSync(resolve("../practiscale-rag-chatbot/.env.local"), "utf8").split(/\r?\n/).flatMap(line => {
     const m = line.match(/^([A-Z_0-9]+)=(.*)$/); return m ? [[m[1], m[2].trim().replace(/^["']|["']$/g, "")]] : [];
