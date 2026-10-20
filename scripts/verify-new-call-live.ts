@@ -29,7 +29,7 @@ async function main(){
       const res=await fetch("https://practiscale-rag-chatbot.vercel.app/api/call-reports",{method:"POST",headers:{"content-type":"application/json",cookie:[...cookies].map(([k,v])=>`${k}=${v}`).join("; ")},body:JSON.stringify({query,timeZone:"Asia/Karachi",version,waitMs:version?20000:0}),signal:abort.signal});
       if(!res.ok)throw Error(`Live report HTTP ${res.status}`);const body=await res.json();version=body.version;
       if(!body.unchanged){
-        if(body.content.includes(label)){reportAt=Date.now();reportBody=body;console.log(JSON.stringify({newCallInOpenSubscription:true,pendingNotice:body.content.includes("still indexing")}));return;}
+        if(body.content.includes(label)){reportAt=Date.now();reportBody=body;state.firstReportObservedAt=new Date(reportAt).toISOString();state.firstReportCheckedAt=body.checkedAt;state.pendingNoticeObserved=body.content.includes("still indexing");save();writeFileSync(resolve("../verification/new-call-live-report.md"),body.content);console.log(JSON.stringify({newCallInOpenSubscription:true,pendingNotice:state.pendingNoticeObserved,observedAt:state.firstReportObservedAt}));return;}
         console.log(JSON.stringify({subscriptionReady:true,matchingCalls:body.count}));
       }
     }
@@ -46,7 +46,7 @@ async function main(){
       }
       if(current){
         const {data:docs,error:docError}=await db.from("documents").select("id,source_type,metadata").eq("org_id",source.org_id).eq("data_source_id",source.id).eq("metadata->>source_record_id",current.id);if(docError)throw docError;
-        const matches=(m:any)=>Date.parse(m.source_updated_at)===Date.parse(current.updated_at)&&normal(m.call_status)===normal(current.call_status)&&normal(m.ticket_category)===normal(current.ticket_category)&&m.call_outcome===current.call_outcome&&m.call_sequence===current.call_sequence&&Number(m.overall_score)===Number(current.overall_score);
+        const matches=(m:any)=>Date.parse(m.source_updated_at)===Date.parse(current.updated_at)&&normal(m.call_status)===normal(current.call_status)&&normal(m.ticket_category)===normal(current.ticket_category)&&(m.call_outcome??null)===(current.call_outcome??null)&&(m.call_sequence??null)===(current.call_sequence??null)&&Number(m.overall_score)===Number(current.overall_score);
         if(!brainAt&&docs?.length===2&&docs.every(d=>matches(d.metadata))){brainAt=Date.now();state.brainSeconds=(brainAt-Date.parse(current.updated_at))/1000;state.documentIds=docs.map(d=>d.id);save();console.log(JSON.stringify({brainRegistered:true,seconds:state.brainSeconds,documents:2}));}
         if(brainAt&&reportAt&&!state.chatbotSeconds){
           const rows=reportBody.content.split("\n").filter((l:string)=>l.startsWith("|")).map((l:string)=>l.split("|").slice(1,-1).map(s=>s.trim()));const headers=rows.find((r:string[])=>r.some(v=>normal(v)==="currentcrmstatus"));const col=(name:string)=>headers?.findIndex((h:string)=>normal(h)===normal(name));const row=rows.find((r:string[])=>r[col("Prospect")]===label);
