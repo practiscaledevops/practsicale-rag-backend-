@@ -77,6 +77,10 @@ later status changes. A replay never replaces an indexed body with a summary.
 The authenticated `/api/v1/call-reports` subscription detects inserts as well as
 updates/deletions. The chatbot's active report automatically gains new rows and
 recomputes its consultant summary, even when its original roster was empty.
+The Brain Documents list checks its tenant-scoped revision every two seconds
+while visible and refreshes only when it changes. New call summaries display
+Indexing until the canonical body is ready, rather than implying embedding is
+already complete.
 Each report preserves its original calendar date and access scope. Hidden tabs
 pause network work and check immediately when reopened. Model selection has no
 effect on these database-computed reports.

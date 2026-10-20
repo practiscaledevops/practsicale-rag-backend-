@@ -6,6 +6,8 @@ import { NoAccessNotice } from "@/components/auth/PermissionGate";
 import { supabaseAdmin } from "@/lib/supabase";
 import { isMissingRelation } from "@/lib/knowledge-store";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { LiveDocumentUpdates } from "@/components/LiveDocumentUpdates";
+import { documentRevision } from "@/lib/document-revision";
 import { Alert } from "@/components/ui/Alert";
 import { buttonClass } from "@/components/ui/Button";
 import { DocumentsClient, type CollectionOption, type DocumentRow } from "./DocumentsClient";
@@ -62,6 +64,9 @@ export default async function DocumentsPage() {
   const admin = session;
 
   const db = supabaseAdmin();
+  // Capture before the list snapshot: a concurrent insert cannot be missed by
+  // the first browser check, even if it arrives while this page is rendering.
+  const initialVersion = await documentRevision(db, admin.orgId).catch(() => null);
   const list = (select: string) =>
     db
       .from("documents")
@@ -89,6 +94,7 @@ export default async function DocumentsPage() {
     created_at: d.created_at,
     updated_at: d.updated_at ?? d.created_at,
     chunk_count: d.chunks?.[0]?.count ?? 0,
+    indexing_pending: d.metadata?.source_index_state === "pending",
     collection: d.document_collections?.[0]?.collections?.name ?? null,
     category: meta(d.metadata, "category"),
     owner: meta(d.metadata, "owner", "source_owner", "author"),
@@ -118,6 +124,7 @@ export default async function DocumentsPage() {
           </>
         }
       />
+      <LiveDocumentUpdates initialVersion={initialVersion} />
 
       {error ? (
         <Alert tone="danger" title="Couldn't load documents">

@@ -63,6 +63,7 @@ export interface DocumentRow {
   created_at: string;
   updated_at: string;
   chunk_count: number;
+  indexing_pending?: boolean;
   collection: string | null;
   category: string | null;
   owner: string | null;
@@ -662,7 +663,7 @@ export function DocumentsClient({
           <TBody>
             {filtered.map((d) => {
               const fresh = freshness(d.updated_at, d.review_date);
-              const indexed = d.chunk_count > 0;
+              const indexed = d.chunk_count > 0 && !d.indexing_pending;
               const restricted =
                 d.source_type === "call_score" || (d.access ?? "").toLowerCase().includes("restrict");
               const busy = isBusy(d.id);
@@ -720,7 +721,7 @@ export function DocumentsClient({
                   </Td>
                   <Td>
                     <Badge tone={statusTone(indexed ? "indexed" : "pending")}>
-                      {indexed ? "Indexed" : "Pending"}
+                      {d.indexing_pending ? "Indexing" : indexed ? "Indexed" : "Pending"}
                     </Badge>
                   </Td>
                   <Td numeric>{fmtInt(d.chunk_count)}</Td>

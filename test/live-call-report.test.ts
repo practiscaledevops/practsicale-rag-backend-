@@ -40,6 +40,11 @@ describe("live call reports",()=>{
     m.roster.mockClear();m.roster.mockImplementationOnce(async()=>{m.version="new";return {scorecard:[],totalMatched:0,complete:true};});
     expect((await POST(request())).status).toBe(200);expect(m.roster).toHaveBeenCalledTimes(2);
   });
+  it("returns a changed snapshot when the first new call enters a formerly empty roster",async()=>{
+    m.count=0;const empty=await (await POST(request())).json();expect(empty.content).toContain("No matching calls");
+    m.count=1;m.version="first-call";m.roster.mockResolvedValueOnce({scorecard:[{consultant:"Verification",prospect:"New call",date:"2026-10-20",time:"19:00",practice:"Home Care",score:40,band:null,outcome:"Pending",closingType:"High Ticket",originalOutcome:"Follow Up",callSequence:"Call 1",duration:2,indexingPending:true}],totalMatched:1,complete:true});
+    const inserted=await (await POST(request({version:empty.version}))).json();expect(inserted.version).not.toBe(empty.version);expect(inserted.count).toBe(1);expect(inserted.content).toContain("New call");expect(inserted.content).toContain("still indexing");expect(inserted.content).toContain("| Total | 1 | 1 | 0 | 0 | 0 | 0 | 1 |");
+  });
   it("returns unavailable rather than a fabricated zero report on database failure",async()=>{
     m.roster.mockResolvedValueOnce({scorecard:[],totalMatched:0,complete:false});expect((await POST(request())).status).toBe(503);
     m.dbError={message:"private database detail"};const res=await POST(request());expect(res.status).toBe(503);expect(await res.text()).not.toContain("private database");
