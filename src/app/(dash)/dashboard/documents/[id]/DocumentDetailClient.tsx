@@ -96,6 +96,38 @@ export function DocumentDetailClient({ documentId }: { documentId: string }) {
   const [busy, setBusy] = React.useState<null | "saving" | "deleting" | "reingesting">(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<string | null>(null);
+  const [liveState, setLiveState] = React.useState("Connecting");
+  const dataRef = React.useRef(data);
+  dataRef.current = data;
+  const isCall = data?.document.source_type === "call_score" || data?.document.source_type === "transcript";
+
+  React.useEffect(() => {
+    if (!isCall) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let controller: AbortController | null = null;
+    const poll = async () => {
+      if (disposed || controller || document.visibilityState === "hidden") return;
+      const own = new AbortController(); controller = own;
+      let retry = 2000;
+      let stopped = false;
+      try {
+        const res = await fetch(`/api/admin/documents/${encodeURIComponent(documentId)}?revision=${encodeURIComponent(dataRef.current?.document.updated_at ?? "")}`, { cache: "no-store", signal: own.signal });
+        if ([401,403,404].includes(res.status)) { stopped = true; if (!disposed) setLiveState("Live updates unavailable"); return; }
+        if (res.status !== 304) {
+          if (!res.ok) throw Error("unavailable");
+          const next = await res.json();
+          if (!disposed && !own.signal.aborted) setData(next);
+        }
+        if (!disposed && !own.signal.aborted) setLiveState("Live · updates automatically");
+      } catch { retry = 5000; if (!disposed && !own.signal.aborted) setLiveState("Reconnecting · showing last available data"); }
+      finally { if (controller === own) controller = null; if (!disposed && !stopped && !own.signal.aborted) timer = setTimeout(poll, retry); }
+    };
+    const visibility = () => { clearTimeout(timer); controller?.abort(); controller = null; if (document.visibilityState !== "hidden") void poll(); };
+    document.addEventListener("visibilitychange", visibility); window.addEventListener("online", visibility);
+    void poll();
+    return () => { disposed = true; clearTimeout(timer); controller?.abort(); document.removeEventListener("visibilitychange", visibility); window.removeEventListener("online", visibility); };
+  }, [documentId, isCall]);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -266,6 +298,7 @@ export function DocumentDetailClient({ documentId }: { documentId: string }) {
         backLabel="Documents"
         actions={
           <div className="flex flex-col items-start gap-1 sm:items-end">
+            {isCall && <span role="status" className="text-xs text-muted-foreground">{liveState}</span>}
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 variant="secondary"

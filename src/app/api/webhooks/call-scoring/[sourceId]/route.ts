@@ -3,6 +3,7 @@ import { after } from "next/server";
 import { z } from "zod";
 import { supabaseAdmin } from "@/lib/supabase";
 import { drainScoringEvents } from "@/lib/connectors/scoring-events";
+import { refreshScoringMetadata, type DataSourceRow } from "@/lib/connectors/pull";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
@@ -35,7 +36,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ sourceI
   const { sourceId } = await params;
   if (!parsed.success || !z.string().uuid().safeParse(sourceId).success) return Response.json({ error: "Invalid event" }, { status: 400 });
   const db = supabaseAdmin();
-  const { data: source, error } = await db.from("data_sources").select("id,org_id").eq("id", sourceId).eq("source_type", "call_score").eq("is_active", true).maybeSingle();
+  const { data: source, error } = await db.from("data_sources").select("*").eq("id", sourceId).eq("source_type", "call_score").eq("is_active", true).maybeSingle();
   if (error || !source) return Response.json({ error: "Unknown scoring source" }, { status: 404 });
   // Org comes only from the registered source. The signed body carries IDs,
   // never an org or a snapshot that could overwrite newer source truth.
@@ -45,6 +46,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ sourceI
     const { data: seen } = await db.from("scoring_sync_events").select("data_source_id,record_id,status").eq("id", parsed.data.event_id).eq("org_id", source.org_id).maybeSingle();
     if (!seen || seen.data_source_id !== sourceId || seen.record_id !== parsed.data.report_id) return Response.json({ error: "Event id conflict" }, { status: 409 });
   }
+  // Scalar truth must not wait behind the org's embedding/metrics lease. The
+  // source has committed already; fetch its current values, never signed data.
+  try { await refreshScoringMetadata(db, source as DataSourceRow, parsed.data.report_id); }
+  catch { console.error("[scoring-sync] fast metadata refresh deferred to durable worker"); }
   after(() => drainScoringEvents().catch(() => console.error("[scoring-sync] background drain failed; cron will retry")));
   return Response.json({ accepted: true, event_id: parsed.data.event_id }, { status: 202 });
 }

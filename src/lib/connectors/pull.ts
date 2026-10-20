@@ -21,7 +21,7 @@ import { ingestOne, type IngestResult } from "@/lib/ingest";
 import { redactPII } from "@/lib/redact";
 import { assertPublicUrl } from "@/lib/net-guard";
 import { isAllowedSecretRef } from "@/lib/connectors/secret-ref";
-import { syncSourceDocument } from "@/lib/connectors/sync-document";
+import { syncSourceDocument, syncSourceMetadata } from "@/lib/connectors/sync-document";
 import { callStatusLabel, closingTypeLabel } from "@/lib/call-status";
 
 // Big free-text fields belong in the chunked BODY, not in metadata. The raw
@@ -94,6 +94,7 @@ function recordMetadata(rec: Record<string, unknown>): Record<string, unknown> {
   out.ticket_category = rec.ticket_category ?? null;
   out.closing_type = rec.closing_type ?? null;
   out.source_updated_at = rec.updated_at ?? null;
+  out.source_body_updated_at = rec.updated_at ?? null;
   return out;
 }
 
@@ -503,6 +504,7 @@ interface FetchOpts {
   forceTranscript?: boolean;
   limit?: number;
   recordId?: string;
+  metadataOnly?: boolean;
 }
 
 async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: FetchOpts = {}): Promise<unknown[]> {
@@ -522,8 +524,9 @@ async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: Fe
   // Ask the call-scoring API to include each call's raw transcript, so the run
   // can also store it as its own document. Forced for the transcript back-fill.
   if (source.source_type === "call_score" || opts.forceTranscript) {
-    baseParams.set("include_transcript", "true");
+    baseParams.set("include_transcript", opts.metadataOnly ? "false" : "true");
   }
+  if (opts.metadataOnly) baseParams.set("metadata_only", "true");
   if (opts.limit && opts.limit > 0) baseParams.set("limit", String(opts.limit));
   if (opts.recordId) baseParams.set("report_id", opts.recordId);
   // A report plus its transcript can be tens of KB. An old limit=500 config
@@ -562,7 +565,7 @@ async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: Fe
       method,
       headers,
       redirect: "manual",
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      signal: AbortSignal.timeout(opts.metadataOnly ? Math.max(1, Math.min(8000, (deadlineAt ?? Date.now() + 8000) - Date.now())) : FETCH_TIMEOUT_MS),
     });
     if (res.status >= 300 && res.status < 400) {
       throw new Error(`pull request was redirected (${res.status}); redirects are not followed — configure the final URL`);
@@ -603,6 +606,14 @@ async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: Fe
 }
 
 /** Fetch the authoritative CURRENT row, never an untrusted webhook snapshot. */
+export async function refreshScoringMetadata(db: SupabaseClient, source: DataSourceRow, recordId: string): Promise<number> {
+  const records = await fetchRecords(source, Date.now() + 8000, { ignoreCursor: true, metadataOnly: true, recordId, limit: 1 });
+  const rec = records.find(row => !!row && typeof row === "object" && String((row as Record<string, unknown>)[source.record_id_field ?? "id"]) === recordId) as Record<string, unknown> | undefined;
+  if (!rec || !rec.updated_at || !Number.isFinite(Date.parse(String(rec.updated_at)))) throw Error("Current scoring metadata revision unavailable");
+  return syncSourceMetadata(db, { orgId: source.org_id, dataSourceId: source.id, recordId, title: buildTitle(rec, "call_score", recordId),
+    metadata: { data_source: source.name, data_source_slug: source.slug ?? null, source_record_id: recordId, ...recordMetadata(rec) } });
+}
+
 export async function syncScoringRecord(db: SupabaseClient, source: DataSourceRow, recordId: string): Promise<void> {
   const records = await fetchRecords(source, Date.now() + 120_000, { ignoreCursor: true, forceTranscript: true, recordId, limit: 1 });
   const rec = records.find((row) => !!row && typeof row === "object" && String((row as Record<string, unknown>)[source.record_id_field ?? "id"]) === recordId) as Record<string, unknown> | undefined;
@@ -610,11 +621,11 @@ export async function syncScoringRecord(db: SupabaseClient, source: DataSourceRo
   if (!rec.updated_at || !Number.isFinite(Date.parse(String(rec.updated_at)))) throw new Error("Scoring report has no revision; apply scoring migration 018 and deploy its API");
   const { transcript, ...report } = rec;
   const meta = recordMetadata(report);
-  await syncSourceDocument(db, { orgId: source.org_id, dataSourceId: source.id, recordId, sourceType: "call_score",
+  await Promise.all([syncSourceDocument(db, { orgId: source.org_id, dataSourceId: source.id, recordId, sourceType: "call_score",
     title: buildTitle(report, "call_score", recordId), intelligenceClass: "business_reality", domain: "sales",
     text: scoringText(report),
-    metadata: { data_source: source.name, data_source_slug: source.slug ?? null, source_record_id: recordId, ...meta } });
-  if (typeof transcript === "string" && transcript.trim()) await ingestTranscript(db, source, report, transcript, recordId);
+    metadata: { data_source: source.name, data_source_slug: source.slug ?? null, source_record_id: recordId, ...meta } }),
+    typeof transcript === "string" && transcript.trim() ? ingestTranscript(db, source, report, transcript, recordId) : Promise.resolve(null)]);
 }
 
 function buildHeaders(source: DataSourceRow): Record<string, string> {

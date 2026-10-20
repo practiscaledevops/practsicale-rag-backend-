@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const m = vi.hoisted(() => ({ from: vi.fn(), insertError: null as null | {code:string}, source: true, replayRecord: "22222222-2222-4222-8222-222222222222", after: vi.fn() }));
+const m = vi.hoisted(() => ({ refresh: vi.fn(), from: vi.fn(), insertError: null as null | {code:string}, source: true, replayRecord: "22222222-2222-4222-8222-222222222222", after: vi.fn() }));
+vi.mock("@/lib/connectors/pull", () => ({ refreshScoringMetadata: m.refresh }));
 vi.mock("next/server", () => ({ after: m.after }));
 vi.mock("@/lib/connectors/scoring-events", () => ({ drainScoringEvents: vi.fn(async () => 0) }));
 vi.mock("@/lib/supabase", () => ({ supabaseAdmin: () => ({ from: m.from }) }));
@@ -16,6 +17,7 @@ function request(body: string, timestamp=String(Math.floor(Date.now()/1000)), si
 const payload = () => JSON.stringify({ event_id:EVENT,report_id:REPORT,updated_at:new Date().toISOString() });
 const call = (req:Request) => POST(req,{params:Promise.resolve({sourceId:SOURCE})});
 beforeEach(() => {
+  m.refresh.mockResolvedValue(2);
   vi.stubEnv("SCORING_WEBHOOK_SECRET",SECRET); vi.clearAllMocks(); m.insertError=null;m.source=true;m.replayRecord=REPORT;
   m.from.mockImplementation((table:string) => {
     const q:any = { select:()=>q,eq:()=>q,insert:vi.fn(async()=>({error:m.insertError})),maybeSingle:async()=>({data:table==="data_sources"?(m.source?{id:SOURCE,org_id:"server-org"}:null):{data_source_id:SOURCE,record_id:m.replayRecord,status:"pending"},error:null}) };
@@ -42,6 +44,14 @@ describe("scoring webhook",()=>{
     expect(m.after).toHaveBeenCalledOnce();
   });
   it("does not acknowledge an undurable delivery",async()=>{m.insertError={code:"unavailable"};expect((await call(request(payload()))).status).toBe(503);expect(m.after).not.toHaveBeenCalled();});
+  it("publishes trusted current metadata before acknowledging, with a durable fallback",async()=>{
+    let finished = false;
+    m.refresh.mockImplementationOnce(async()=>{await Promise.resolve();finished=true;return 2;});
+    expect((await call(request(payload()))).status).toBe(202); expect(finished).toBe(true);
+    expect(m.refresh).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({id:SOURCE,org_id:"server-org"}),REPORT);
+    m.refresh.mockRejectedValueOnce(Error("unavailable"));
+    expect((await call(request(payload()))).status).toBe(202); expect(m.after).toHaveBeenCalledTimes(2);
+  });
   it("accepts replays but rejects an event-id collision for another call",async()=>{
     m.insertError={code:"23505"};expect((await call(request(payload()))).status).toBe(202);
     m.replayRecord="44444444-4444-4444-8444-444444444444";expect((await call(request(payload()))).status).toBe(409);

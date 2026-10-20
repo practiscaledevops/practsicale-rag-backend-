@@ -86,7 +86,7 @@ function reingestAvailability(
   };
 }
 
-export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> }) {
+export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
   let admin;
   try {
     admin = await requireAdmin("documents:read");
@@ -109,6 +109,11 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
 
   if (docErr) return Response.json({ error: docErr.message }, { status: 500 });
   if (!doc) return Response.json({ error: "Document not found" }, { status: 404 });
+  // The open call inspector checks a lightweight revision; unchanged views do
+  // not reload transcript chunks or embeddings. Authentication still runs above.
+  if (new URL(req.url).searchParams.get("revision") === doc.updated_at) {
+    return new Response(null, { status: 304, headers: { "cache-control": "private, no-store" } });
+  }
 
   // 2) In parallel: the chunks (no embedding column), the ids that HAVE an
   //    embedding, the doc's collection ids, and the data source name (if any).

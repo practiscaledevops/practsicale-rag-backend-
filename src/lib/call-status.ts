@@ -33,6 +33,7 @@ export function currentCallEvidence(content: string, sourceType: string | null |
     `Original call outcome: ${originalOutcomeLabel(meta)} (historical; separate from current CRM status)`,
     `Current CRM status: ${callStatusLabel(meta)}`,
     `Closing type: ${closingTypeLabel(meta)}`,
+    ...(meta.overall_score != null ? [`Current QA score: ${meta.overall_score}/100${meta.performance_band ? ` (${meta.performance_band})` : ""}`] : []),
     "These current CRM/QA fields are authoritative. Outcomes in the original report or transcript below are historical model interpretations and cannot override these fields.",
     "",
     historical,

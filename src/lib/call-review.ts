@@ -935,14 +935,7 @@ export async function newestCallDate(db: SupabaseClient, orgId: string): Promise
  * default: the business zone).
  * No matches → a "No calls found" note; a DB error → empty + log (never throws).
  */
-export async function fetchCallsByFilter(
-  db: SupabaseClient,
-  orgId: string,
-  filter: CallReviewFilter,
-  opts: { maxCalls: number; maxTokens: number; timeZone?: string; metadataOnly?: boolean }
-): Promise<{ chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number; complete?: boolean }> {
-  const timeZone = resolveTimeZone(opts.timeZone);
-  const applyFilters = <T extends { eq: Function; ilike: Function; or: Function; gte: Function; lte: Function; lt: Function }>(q: T): T => {
+export function applyCallReviewFilter<T extends { eq: Function; ilike: Function; or: Function; gte: Function; lte: Function; lt: Function }>(q: T, orgId: string, filter: CallReviewFilter, timeZone: string): T {
     let out = q.eq("org_id", orgId).eq("source_type", "transcript");
     // Filter by created_at's day in the user's zone (always clean — the stored
     // call_date is not) via a half-open range on the ISO timestamp, whose bounds
@@ -960,7 +953,16 @@ export async function fetchCallsByFilter(
     const cands = (filter.consultants ?? []).map(sanitizeConsultant).filter(Boolean);
     if (cands.length) out = out.or(cands.map((c) => `metadata->>consultant_name.ilike.%${c}%`).join(","));
     return out;
-  };
+  }
+
+export async function fetchCallsByFilter(
+  db: SupabaseClient,
+  orgId: string,
+  filter: CallReviewFilter,
+  opts: { maxCalls: number; maxTokens: number; timeZone?: string; metadataOnly?: boolean }
+): Promise<{ chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number; complete?: boolean }> {
+  const timeZone = resolveTimeZone(opts.timeZone);
+
 
   try {
     // 1) Which calls match — document_id + summary metadata (never `select *`).
@@ -971,7 +973,7 @@ export async function fetchCallsByFilter(
     const idRows: { document_id: string; metadata: Record<string, unknown> }[] = [];
     let complete = false;
     for (let offset = 0; offset < 10_000; offset += 500) {
-      const { data: page, error } = await applyFilters(db.from("documents").select("id, metadata"))
+      const { data: page, error } = await applyCallReviewFilter(db.from("documents").select("id, metadata"), orgId, filter, timeZone)
         .order("id", { ascending: true }).range(offset, offset + 499);
       if (error) throw new Error(`Call roster read failed: ${error.message}`);
       idRows.push(...(page ?? []).map(r => ({ document_id: String(r.id), metadata: r.metadata ?? {} })));

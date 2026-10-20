@@ -4,14 +4,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // part (the isoDatePart regex once lacked its backslashes and never matched), while
 // the transcript document's hashed body keeps the source's date string verbatim
 // so an already-stored transcript is skipped, not re-ingested, on a back-fill.
-const m = vi.hoisted(() => ({ ingestOne: vi.fn() }));
+const m = vi.hoisted(() => ({ ingestOne: vi.fn(), metadata: vi.fn() }));
 
 vi.mock("@/lib/ingest", () => ({ ingestOne: m.ingestOne }));
-vi.mock("@/lib/connectors/sync-document", () => ({ syncSourceDocument: m.ingestOne }));
+vi.mock("@/lib/connectors/sync-document", () => ({ syncSourceDocument: m.ingestOne, syncSourceMetadata: m.metadata }));
 vi.mock("@/lib/net-guard", () => ({ assertPublicUrl: vi.fn(async () => {}) }));
 vi.mock("@/lib/supabase", () => ({ supabaseAdmin: () => ({}) }));
 
-import { backfillTranscripts, runPull, syncScoringRecord, type DataSourceRow } from "@/lib/connectors/pull";
+import { backfillTranscripts, runPull, syncScoringRecord, refreshScoringMetadata, type DataSourceRow } from "@/lib/connectors/pull";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const SOURCE: DataSourceRow = {
@@ -53,6 +53,14 @@ afterEach(() => {
 });
 
 describe("pull connector — call dates", () => {
+  it("fetches one authoritative scalar revision, preserving cleared status without reading or embedding transcripts", async()=>{
+    respondWith([{id:"r1",created_at:"2026-10-19T10:00:00Z",updated_at:"2026-10-20T10:00:00Z",call_status:null,ticket_category:"high_ticket",overall_score:40,call_outcome:"FOLLOW_UP"}]);
+    await refreshScoringMetadata({} as SupabaseClient,SOURCE,"r1");
+    const url = new URL(vi.mocked(fetch).mock.calls[0][0] as string);
+    expect(url.searchParams.get("metadata_only")).toBe("true");expect(url.searchParams.get("report_id")).toBe("r1");expect(fetch).toHaveBeenCalledOnce();
+    expect(m.metadata).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({recordId:"r1",metadata:expect.objectContaining({call_status:null,ticket_category:"high_ticket",source_updated_at:"2026-10-20T10:00:00Z",call_outcome:"FOLLOW_UP",overall_score:40})}));
+    expect(m.ingestOne).not.toHaveBeenCalled();
+  });
   it("hashes an identical transcript body through backfill and webhook despite outer padding", async () => {
     respondWith([{ id: "r1", created_at: "2026-10-19T10:00:00Z", updated_at: "2026-10-19T11:00:00Z", transcript: " \nConsultant: Complete evidence\nProspect: Answer\n " }]);
     await backfillTranscripts(SOURCE, { db: {} as SupabaseClient });

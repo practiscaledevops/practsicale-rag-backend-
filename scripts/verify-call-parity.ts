@@ -90,7 +90,7 @@ async function main() {
       if (outcome(d.metadata.call_outcome) !== r.outcome) issues.push({ recordId: id, documentId: d.id, type: "document_original_outcome", expected: r.outcome, actual: outcome(d.metadata.call_outcome) });
       if (sequence(d.metadata.call_sequence) !== r.sequence) issues.push({ recordId: id, documentId: d.id, type: "document_sequence", expected: r.sequence, actual: sequence(d.metadata.call_sequence) });
       if (d.content_hash !== r.hashes[d.source_type]) issues.push({ recordId: id, documentId: d.id, type: "document_body_hash" });
-      if (revision(d.metadata.source_updated_at) !== revision(r.revision)) revisionLag++;
+      if (revision(d.metadata.source_body_updated_at ?? d.metadata.source_updated_at) !== revision(r.revision)) revisionLag++;
     }
     for (const r of records.values()) {
       for (const type of r.hasTranscript ? ["call_score", "transcript"] : ["call_score"]) {
@@ -102,7 +102,7 @@ async function main() {
     let chunkRevisionLag = 0;
     for (let offset = 0; ; offset += 1000) {
       const { data, error } = await db.from("chunks")
-        .select("id,document_id,status:metadata->>call_status,ticket:metadata->>ticket_category,revision:metadata->>source_updated_at,outcome:metadata->>call_outcome,sequence:metadata->>call_sequence")
+        .select("id,document_id,status:metadata->>call_status,ticket:metadata->>ticket_category,revision:metadata->>source_updated_at,body_revision:metadata->>source_body_updated_at,outcome:metadata->>call_outcome,sequence:metadata->>call_sequence")
         .eq("org_id", source.org_id).eq("data_source_id", source.id).order("id").range(offset, offset + 999);
       if (error) throw Error(error.message);
       for (const c of data) {
@@ -113,7 +113,7 @@ async function main() {
         if (ticket(c.ticket) !== r.ticket) issues.push({ recordId: r.id, documentId: c.document_id, chunkId: c.id, type: "chunk_ticket", expected: r.ticket, actual: ticket(c.ticket) });
         if (outcome(c.outcome) !== r.outcome) issues.push({ recordId: r.id, documentId: c.document_id, chunkId: c.id, type: "chunk_original_outcome", expected: r.outcome, actual: outcome(c.outcome) });
         if (sequence(c.sequence) !== r.sequence) issues.push({ recordId: r.id, documentId: c.document_id, chunkId: c.id, type: "chunk_sequence", expected: r.sequence, actual: sequence(c.sequence) });
-        if (revision(c.revision) !== revision(r.revision)) chunkRevisionLag++;
+        if (revision(c.body_revision ?? c.revision) !== revision(r.revision)) chunkRevisionLag++;
       }
       if (data.length < 1000) break;
     }
