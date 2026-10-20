@@ -7,7 +7,9 @@ import { createServerClient } from "@supabase/ssr";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 loadEnvConfig(process.cwd());
-const normalize = (v: unknown) => String(v ?? "").toLowerCase().replace(/[^a-z]/g, "");
+// A grounded model may put valid citation markers inside a JSON label. Strip
+// only UUID/numeric citation markers, retaining any substantive extra words.
+const normalize = (v: unknown) => String(v ?? "").replace(/\[(?:[0-9a-f-]{36}|\d+)\]/gi, "").toLowerCase().replace(/[^a-z]/g, "");
 const status = (v: unknown) => normalize(v) || "pending";
 const ticket = (v: unknown) => normalize(v) || "unclassified";
 
@@ -42,12 +44,18 @@ async function main() {
   const headers = { "content-type": "application/json", cookie: [...cookies].map(([k, v]) => `${k}=${v}`).join("; ") };
   const results: Record<string, unknown>[] = [];
   const models = process.env.VERIFY_MODELS?.split(",") ?? ["fast", "recommended"];
+  const retryReport = process.env.VERIFY_RETRY_REPORT ? JSON.parse(readFileSync(process.env.VERIFY_RETRY_REPORT, "utf8")) : null;
+  const retries = retryReport ? new Set<string>(retryReport.results.filter((r: { passed: boolean }) => !r.passed).map((r: { combination: string; model: string }) => `${r.combination}:${r.model}`)) : null;
   const tasks = [...examples].filter(([combination]) => !process.env.VERIFY_COMBINATION || combination === process.env.VERIFY_COMBINATION)
-    .flatMap(([combination, row]) => models.map(model => ({ combination, row, model })));
+    .flatMap(([combination, row]) => models.map(model => ({ combination, row, model })))
+    .filter(t => !retries || retries.has(`${t.combination}:${t.model}`));
+  if (!tasks.length) throw Error("No matching verification cases selected");
   for (let i = 0; i < tasks.length; i += 2) {
     await Promise.all(tasks.slice(i, i + 2).map(async ({ combination, row, model }) => {
       const day = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Karachi", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(row.created_at));
-      const query = `Review ${row.consultant_name}'s calls on ${day}. For the call with prospect ${JSON.stringify(row.prospect_name)}, report only its CURRENT CRM status and closing type from structured metadata. The model's original call_outcome is historical. Return JSON with current_status (Closed, Not Closed, Pending, or Disqualified) and closing_type (High Ticket, Low Ticket, or Unclassified), followed by citations.`;
+      // "Analyze" intentionally exercises retrieval + model generation rather
+      // than the separate, model-independent operational-report fast path.
+      const query = `Analyze ${row.consultant_name}'s calls on ${day}. For the call with prospect ${JSON.stringify(row.prospect_name)}, report only its CURRENT CRM status and closing type from structured metadata. The model's original call_outcome is historical. Return JSON with current_status (Closed, Not Closed, Pending, or Disqualified) and closing_type (High Ticket, Low Ticket, or Unclassified), followed by citations.`;
       try {
         const res = await fetch("https://practiscale-rag-chatbot.vercel.app/api/chat", { method: "POST", headers,
           body: JSON.stringify({ messages: [{ role: "user", content: query }], model, mode: "general", timeZone: "Asia/Karachi" }), signal: AbortSignal.timeout(180_000) });
