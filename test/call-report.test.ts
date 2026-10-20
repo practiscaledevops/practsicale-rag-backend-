@@ -3,6 +3,10 @@ import { renderCallReport, wantsStructuredCallReport } from "@/lib/call-report";
 import { fetchCallsByFilter } from "@/lib/call-review";
 import type { SupabaseClient } from "@supabase/supabase-js";
 describe("model-independent call reports", () => {
+  it("includes newly registered calls in totals while explicitly withholding transcript analysis", () => {
+    const text=renderCallReport([{consultant:"Verification",prospect:"New call",date:"2026-10-20",time:"19:00",practice:"Home Care",score:40,band:null,outcome:"Closed",closingType:"High Ticket",originalOutcome:"Follow Up",callSequence:"Call 1",duration:2,indexingPending:true}],{isReview:true,date:"2026-10-20"},"Asia/Karachi");
+    expect(text).toContain("1 call in");expect(text).toContain("still indexing");expect(text).toContain("not yet ready for content analysis");expect(text).toContain("| Total | 1 | 1 | 1 | 0 | 1 | 0 | 0 |");
+  });
   it.each(["check yesterdaycalls", "check yesterdays calls", "yesterdaycalls", "give me report of yesterday calls", "how many calls yesterday"])("routes %s", q => expect(wantsStructuredCallReport(q)).toBe(true));
   it.each(["give me tips for calls", "write a post about yesterday's calls", "analyze James calls yesterday", "why did this call fail"])("preserves analysis and creative intent: %s", q => expect(wantsStructuredCallReport(q)).toBe(false));
   it("never turns a failed read into zero calls", () => {

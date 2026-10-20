@@ -14,8 +14,10 @@ export function renderCallReport(rows: ScorecardRow[], filter: CallReviewFilter,
   if (!complete) return `I couldn't verify the complete call roster for ${label} because the database read was incomplete. This does not mean there were zero calls. Please retry the report.`;
   if (!rows.length) return `No matching calls were found in the Brain for ${label}. This is a database lookup result; it does not prove that no calls exist in the scoring app or that synchronization has completed.`;
   const summary = consultantSummaryContext(rows).split("\n").filter(l => l.startsWith("|")).join("\n");
+  const pending = rows.filter(row => row.indexingPending).length;
   return [
-    `## Call report — ${label}`, `${rows.length} calls in the Brain's matching roster. Current CRM status and ticket classifications are shown separately from original call outcomes.`,
+    `## Call report — ${label}`, `${rows.length} ${rows.length === 1 ? "call" : "calls"} in the Brain's matching roster. Current CRM status and ticket classifications are shown separately from original call outcomes.`,
+    ...(pending ? [`${pending} newly received ${pending === 1 ? "call is" : "calls are"} listed with live status and ticket fields. Full report and transcript analysis are still indexing; they are not yet ready for content analysis.`] : []),
     "### Per-call details", "| Time | Consultant | Prospect | Practice | Call / Follow-up | Original Call Outcome | Current CRM Status | Closing Type | Score | Band | Duration |",
     "|---|---|---|---|---|---|---|---|---:|---|---:|",
     ...rows.map(r => `| ${[`${r.date}${r.time ? ` ${r.time}` : ""}`, r.consultant, r.prospect || "Unknown", r.practice || "Unknown", r.callSequence || "Unknown", r.originalOutcome || "Unknown", r.outcome || "Pending", r.closingType || "Unclassified", r.score == null ? "Unknown" : `${r.score}/100`, r.band || "Unknown", r.duration == null ? "Unknown" : `${r.duration} min`].map(cell).join(" | ")} |`),

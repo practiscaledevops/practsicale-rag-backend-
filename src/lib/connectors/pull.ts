@@ -95,6 +95,7 @@ function recordMetadata(rec: Record<string, unknown>): Record<string, unknown> {
   out.closing_type = rec.closing_type ?? null;
   out.source_updated_at = rec.updated_at ?? null;
   out.source_body_updated_at = rec.updated_at ?? null;
+  out.source_index_state = "ready";
   return out;
 }
 

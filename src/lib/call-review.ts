@@ -63,6 +63,7 @@ export interface ScorecardRow {
   closingType?: string;
   originalOutcome?: string;
   callSequence?: string;
+  indexingPending?: boolean;
   duration: number | null;
 }
 
@@ -170,6 +171,7 @@ function toScorecardRow(m: Record<string, unknown>, timeZone: string): Scorecard
     closingType: closingTypeLabel(m),
     originalOutcome: originalOutcomeLabel(m),
     callSequence: callSequenceLabel(m),
+      ...(m.source_index_state === "pending" ? { indexingPending: true } : {}),
     duration: m.call_duration_minutes != null ? Number(m.call_duration_minutes) : null,
   };
 }
@@ -1035,10 +1037,13 @@ export async function fetchCallsByFilter(
     const assembled = assembleCallSet(rowsByDoc, opts.maxCalls, opts.maxTokens);
     // Note from the AUTHORITATIVE total match count (query 1), which sees calls
     // beyond the ones we fetched in full.
-    const note =
+    const pending = scorecard.filter(row => row.indexingPending).length;
+    const note = [
+      ...(pending ? [`${pending} newly received call(s) have live metadata but transcript analysis is not ready. Do not infer their conversation content or claim to have analyzed them.`] : []),
       totalMatched > assembled.callCount
         ? `Showing ${assembled.callCount} of ${totalMatched} matching calls (the largest set that fits); ask for a specific consultant or a narrower window for the rest.`
-        : null;
+        : null,
+    ].filter(Boolean).join("\n") || null;
     return { chunks: assembled.chunks, callCount: assembled.callCount, note, scorecard, totalMatched };
   } catch (e) {
     console.error("[call-review] fetch error:", e instanceof Error ? e.message : e);

@@ -57,6 +57,38 @@ all existing calls once to repair historical changes missed by creation cursors.
 
 ## Verification and operations
 
+### Immediate new-call registration (2026-10-20)
+
+Apply `20261020135944_immediate_call_registration.sql` before deploying this
+version. The signed webhook fetches current scalar fields and calls the
+service-only `publish_scoring_metadata` transaction before acknowledging. It
+registers both call identities immediately, including calls Brain has never
+seen. A factual call-score summary supports keyword lookup; no transcript or
+placeholder embedding is fabricated. Full report/transcript embeddings and
+Performance Memory finish through the existing durable worker.
+
+`source_updated_at` identifies live scalar truth. `source_body_updated_at` stays
+null on new records until canonical indexing finishes, and `source_index_state`
+is `pending` until then. Reports include these calls in consultant totals but
+clearly say their transcript analysis is not ready. The same identity locks and
+revision checks protect registrations, replays, concurrent full indexing, and
+later status changes. A replay never replaces an indexed body with a summary.
+
+The authenticated `/api/v1/call-reports` subscription detects inserts as well as
+updates/deletions. The chatbot's active report automatically gains new rows and
+recomputes its consultant summary, even when its original roster was empty.
+Each report preserves its original calendar date and access scope. Hidden tabs
+pause network work and check immediately when reopened. Model selection has no
+effect on these database-computed reports.
+
+Run `scripts/verify-call-registration.sql` inside BEGIN/ROLLBACK to verify new
+identities, replay, pending updates, stale rejection, full indexing upgrades,
+and service-only permissions without leaving test data. Timing starts when the
+scoring application saves a completed call report; it does not include the
+source application's own transcription/scoring time. Direct database writes
+still use the source's minute-level outbox cron if no application delivery hook
+is invoked. Transient delivery failures use the durable retry path.
+
 `scripts/verify-scoring-sync.sql` checks replay, status replacement, stale
 revision rejection, atomic rollback, clearing metadata, duplicate repair and
 client permissions. The scoring repository's `database/verify-brain-sync.sql`
