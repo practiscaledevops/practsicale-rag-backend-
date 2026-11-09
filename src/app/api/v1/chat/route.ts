@@ -293,7 +293,7 @@ export async function POST(req: Request) {
         }
         const text = report ? renderCallReport(report.scorecard, filter, timeZone, report.complete !== false)
           : "I couldn't run a complete structured call lookup with the current permissions, source selection or date filter. Missing retrieved records do not mean there were zero calls. Specify a date or consultant, and use the Consultant calls scope if your access permits.";
-        dataStream.writeData({ type: "call_review", count: report?.totalMatched ?? 0, note: report?.note ?? null, filter: { date: filter.date ?? null, dateFrom: filter.dateFrom ?? null, dateTo: filter.dateTo ?? null, consultants: filter.consultants ?? null, practiceType: filter.practiceType ?? null }, timeZone });
+        dataStream.writeData({ type: "call_review", count: report?.totalMatched ?? 0, note: report?.note ?? null, filter: { date: filter.date ?? null, dateFrom: filter.dateFrom ?? null, dateTo: filter.dateTo ?? null, consultants: filter.consultants ?? null, practiceType: filter.practiceType ?? null, ticketCategory: filter.ticketCategory ?? null, crmStatus: filter.crmStatus ?? null, originalOutcome: filter.originalOutcome ?? null }, timeZone });
         dataStream.write(formatDataStreamPart("text", text));
         dataStream.writeData({ type: "generation_receipt", model: modelId, engine: "structured database report", mode: "call report", creative: false,
           words: text.split(/\s+/).length, evidenceDocuments: report?.scorecard.length ?? 0, evidenceChunks: 0,

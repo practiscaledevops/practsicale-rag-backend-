@@ -12,6 +12,9 @@ async function main() {
   const localDate = (v: string | number) => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Karachi", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(v));
   const today = localDate(Date.now());
   const allHistory = process.env.REPORT_ALL === "1";
+  const rangeFrom = process.env.REPORT_FROM, rangeTo = process.env.REPORT_TO;
+  if ((rangeFrom || rangeTo) && (!/^\d{4}-\d{2}-\d{2}$/.test(rangeFrom ?? "") || !/^\d{4}-\d{2}-\d{2}$/.test(rangeTo ?? ""))) throw Error("REPORT_FROM and REPORT_TO must be ISO dates");
+  const expectedTicket = process.env.REPORT_TICKET, expectedStatus = process.env.REPORT_STATUS;
   const yesterday = process.env.REPORT_DATE ?? new Date(Date.parse(`${today}T12:00:00Z`) - 86400_000).toISOString().slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(yesterday)) throw Error("REPORT_DATE must be YYYY-MM-DD");
   const records: any[] = [];
@@ -21,11 +24,12 @@ async function main() {
     const res = await fetch(url, { headers: { "x-api-key": process.env[source.auth_secret_ref] ?? "" }, signal: AbortSignal.timeout(45_000) });
     if (!res.ok) throw Error(`Source HTTP ${res.status}`);
     const rows = (await res.json()).data as any[];
-    records.push(...rows.filter(r => allHistory || localDate(r.created_at) === yesterday));
+    records.push(...rows.filter(r => (rangeFrom && rangeTo ? localDate(r.created_at) >= rangeFrom && localDate(r.created_at) <= rangeTo : allHistory || localDate(r.created_at) === yesterday)
+      && (!expectedTicket || r.ticket_category === expectedTicket) && (!expectedStatus || (r.call_status || "pending") === expectedStatus)));
     if (rows.length < 25) break;
   }
   const dates = records.map(r => localDate(r.created_at)).sort();
-  const scope = allHistory ? { from: dates[0], to: dates[dates.length - 1] } : { from: yesterday, to: yesterday };
+  const scope = rangeFrom && rangeTo ? {from:rangeFrom,to:rangeTo} : allHistory ? { from: dates[0], to: dates[dates.length - 1] } : { from: yesterday, to: yesterday };
   if (!records.length) throw Error("No source records in verification scope");
   const query = process.env.REPORT_QUERY ?? (allHistory ? `give me report of all calls from ${scope.from} to ${scope.to}` : process.env.REPORT_DATE ? `give me report of calls on ${yesterday}` : "give me report of yesterday calls");
   const env = Object.fromEntries(readFileSync(resolve("../practiscale-rag-chatbot/.env.local"), "utf8").split(/\r?\n/).flatMap(line => {
@@ -128,10 +132,12 @@ async function main() {
       passed: match != null };
   });
   const consultantSummaryPassed = consultantColumn >= 0 && countColumns.every((c, i) => c >= 0 || (i >= 7 && totals[i] === 0)) && summaryRows.length === expectedSummaryRows.length && summaryResults.every(r => r.passed);
-  const summary = { date: allHistory ? scope : yesterday, model: res.headers.get("x-model"), http: res.status, expectedCalls: records.length, reportedRows: rows.length,
+  const receipt=events.find(e=>e.type==="generation_receipt");
+  const structured=receipt?.engine === "structured database report";
+  const summary = { date: allHistory || rangeFrom ? scope : yesterday, ticket: expectedTicket, status: expectedStatus, query, engine:receipt?.engine, model: res.headers.get("x-model"), http: res.status, expectedCalls: records.length, reportedRows: rows.length,
     requiredColumnsPresent: Object.values(columns).every(c => c >= 0), matchedCalls: results.filter(r => r.passed).length, errors: errors.length,
     expectedConsultants: groups.size, consultantSummaryPassed, totals: Object.fromEntries(countHeaders.map((h, i) => [h, totals[i]])),
-    passed: res.ok && res.headers.get("x-model") === ({ fast: "gpt-6-luna", recommended: "gpt-6.1-sol", max: "gpt-6-astra" }[model] ?? (model || "gpt-6.1-sol")) && records.length > 0 && Object.values(columns).every(c => c >= 0) && rows.length === records.length && results.every(r => r.passed) && errors.length === 0 && consultantSummaryPassed };
+    passed: res.ok && structured && res.headers.get("x-model") === ({ fast: "gpt-6-luna", recommended: "gpt-6.1-sol", max: "gpt-6-astra" }[model] ?? (model || "gpt-6.1-sol")) && records.length > 0 && Object.values(columns).every(c => c >= 0) && rows.length === records.length && results.every(r => r.passed) && errors.length === 0 && consultantSummaryPassed };
   const directory = resolve("../verification"); mkdirSync(directory, { recursive: true });
   const path = resolve(directory, `live-daily-report-${Date.now()}.json`);
   const answerPath = path.replace(/\.json$/, ".md"); writeFileSync(answerPath, answer);
@@ -139,5 +145,6 @@ async function main() {
   console.log(JSON.stringify({ summary, headers, summaryHeaders, failed: results.filter(r => !r.passed).slice(0, 10), failedSummaryRows: summaryResults.filter(r => !r.passed), report: path }));
   if (!summary.passed) process.exitCode = 1;
   }
+  await auth.auth.signOut({scope:"local"});
 }
 main().catch(e => { console.error(e.message); process.exitCode = 1; });

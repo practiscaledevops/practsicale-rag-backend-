@@ -43,6 +43,10 @@ export interface CallReviewFilter {
   consultants?: string[];
   /** One of the six canonical practice types, if named. */
   practiceType?: string;
+  /** Ticket category is independent of whether the deal is currently closed. */
+  ticketCategory?: "low_ticket" | "high_ticket";
+  crmStatus?: "closed" | "not_closed" | "pending" | "disqualified";
+  originalOutcome?: "FOLLOW_UP" | "CLOSED" | "LOST";
   /** true = exhaustive review path should run (review intent + ≥1 filter dim). */
   isReview: boolean;
 }
@@ -92,7 +96,19 @@ const REVIEW_RE = new RegExp(
 /** True when the query carries a review/audit/analyse verb (no filter required). */
 export function looksLikeReview(query: string): boolean {
   const q = normalizeCallReportQuery(query);
-  return REVIEW_RE.test(q) || /^\s*(?:please\s+)?(?:today|yesterday)(?:['’]?s)?\s+calls?\s*[?.!]?\s*$/i.test(q) || /\bhow many\s+(?:[\w'’-]+\s+){0,3}calls?\b/i.test(q);
+  return REVIEW_RE.test(q) || isCallCountRequest(q) || isCallReportCreationRequest(q) || /^\s*(?:please\s+)?(?:today|yesterday)(?:['’]?s)?\s+calls?\s*[?.!]?\s*$/i.test(q);
+}
+
+/** Aggregate questions must use the full roster, never top-k evidence chunks. */
+export function isCallCountRequest(query: string): boolean {
+  return /\b(calls?|closings?)\b/i.test(query) &&
+    /\b(how many|total|count|number of|tally|breakdown|break down)\b/i.test(query) &&
+    !/\b(tips?|advice|ideas?|scripts?|strateg(?:y|ies)|examples?|ways?|how to)\b/i.test(query);
+}
+
+export function isCallReportCreationRequest(query: string): boolean {
+  return /\b(calls?|closings?)\b/i.test(query) && /\b(report|summary|breakdown)\b/i.test(query) &&
+    /\b(generate|create|prepare|produce)\b/i.test(query) && !/\b(post|script|email|blog|content|caption|newsletter)\b/i.test(query);
 }
 
 /** Common mobile typing joins must not turn a live report into a semantic sample. */
@@ -112,6 +128,7 @@ function pad2(n: number): string {
 }
 function toISO(y: number, m: number, d: number): string | undefined {
   if (m < 1 || m > 12 || d < 1 || d > 31) return undefined;
+  if (new Date(Date.UTC(y, m - 1, d)).getUTCDate() !== d) return undefined;
   return `${y}-${pad2(m)}-${pad2(d)}`;
 }
 function isISODate(s: string | undefined): s is string {
@@ -246,6 +263,22 @@ export function resolveDateRange(
     if (dates.length === 2) return { from: dates[0], to: dates[1] };
   }
   const ry = Number(ref.slice(0, 4));
+  const rangeOf = (a: string | undefined, b: string | undefined) => {
+    if (!a || !b) return undefined;
+    const [from,to] = [a,b].sort(); return { from,to };
+  };
+  // Natural calendar ranges: "1 to 11 November 2026", "Nov 1–11, 2026",
+  // and "1 Nov to 11 Nov 2026". The shared month/year applies to both ends.
+  const day = String.raw`(\d{1,2})(?:st|nd|rd|th)?`;
+  const join = String.raw`\s*(?:to|through|until|and|[-–—])\s*`;
+  let calendar = new RegExp(String.raw`\b${day}${join}${day}\s+(${MONTH_ALT})\.?(?:,?\s+(20\d{2}))?\b`, "i").exec(q);
+  if (calendar) return rangeOf(toISO(Number(calendar[4] || ry), MONTHS[calendar[3]], Number(calendar[1])),toISO(Number(calendar[4] || ry), MONTHS[calendar[3]], Number(calendar[2])));
+  calendar = new RegExp(String.raw`\b(${MONTH_ALT})\.?\s+${day}${join}${day}(?:,?\s+(20\d{2}))?\b`, "i").exec(q);
+  if (calendar) return rangeOf(toISO(Number(calendar[4] || ry),MONTHS[calendar[1]],Number(calendar[2])),toISO(Number(calendar[4] || ry),MONTHS[calendar[1]],Number(calendar[3])));
+  calendar = new RegExp(String.raw`\b${day}\s+(${MONTH_ALT})\.?(?:,?\s+(20\d{2}))?${join}${day}\s+(${MONTH_ALT})\.?(?:,?\s+(20\d{2}))?\b`, "i").exec(q);
+  if (calendar) return rangeOf(toISO(Number(calendar[3] || calendar[6] || ry),MONTHS[calendar[2]],Number(calendar[1])),toISO(Number(calendar[6] || calendar[3] || ry),MONTHS[calendar[5]],Number(calendar[4])));
+  calendar = new RegExp(String.raw`\b(${MONTH_ALT})\.?\s+${day}(?:,?\s+(20\d{2}))?${join}(${MONTH_ALT})\.?\s+${day}(?:,?\s+(20\d{2}))?\b`, "i").exec(q);
+  if (calendar) return rangeOf(toISO(Number(calendar[3] || calendar[6] || ry),MONTHS[calendar[1]],Number(calendar[2])),toISO(Number(calendar[6] || calendar[3] || ry),MONTHS[calendar[4]],Number(calendar[5])));
   const rm = Number(ref.slice(5, 7));
   const firstOf = (y: number, mo: number) => `${y}-${pad2(mo)}-01`;
   const lastOf = (y: number, mo: number) => {
@@ -305,6 +338,7 @@ const NAME_STOPWORDS = new Set<string>([
   "do", "did", "can", "could", "would", "should", "deep", "dive", "score", "scores", "grade", "compare",
   "coach", "them", "these", "those", "both", "everyone", "everybody", "team", "whole",
   "last", "this", "next", "past", "previous", "recent", "current", "week", "month", "year",
+  "low", "high", "ticket", "lt", "ht", "total", "count", "number", "closed", "pending", "not", "disqualified", "follow", "up", "closing", "closings",
 ]);
 
 // A broad run of capitalised tokens (each starts uppercase; possessive marks and
@@ -389,6 +423,16 @@ export function parseCallReviewFilter(
   const range = resolveDateRange(q, ref);
   const date = range ? undefined : resolveDate(q, ref);
   const practiceType = detectPracticeType(q);
+  const low = /\b(?:low[-\s]*ticket|lt)\b/i.test(q), high = /\b(?:high[-\s]*ticket|ht)\b/i.test(q);
+  const ticketCategory = low !== high ? low ? "low_ticket" as const : "high_ticket" as const : undefined;
+  const statuses = new Set<NonNullable<CallReviewFilter["crmStatus"]>>();
+  if (/\bnot[-\s]*closed\b/i.test(q)) statuses.add("not_closed");
+  if (/\bpending\b/i.test(q)) statuses.add("pending");
+  if (/\bdisqualified\b/i.test(q)) statuses.add("disqualified");
+  if (/\b(?:closed|closings?)\b/i.test(q.replace(/\bnot[-\s]*closed\b/gi,""))) statuses.add("closed");
+  const crmStatus = statuses.size === 1 ? [...statuses][0] : undefined;
+  // "Call 2+" and "original Follow Up outcome" are different source fields.
+  const originalOutcome = /\bfollow[-\s]*ups?\b/i.test(q) && !/\b(?:including|include|columns?|and|with)\b/i.test(q) ? "FOLLOW_UP" as const : undefined;
   let consultants = detectConsultants(q);
   // Fallback: match KNOWN consultant names case-insensitively, so a lowercase
   // first name ("audit of james calls") still resolves. The DB match is an
@@ -404,14 +448,18 @@ export function parseCallReviewFilter(
     }
     if (hits.size) consultants = [...hits];
   }
-  const hasFilter = !!date || !!range || !!practiceType || consultants.length > 0;
-  const isReview = hasFilter && looksLikeReview(q) && !GENERATION_RE.test(q);
+  const hasFilter = !!date || !!range || !!practiceType || !!ticketCategory || !!crmStatus || !!originalOutcome || consultants.length > 0 || isCallCountRequest(q) || isCallReportCreationRequest(q) ||
+    (looksLikeReview(q) && /\b(list|show|give|fetch|pull|check|report)\b/i.test(q));
+  const isReview = hasFilter && looksLikeReview(q) && (!GENERATION_RE.test(q) || isCallReportCreationRequest(q));
 
   const filter: CallReviewFilter = { isReview };
   if (range) { filter.dateFrom = range.from; filter.dateTo = range.to; }
   else if (date) filter.date = date;
   if (consultants.length) filter.consultants = consultants;
   if (practiceType) filter.practiceType = practiceType;
+  if (ticketCategory) filter.ticketCategory = ticketCategory;
+  if (crmStatus) filter.crmStatus = crmStatus;
+  if (originalOutcome) filter.originalOutcome = originalOutcome;
   return filter;
 }
 
@@ -422,6 +470,9 @@ export function describeFilter(f: CallReviewFilter): string {
   else if (f.dateFrom && f.dateTo) parts.push(f.dateFrom === f.dateTo ? f.dateFrom : `${f.dateFrom} to ${f.dateTo}`);
   if (f.consultants?.length) parts.push(f.consultants.join(" / "));
   if (f.practiceType) parts.push(`${f.practiceType} calls`);
+  if (f.ticketCategory) parts.push(f.ticketCategory === "low_ticket" ? "Low Ticket" : "High Ticket");
+  if (f.crmStatus) parts.push(`CRM ${f.crmStatus.replaceAll("_", " ")}`);
+  if (f.originalOutcome) parts.push(`original ${f.originalOutcome.replaceAll("_", " ")}`);
   return parts.join(" · ") || "matching calls";
 }
 
@@ -499,7 +550,7 @@ const MAX_PARSE_CHARS = 4000;
 const MAX_SUMMARY_PARSE_CHARS = 20_000;
 
 function hasFilterDims(f: CallReviewFilter): boolean {
-  return !!(f.date || (f.dateFrom && f.dateTo) || f.consultants?.length || f.practiceType);
+  return !!(f.date || (f.dateFrom && f.dateTo) || f.consultants?.length || f.practiceType || f.ticketCategory || f.crmStatus || f.originalOutcome);
 }
 
 /**
@@ -565,7 +616,13 @@ function mergeFilters(own: CallReviewFilter, prior: CallReviewFilter, query: str
   else if (prior.consultants?.length && !WIDEN_CONSULTANTS_RE.test(query)) out.consultants = [...prior.consultants];
   if (own.practiceType) out.practiceType = own.practiceType;
   else if (prior.practiceType && !WIDEN_PRACTICE_RE.test(query)) out.practiceType = prior.practiceType;
-  out.isReview = hasFilterDims(out);
+  if (own.ticketCategory) out.ticketCategory = own.ticketCategory;
+  else if (prior.ticketCategory && !/\b(?:all|both|any)\s+(?:ticket|categor)/i.test(query)) out.ticketCategory = prior.ticketCategory;
+  if (own.crmStatus) out.crmStatus = own.crmStatus;
+  else if (prior.crmStatus && !/\b(?:all|any)\s+(?:crm\s+)?status/i.test(query)) out.crmStatus = prior.crmStatus;
+  if (own.originalOutcome) out.originalOutcome = own.originalOutcome;
+  else if (prior.originalOutcome && !/\b(?:all|any)\s+(?:original\s+)?outcomes?/i.test(query)) out.originalOutcome = prior.originalOutcome;
+  out.isReview = hasFilterDims(out) || isCallCountRequest(query);
   return out;
 }
 
@@ -864,6 +921,10 @@ export async function matchingCallDocs(
         .lt("metadata->>created_at", dayBoundsUTC(filter.dateTo, timeZone).end);
     }
     if (filter.practiceType) out = out.ilike("metadata->>practice_type", filter.practiceType);
+    if (filter.ticketCategory) out = out.eq("metadata->>ticket_category", filter.ticketCategory);
+    if (filter.crmStatus === "pending") out = out.or("metadata->>call_status.is.null,metadata->>call_status.eq.pending");
+    else if (filter.crmStatus) out = out.eq("metadata->>call_status", filter.crmStatus);
+    if (filter.originalOutcome) out = out.eq("metadata->>call_outcome", filter.originalOutcome);
     const cands = (filter.consultants ?? []).map(sanitizeConsultant).filter(Boolean);
     if (cands.length) out = out.or(cands.map((c) => `metadata->>consultant_name.ilike.%${c}%`).join(","));
     return out;
@@ -952,6 +1013,10 @@ export function applyCallReviewFilter<T extends { eq: Function; ilike: Function;
         .lt("metadata->>created_at", dayBoundsUTC(filter.dateTo, timeZone).end);
     }
     if (filter.practiceType) out = out.ilike("metadata->>practice_type", filter.practiceType);
+    if (filter.ticketCategory) out = out.eq("metadata->>ticket_category", filter.ticketCategory);
+    if (filter.crmStatus === "pending") out = out.or("metadata->>call_status.is.null,metadata->>call_status.eq.pending");
+    else if (filter.crmStatus) out = out.eq("metadata->>call_status", filter.crmStatus);
+    if (filter.originalOutcome) out = out.eq("metadata->>call_outcome", filter.originalOutcome);
     const cands = (filter.consultants ?? []).map(sanitizeConsultant).filter(Boolean);
     if (cands.length) out = out.or(cands.map((c) => `metadata->>consultant_name.ilike.%${c}%`).join(","));
     return out;

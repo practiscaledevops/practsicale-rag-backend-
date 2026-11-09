@@ -8,6 +8,8 @@ describe("model-independent call reports", () => {
     expect(text).toContain("1 call in");expect(text).toContain("still indexing");expect(text).toContain("not yet ready for content analysis");expect(text).toContain("| Total | 1 | 1 | 1 | 0 | 1 | 0 | 0 |");
   });
   it.each(["check yesterdaycalls", "check yesterdays calls", "yesterdaycalls", "give me report of yesterday calls", "how many calls yesterday"])("routes %s", q => expect(wantsStructuredCallReport(q)).toBe(true));
+  it.each(["What is the total of LT calls from 1 to 11 November 2026 across all consultants?", "total low ticket calls this month", "count HT closings between 1 November and 11 November 2026", "number of pending calls", "Give me the total number of low-ticket calls", "how many follow up calls yesterday"])("routes complete ticket/status counts: %s",q=>expect(wantsStructuredCallReport(q)).toBe(true));
+  it.each(["generate a report of low ticket calls this month","create a call summary for yesterday"])("handles report generation as a structured report: %s",q=>expect(wantsStructuredCallReport(q)).toBe(true));
   it.each(["give me tips for calls", "write a post about yesterday's calls", "analyze James calls yesterday", "why did this call fail"])("preserves analysis and creative intent: %s", q => expect(wantsStructuredCallReport(q)).toBe(false));
   it("never turns a failed read into zero calls", () => {
     const text = renderCallReport([], { isReview: true, date: "2026-10-19" }, "Asia/Karachi", false);

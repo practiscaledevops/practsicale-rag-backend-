@@ -1,12 +1,13 @@
-import { describeFilter, looksLikeReview, normalizeCallReportQuery, type ScorecardRow, type CallReviewFilter } from "@/lib/call-review";
+import { describeFilter, looksLikeReview, normalizeCallReportQuery, isCallCountRequest, isCallReportCreationRequest, type ScorecardRow, type CallReviewFilter } from "@/lib/call-review";
 import { consultantSummaryContext } from "@/lib/call-report-summary";
 
 /** Plain operational reports use exact server rows, independent of the selected LLM. */
 export function wantsStructuredCallReport(query: string): boolean {
   const q = normalizeCallReportQuery(query);
-  return looksLikeReview(q) && /\b(calls?|report|consultant.wise|summary)\b/i.test(q) &&
-    (/\b(check|report|list|show|give|fetch|pull|summary|summarize|summarise|how many|total)\b/i.test(q) || /^\s*(?:today|yesterday)(?:['’]?s)?\s+calls?\s*[?.!]?\s*$/i.test(q)) &&
-    !/\b(why|coach|coaching|improve|recommend|critique|analy[sz]e|analysis|audit|write|draft|create|generate|script|post|content)\b/i.test(q);
+  return looksLikeReview(q) && /\b(calls?|closings?|report|consultant.wise|summary)\b/i.test(q) &&
+    (isCallCountRequest(q) || /\b(check|report|list|show|give|fetch|pull|summary|summarize|summarise|how many|total)\b/i.test(q) || /^\s*(?:today|yesterday)(?:['’]?s)?\s+calls?\s*[?.!]?\s*$/i.test(q)) &&
+    !/\b(why|coach|coaching|improve|recommend|critique|analy[sz]e|analysis|audit|write|draft|script|post|content)\b/i.test(q) &&
+    (!/\b(create|generate)\b/i.test(q) || isCallReportCreationRequest(q));
 }
 const cell = (v: unknown) => String(v ?? "Unknown").replace(/[\r\n]/g, " ").replace(/\|/g, "\\|");
 export function renderCallReport(rows: ScorecardRow[], filter: CallReviewFilter, timeZone: string, complete = true): string {
@@ -18,10 +19,11 @@ export function renderCallReport(rows: ScorecardRow[], filter: CallReviewFilter,
   return [
     `## Call report — ${label}`, `${rows.length} ${rows.length === 1 ? "call" : "calls"} in the Brain's matching roster. Current CRM status and ticket classifications are shown separately from original call outcomes.`,
     ...(pending ? [`${pending} newly received ${pending === 1 ? "call is" : "calls are"} listed with live status and ticket fields. Full report and transcript analysis are still indexing; they are not yet ready for content analysis.`] : []),
+    "### Consultant-wise Summary", summary, "",
     "### Per-call details", "| Time | Consultant | Prospect | Practice | Call / Follow-up | Original Call Outcome | Current CRM Status | Closing Type | Score | Band | Duration |",
     "|---|---|---|---|---|---|---|---|---:|---|---:|",
     ...rows.map(r => `| ${[`${r.date}${r.time ? ` ${r.time}` : ""}`, r.consultant, r.prospect || "Unknown", r.practice || "Unknown", r.callSequence || "Unknown", r.originalOutcome || "Unknown", r.outcome || "Pending", r.closingType || "Unclassified", r.score == null ? "Unknown" : `${r.score}/100`, r.band || "Unknown", r.duration == null ? "Unknown" : `${r.duration} min`].map(cell).join(" | ")} |`),
-    "", "### Consultant-wise Summary", summary, "",
+    "",
     "Follow Ups = original Follow Up outcome, and can overlap any current CRM status. High/Low Ticket Closings require current CRM Closed status and that ticket classification. Pending is not a closing. Unknown call sequence is not assumed to be Call 1.",
     "\nSource: the Brain's structured call roster. Counts are computed by the server, not estimated from retrieved transcript excerpts.",
   ].join("\n");

@@ -40,6 +40,11 @@ describe("live call reports",()=>{
     m.roster.mockClear();m.roster.mockImplementationOnce(async()=>{m.version="new";return {scorecard:[],totalMatched:0,complete:true};});
     expect((await POST(request())).status).toBe(200);expect(m.roster).toHaveBeenCalledTimes(2);
   });
+  it("replaces the report with an empty roster when its final call is deleted",async()=>{
+    m.count=1;m.roster.mockResolvedValueOnce({scorecard:[{consultant:"Test",prospect:"Disposable",date:"2026-10-20",time:"19:00",practice:"Home Care",score:40,band:null,outcome:"Closed",closingType:"High Ticket",originalOutcome:"Follow Up",callSequence:"Call 1",duration:2}],totalMatched:1,complete:true});
+    const before=await (await POST(request())).json();expect(before.content).toContain("Disposable");
+    m.count=0;const after=await (await POST(request({version:before.version}))).json();expect(after.version).not.toBe(before.version);expect(after.count).toBe(0);expect(after.content).toContain("No matching calls");expect(after.content).not.toContain("Disposable");
+  });
   it("returns a changed snapshot when the first new call enters a formerly empty roster",async()=>{
     m.count=0;const empty=await (await POST(request())).json();expect(empty.content).toContain("No matching calls");
     m.count=1;m.version="first-call";m.roster.mockResolvedValueOnce({scorecard:[{consultant:"Verification",prospect:"New call",date:"2026-10-20",time:"19:00",practice:"Home Care",score:40,band:null,outcome:"Pending",closingType:"High Ticket",originalOutcome:"Follow Up",callSequence:"Call 1",duration:2,indexingPending:true}],totalMatched:1,complete:true});

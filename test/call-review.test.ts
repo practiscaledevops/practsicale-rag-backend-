@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   parseCallReviewFilter,
   resolveDate,
+  resolveDateRange,
+  applyCallReviewFilter,
   detectPracticeType,
   detectConsultants,
   describeFilter,
@@ -13,6 +15,29 @@ import type { RetrievedChunk } from "@/lib/retrieval";
 // an omitted year (calls are dated in the data, not by the wall clock).
 const REF = "2026-09-22";
 const parse = (q: string) => parseCallReviewFilter(q, { referenceDate: REF });
+
+describe("complete operational count filters",()=>{
+  it.each(["1 to 11 November 2026", "1st to 11th Nov 2026", "November 1–11, 2026", "from 1 November to 11 November 2026", "between November 1 and November 11, 2026"])("preserves both natural calendar endpoints: %s",range=>{
+    expect(resolveDateRange(range,"2026-11-10")).toEqual({from:"2026-11-01",to:"2026-11-11"});
+  });
+  it("counts LT calls independently of CRM closure, and applies closed only for closings",()=>{
+    expect(parseCallReviewFilter("What is the total of LT calls from 1 to 11 November 2026 across all consultants?",{referenceDate:"2026-11-10"})).toEqual({isReview:true,dateFrom:"2026-11-01",dateTo:"2026-11-11",ticketCategory:"low_ticket"});
+    expect(parse("total HT closings")).toEqual({isReview:true,ticketCategory:"high_ticket",crmStatus:"closed"});
+    expect(parse("number of not closed calls")).toEqual({isReview:true,crmStatus:"not_closed"});
+    expect(parse("total pending calls")).toEqual({isReview:true,crmStatus:"pending"});
+    expect(parse("total follow up calls")).toEqual({isReview:true,originalOutcome:"FOLLOW_UP"});
+    expect(parse("total calls")).toEqual({isReview:true});
+  });
+  it("does not turn a requested full summary into a closed-only or single-ticket roster",()=>{
+    const f=parse("give me report of yesterday calls with follow ups high ticket and low ticket closings, closed not closed and pending");
+    expect(f.ticketCategory).toBeUndefined();expect(f.crmStatus).toBeUndefined();expect(f.originalOutcome).toBeUndefined();
+  });
+  it("enforces ticket, source, tenant, timestamp and nullable-pending predicates in the database",()=>{
+    const calls:unknown[]=[];const q:any={};for(const method of ["eq","gte","lt","or","ilike"])q[method]=(...args:unknown[])=>{calls.push([method,...args]);return q;};
+    applyCallReviewFilter(q,"tenant",{isReview:true,ticketCategory:"low_ticket",crmStatus:"pending",dateFrom:"2026-11-01",dateTo:"2026-11-11"},"Asia/Karachi");
+    expect(calls).toContainEqual(["eq","org_id","tenant"]);expect(calls).toContainEqual(["eq","source_type","transcript"]);expect(calls).toContainEqual(["eq","metadata->>ticket_category","low_ticket"]);expect(calls).toContainEqual(["or","metadata->>call_status.is.null,metadata->>call_status.eq.pending"]);expect(calls).toContainEqual(["gte","metadata->>created_at","2026-10-31T19:00:00.000Z"]);expect(calls).toContainEqual(["lt","metadata->>created_at","2026-11-11T19:00:00.000Z"]);
+  });
+});
 
 describe("resolveDate — every accepted format resolves to the call_date shape", () => {
   it("ISO", () => expect(resolveDate("review 2026-09-22 calls", REF)).toBe("2026-09-22"));
