@@ -1,9 +1,15 @@
-import { describeFilter, looksLikeReview, normalizeCallReportQuery, isCallCountRequest, isCallReportCreationRequest, type ScorecardRow, type CallReviewFilter } from "@/lib/call-review";
+import { describeFilter, looksLikeReview, normalizeCallReportQuery, isCallCountRequest, isCallReportCreationRequest, isCallReportFilterFollowUp, type ReviewHistoryTurn, type ScorecardRow, type CallReviewFilter } from "@/lib/call-review";
 import { consultantSummaryContext } from "@/lib/call-report-summary";
 
 /** Plain operational reports use exact server rows, independent of the selected LLM. */
-export function wantsStructuredCallReport(query: string): boolean {
+export function wantsStructuredCallReport(query: string, history: ReviewHistoryTurn[] = []): boolean {
   const q = normalizeCallReportQuery(query);
+  if (history.length && isCallReportFilterFollowUp(q)) {
+    const users=history.filter(t=>t.role === "user");
+    if (users.at(-1)?.content.trim() === query.trim()) users.pop();
+    const prior=users.pop();
+    if (prior && wantsStructuredCallReport(prior.content,users)) return true;
+  }
   return looksLikeReview(q) && /\b(calls?|closings?|report|consultant.wise|summary)\b/i.test(q) &&
     (isCallCountRequest(q) || /\b(check|report|list|show|give|fetch|pull|summary|summarize|summarise|how many|total)\b/i.test(q) || /^\s*(?:today|yesterday)(?:['’]?s)?\s+calls?\s*[?.!]?\s*$/i.test(q)) &&
     !/\b(why|coach|coaching|improve|recommend|critique|analy[sz]e|analysis|audit|write|draft|script|post|content)\b/i.test(q) &&

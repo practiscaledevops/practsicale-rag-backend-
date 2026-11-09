@@ -5,6 +5,8 @@ import { prepareChunkRows, type IngestParams, type IngestResult } from "@/lib/in
 import { redactPII } from "@/lib/redact";
 import { currentCallEvidence } from "@/lib/call-status";
 
+export type SourceSyncResult = Omit<IngestResult, "documentId"> & { documentId: string | null };
+
 /** Publish authoritative scalar fields without waiting for embeddings. The
  * registration RPC creates missing calls and updates both identities atomically, rejecting older
  * source revisions. Preserve the indexed-body revision separately until the
@@ -23,11 +25,12 @@ export async function syncSourceMetadata(db: SupabaseClient, params: {
     p_org_id: params.orgId, p_source_id: params.dataSourceId, p_record_id: params.recordId,
     p_metadata: meta, p_title: params.title ?? "Call record", p_summary: summary,
   });
+  if (error?.code === "PT410") return 0; // A deletion won the race with this fetched snapshot.
   if (error) throw Error("Scoring registration/metadata publication failed; durable worker will retry");
   return Array.isArray(data) ? data.length : 0;
 }
 
-export async function syncSourceDocument(db: SupabaseClient, params: IngestParams & { dataSourceId: string; recordId: string }): Promise<IngestResult> {
+export async function syncSourceDocument(db: SupabaseClient, params: IngestParams & { dataSourceId: string; recordId: string }): Promise<SourceSyncResult> {
   const cleanText = redactPII(params.text);
   const hash = createHash("sha256").update(cleanText).digest("hex");
   const { data, error } = await db.from("documents").select("id,content_hash,chunks(count)")
@@ -50,6 +53,7 @@ export async function syncSourceDocument(db: SupabaseClient, params: IngestParam
     p_metadata: params.metadata ?? {}, p_lane: { intelligence_class: params.intelligenceClass ?? "business_reality", domain: params.domain ?? "sales", object_id: params.objectId ?? null },
     p_chunks: rows,
   });
+  if (syncError?.code === "PT410") return { documentId: null, chunks: 0, skipped: true };
   if (syncError) throw new Error(`Source refresh failed (migration 0021 is required): ${syncError.message}`);
   const row = Array.isArray(result) ? result[0] : result;
   if (!row?.document_id) throw new Error("Source refresh returned no document");

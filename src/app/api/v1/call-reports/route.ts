@@ -10,7 +10,7 @@ import { capabilityGates, callReviewInScope } from "@/lib/orchestrator";
 import { supabaseAdmin } from "@/lib/supabase";
 import { checkRateLimit, rateLimitHeaders } from "@/lib/ratelimit";
 import { callerTimeZone, resolveTimeZone, todayIn } from "@/lib/timezone";
-import { applyCallReviewFilter, parseCallReviewFilter, knownConsultants, fetchCallsByFilter } from "@/lib/call-review";
+import { applyCallReviewFilter, resolveReviewFilterWithHistory, knownConsultants, fetchCallsByFilter } from "@/lib/call-review";
 import { renderCallReport, wantsStructuredCallReport } from "@/lib/call-report";
 
 export const runtime = "nodejs";
@@ -22,6 +22,7 @@ const schema = z.object({
   capabilities: z.array(z.string().max(100)).max(300).optional(),
   sourceTypes: z.array(z.string().max(100)).max(100).optional(), collectionIds: z.array(z.string().uuid()).max(50).optional(),
   knowledgeScope: z.enum(KNOWLEDGE_SCOPE_IDS).optional(),
+  history: z.array(z.object({role:z.literal("user"),content:z.string().max(4000),createdAt:z.string().datetime({offset:true}).optional()})).max(40).optional(),
 });
 const headers = { "cache-control": "private, no-store" };
 
@@ -39,10 +40,10 @@ export async function POST(req: Request) {
     if (!capabilityGates(body.capabilities).callReview || !callReviewInScope(scope) || knowledge.retrieval.callReview === "off") {
       return Response.json({ error: "Call reports are unavailable in this scope" }, { status: 403, headers });
     }
-    if (!wantsStructuredCallReport(body.query)) return Response.json({ error: "An operational call report query is required" }, { status: 400, headers });
+    if (!wantsStructuredCallReport(body.query,body.history)) return Response.json({ error: "An operational call report query is required" }, { status: 400, headers });
     const db = supabaseAdmin();
     const timeZone = resolveTimeZone(callerTimeZone(body.timeZone));
-    const filter = parseCallReviewFilter(body.query, { referenceDate: todayIn(timeZone), timeZone, knownConsultants: await knownConsultants(db, ctx.orgId) });
+    const filter = resolveReviewFilterWithHistory(body.query,body.history ?? [], { referenceDate: todayIn(timeZone), timeZone, knownConsultants: await knownConsultants(db, ctx.orgId) });
     const revision = async () => {
       const { data, count, error } = await applyCallReviewFilter(db.from("documents").select("id,updated_at", { count: "exact" }), ctx.orgId, filter, timeZone)
         .order("updated_at", { ascending: false }).order("id", { ascending: true }).limit(1);

@@ -57,6 +57,31 @@ all existing calls once to repair historical changes missed by creation cursors.
 
 ## Verification and operations
 
+### Automatic deletion (2026-10-21)
+
+Apply Brain `20261020185806_scoring_deletions.sql` and deploy Brain before
+deploying the scoring sender. Scoring `019_brain_delete_sync.sql` removes the
+outbox's cascading report foreign key and queues ID-only `operation: delete`
+events in the same transaction as report deletion. Single-report and consultant
+bulk deletion kick normal `after()` delivery. Direct SQL/integration writes
+without an application hook use the existing minute cron fallback.
+
+Brain durably stores the operation, verifies a successful empty exact source
+lookup, and atomically tombstones the ID and removes both call-score and
+transcript documents, chunks, collection memberships and retrieval rows before
+acknowledging. The service-only tombstone and document guard share ingestion's
+identity locks; delayed upserts, registrations, pulls and retries cannot recreate
+deleted calls. Source outages and live/nonmatching source rows never authorize
+deletion. The durable worker retries failures and rebuilds Performance Memory.
+
+Visible Brain document lists and live chatbot call reports detect the resulting
+count change automatically, including deletion of the final matching call. Live
+consultant totals are recomputed from the remaining roster with no model call
+or manual refresh. Existing ordinary chat prose remains historical; operational
+call reports display the current roster. `scripts/verify-scoring-deletions.sql`
+and scoring `database/verify-brain-delete-sync.sql` run inside rollback-only
+transactions to check deletion, replay, anti-resurrection and permissions.
+
 ### Immediate new-call registration (2026-10-20)
 
 Apply `20261020135944_immediate_call_registration.sql` before deploying this

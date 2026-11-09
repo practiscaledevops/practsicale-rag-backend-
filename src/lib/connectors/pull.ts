@@ -17,11 +17,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { supabaseAdmin } from "@/lib/supabase";
 import { serializeRecord } from "@/lib/chunking";
-import { ingestOne, type IngestResult } from "@/lib/ingest";
+import { ingestOne } from "@/lib/ingest";
 import { redactPII } from "@/lib/redact";
 import { assertPublicUrl } from "@/lib/net-guard";
 import { isAllowedSecretRef } from "@/lib/connectors/secret-ref";
-import { syncSourceDocument, syncSourceMetadata } from "@/lib/connectors/sync-document";
+import { syncSourceDocument, syncSourceMetadata, type SourceSyncResult } from "@/lib/connectors/sync-document";
 import { callStatusLabel, closingTypeLabel } from "@/lib/call-status";
 
 // Big free-text fields belong in the chunked BODY, not in metadata. The raw
@@ -146,7 +146,7 @@ async function ingestTranscript(
   rec: Record<string, unknown>,
   transcript: string,
   recordId: string | undefined
-): Promise<IngestResult | null> {
+): Promise<SourceSyncResult | null> {
   if (!transcript.trim()) return null;
 
   const consultant = str(rec.consultant_name) || str(rec.consultant) || "Unknown consultant";
@@ -618,7 +618,15 @@ export async function refreshScoringMetadata(db: SupabaseClient, source: DataSou
 export async function syncScoringRecord(db: SupabaseClient, source: DataSourceRow, recordId: string): Promise<void> {
   const records = await fetchRecords(source, Date.now() + 120_000, { ignoreCursor: true, forceTranscript: true, recordId, limit: 1 });
   const rec = records.find((row) => !!row && typeof row === "object" && String((row as Record<string, unknown>)[source.record_id_field ?? "id"]) === recordId) as Record<string, unknown> | undefined;
-  if (!rec) throw new Error("The scoring API did not return the requested report; its report_id filter must be deployed");
+  if (!rec) {
+    if (records.length) throw new Error("The scoring API did not return the requested report; its report_id filter must be deployed");
+    // An older upsert event can outlive its report. Only a previously verified
+    // deletion makes that event a no-op; empty/error feeds never imply deletion.
+    const { data: deleted, error } = await db.from("scoring_deleted_records").select("record_id")
+      .eq("org_id", source.org_id).eq("data_source_id", source.id).eq("record_id", recordId).maybeSingle();
+    if (!error && deleted) return;
+    throw new Error("The scoring API did not return the requested report; its report_id filter must be deployed");
+  }
   if (!rec.updated_at || !Number.isFinite(Date.parse(String(rec.updated_at)))) throw new Error("Scoring report has no revision; apply scoring migration 018 and deploy its API");
   const { transcript, ...report } = rec;
   const meta = recordMetadata(report);
@@ -627,6 +635,17 @@ export async function syncScoringRecord(db: SupabaseClient, source: DataSourceRo
     text: scoringText(report),
     metadata: { data_source: source.name, data_source_slug: source.slug ?? null, source_record_id: recordId, ...meta } }),
     typeof transcript === "string" && transcript.trim() ? ingestTranscript(db, source, report, transcript, recordId) : Promise.resolve(null)]);
+}
+
+/** Only a signed delete notification AND a successful exact source lookup with
+ * no rows authorize removal. A live row, bad filter, or outage fails closed. */
+export async function deleteScoringRecord(db: SupabaseClient, source: DataSourceRow, recordId: string, deletedAt: string): Promise<number> {
+  if (!Number.isFinite(Date.parse(deletedAt))) throw Error("Deletion revision unavailable");
+  const records = await fetchRecords(source, Date.now() + 8000, { ignoreCursor: true, metadataOnly: true, recordId, limit: 1 });
+  if (records.length !== 0) throw Error("Source deletion is not confirmed");
+  const { data, error } = await db.rpc("delete_scoring_record", { p_org_id: source.org_id, p_source_id: source.id, p_record_id: recordId, p_deleted_at: deletedAt });
+  if (error) throw Error("Scoring deletion publication failed; durable worker will retry");
+  return Number(data ?? 0);
 }
 
 function buildHeaders(source: DataSourceRow): Record<string, string> {

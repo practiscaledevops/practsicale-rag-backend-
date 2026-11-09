@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
-const m = vi.hoisted(() => ({ rpc: vi.fn(), sync: vi.fn(), rebuild: vi.fn(), writes: vi.fn(), source: vi.fn() }));
-vi.mock("@/lib/connectors/pull", () => ({ syncScoringRecord: m.sync }));
+const m = vi.hoisted(() => ({ rpc: vi.fn(), sync: vi.fn(), remove:vi.fn(), rebuild: vi.fn(), writes: vi.fn(), source: vi.fn() }));
+vi.mock("@/lib/connectors/pull", () => ({ syncScoringRecord: m.sync, deleteScoringRecord:m.remove }));
 vi.mock("@/lib/call-score-metrics", () => ({ rebuildCallScoreMetrics: m.rebuild }));
 vi.mock("@/lib/supabase", () => ({ supabaseAdmin: () => ({ rpc: m.rpc, from: (table: string) => {
   const q = {
@@ -22,6 +22,10 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllEnvs());
 describe("durable Brain inbox", () => {
+  it("retries verified deletion and rebuilds totals before completing its event",async()=>{
+    m.rpc.mockReset().mockResolvedValueOnce({data:[{...EVENT,operation:"delete",source_updated_at:"2026-10-20T10:00:00Z"}],error:null}).mockResolvedValue({data:[],error:null});
+    expect(await drainScoringEvents()).toBe(1);expect(m.sync).not.toHaveBeenCalled();expect(m.remove).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({id:"source"}),"report","2026-10-20T10:00:00Z");expect(m.rebuild).toHaveBeenCalledOnce();
+  });
   it("acknowledges only after source refresh and metrics both succeed", async () => {
     expect(await drainScoringEvents()).toBe(1);
     expect(m.sync).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: "source", org_id: "org" }), "report");

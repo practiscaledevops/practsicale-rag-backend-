@@ -2,7 +2,7 @@
 // rebuilds. Failures remain pending; the cron retries, including after a crash.
 import { randomUUID } from "node:crypto";
 import { supabaseAdmin } from "@/lib/supabase";
-import { syncScoringRecord, type DataSourceRow } from "./pull";
+import { syncScoringRecord, deleteScoringRecord, type DataSourceRow } from "./pull";
 import { rebuildCallScoreMetrics } from "@/lib/call-score-metrics";
 
 export async function drainScoringEvents(deadlineAt = Date.now() + 230_000): Promise<number> {
@@ -15,7 +15,7 @@ export async function drainScoringEvents(deadlineAt = Date.now() + 230_000): Pro
     // a long bootstrap batch. New events are claimed before older backfill work.
     const { data, error } = await db.rpc("claim_scoring_sync_events", { p_token: token, p_limit: 1 });
     if (error) throw new Error(`Scoring inbox unavailable: ${error.message}`);
-    const events = data as { id: string; org_id: string; data_source_id: string; record_id: string }[] | null;
+    const events = data as { id: string; org_id: string; data_source_id: string; record_id: string; operation?: string; source_updated_at?: string }[] | null;
     if (!events?.length) break;
     const ids = events.map(e => e.id);
     const orgId = events[0].org_id;
@@ -25,7 +25,10 @@ export async function drainScoringEvents(deadlineAt = Date.now() + 230_000): Pro
         const { data: source, error: sourceError } = await db.from("data_sources").select("*")
           .eq("id", event.data_source_id).eq("org_id", orgId).eq("source_type", "call_score").eq("is_active", true).maybeSingle();
         if (sourceError || !source) throw new Error("Call-scoring source is unavailable");
-        await syncScoringRecord(db, source as DataSourceRow, event.record_id);
+        if (event.operation === "delete") {
+          if (!event.source_updated_at) throw Error("Deletion revision is missing");
+          await deleteScoringRecord(db, source as DataSourceRow, event.record_id, event.source_updated_at);
+        } else await syncScoringRecord(db, source as DataSourceRow, event.record_id);
       }
       // Even an unchanged replay rebuilds metrics: the prior attempt may have
       // saved documents and crashed before updating the snapshot.

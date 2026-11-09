@@ -11,7 +11,7 @@ vi.mock("@/lib/connectors/sync-document", () => ({ syncSourceDocument: m.ingestO
 vi.mock("@/lib/net-guard", () => ({ assertPublicUrl: vi.fn(async () => {}) }));
 vi.mock("@/lib/supabase", () => ({ supabaseAdmin: () => ({}) }));
 
-import { backfillTranscripts, runPull, syncScoringRecord, refreshScoringMetadata, type DataSourceRow } from "@/lib/connectors/pull";
+import { backfillTranscripts, runPull, syncScoringRecord, refreshScoringMetadata, deleteScoringRecord, type DataSourceRow } from "@/lib/connectors/pull";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const SOURCE: DataSourceRow = {
@@ -53,6 +53,19 @@ afterEach(() => {
 });
 
 describe("pull connector — call dates", () => {
+  it("requires a successful empty exact lookup before publishing a signed deletion", async()=>{
+    const rpc = vi.fn(async()=>({data:2,error:null})); const db={rpc} as unknown as SupabaseClient;
+    respondWith([{id:"r1"}]); await expect(deleteScoringRecord(db,SOURCE,"r1","2026-10-20T10:00:00Z")).rejects.toThrow("not confirmed"); expect(rpc).not.toHaveBeenCalled();
+    respondWith([{id:"wrong-report"}]); await expect(deleteScoringRecord(db,SOURCE,"r1","2026-10-20T10:00:00Z")).rejects.toThrow("not confirmed");
+    vi.stubGlobal("fetch",vi.fn(async()=>new Response(null,{status:503}))); await expect(deleteScoringRecord(db,SOURCE,"r1","2026-10-20T10:00:00Z")).rejects.toThrow(); expect(rpc).not.toHaveBeenCalled();
+    respondWith([]); expect(await deleteScoringRecord(db,SOURCE,"r1","2026-10-20T10:00:00Z")).toBe(2);
+    expect(rpc).toHaveBeenCalledWith("delete_scoring_record",{p_org_id:SOURCE.org_id,p_source_id:SOURCE.id,p_record_id:"r1",p_deleted_at:"2026-10-20T10:00:00Z"});
+    const url=new URL(vi.mocked(fetch).mock.calls[0][0] as string);expect(url.searchParams.get("report_id")).toBe("r1");expect(url.searchParams.get("metadata_only")).toBe("true");
+  });
+  it("acknowledges an older missing upsert only when a scoped deletion was already verified", async()=>{
+    respondWith([]); const eq=vi.fn(); const q:any={select:()=>q,eq:(...args:unknown[])=>{eq(...args);return q;},maybeSingle:async()=>({data:{record_id:"r1"},error:null})};
+    await syncScoringRecord({from:()=>q} as unknown as SupabaseClient,SOURCE,"r1");expect(eq).toHaveBeenCalledWith("org_id",SOURCE.org_id);expect(eq).toHaveBeenCalledWith("data_source_id",SOURCE.id);expect(eq).toHaveBeenCalledWith("record_id","r1");expect(m.ingestOne).not.toHaveBeenCalled();
+  });
   it("fetches one authoritative scalar revision, preserving cleared status without reading or embedding transcripts", async()=>{
     respondWith([{id:"r1",created_at:"2026-10-19T10:00:00Z",updated_at:"2026-10-20T10:00:00Z",call_status:null,ticket_category:"high_ticket",overall_score:40,call_outcome:"FOLLOW_UP"}]);
     await refreshScoringMetadata({} as SupabaseClient,SOURCE,"r1");

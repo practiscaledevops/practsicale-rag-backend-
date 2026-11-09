@@ -2,10 +2,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 const m = vi.hoisted(() => ({ prepare: vi.fn(), rpc: vi.fn(), from: vi.fn() }));
 vi.mock("@/lib/ingest", () => ({ prepareChunkRows: m.prepare }));
-import { syncSourceMetadata } from "@/lib/connectors/sync-document";
+import { syncSourceMetadata, syncSourceDocument } from "@/lib/connectors/sync-document";
 const db={rpc:m.rpc,from:m.from} as unknown as SupabaseClient;
 beforeEach(()=>{vi.clearAllMocks();m.rpc.mockResolvedValue({data:[{document_id:"score",registered:true},{document_id:"transcript",registered:true}],error:null});});
 describe("fast scoring registration/publication",()=>{
+  it("treats a tombstone that won a concurrent write as a completed skip, never recreating content",async()=>{
+    m.rpc.mockResolvedValue({data:null,error:{code:"PT410",message:"Source call was deleted"}});
+    expect(await syncSourceMetadata(db,{orgId:"org",dataSourceId:"source",recordId:"r",metadata:{}})).toBe(0);
+    const q:any={select:()=>q,eq:()=>q,order:async()=>({data:[],error:null})};m.from.mockReturnValue(q);m.prepare.mockResolvedValue([]);
+    expect(await syncSourceDocument(db,{orgId:"org",dataSourceId:"source",recordId:"r",sourceType:"call_score",text:"old fetched body"})).toEqual({documentId:null,skipped:true,chunks:0});
+  });
   it("registers a brand new call and both identities without embedding or a read-before-create race",async()=>{
     expect(await syncSourceMetadata(db,{orgId:"org",dataSourceId:"source",recordId:"new-call",metadata:{source_record_id:"new-call",source_updated_at:"2026-10-20T00:00:00Z",consultant_name:"Test consultant",prospect_name:"Test prospect",call_status:null,ticket_category:"low_ticket",call_outcome:"FOLLOW_UP",overall_score:20}})).toBe(2);
     expect(m.rpc).toHaveBeenCalledOnce();expect(m.rpc).toHaveBeenCalledWith("publish_scoring_metadata",expect.objectContaining({p_org_id:"org",p_source_id:"source",p_record_id:"new-call",p_metadata:expect.objectContaining({call_status:null,ticket_category:"low_ticket"})}));

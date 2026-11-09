@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { renderCallReport, wantsStructuredCallReport } from "@/lib/call-report";
 import { fetchCallsByFilter } from "@/lib/call-review";
+import { resolveReviewFilterWithHistory } from "@/lib/call-review";
 import type { SupabaseClient } from "@supabase/supabase-js";
 describe("model-independent call reports", () => {
+  it("keeps the date and clears the prior LT restriction for the actual 'yes all calls' follow-up",()=>{
+    const history=[{role:"user",content:"what is the total number of LT calls taken by consultants from 1 nov to 11 nov 2026 give me full detyail"},{role:"user",content:"number of 10 nov calls"}];
+    expect(wantsStructuredCallReport("yes all calls",history)).toBe(true);
+    expect(resolveReviewFilterWithHistory("yes all calls",history,{referenceDate:"2026-11-10",knownConsultants:[]})).toEqual({isReview:true,date:"2026-11-10"});
+    expect(wantsStructuredCallReport("and write a post",history)).toBe(false);
+  });
   it("includes newly registered calls in totals while explicitly withholding transcript analysis", () => {
     const text=renderCallReport([{consultant:"Verification",prospect:"New call",date:"2026-10-20",time:"19:00",practice:"Home Care",score:40,band:null,outcome:"Closed",closingType:"High Ticket",originalOutcome:"Follow Up",callSequence:"Call 1",duration:2,indexingPending:true}],{isReview:true,date:"2026-10-20"},"Asia/Karachi");
     expect(text).toContain("1 call in");expect(text).toContain("still indexing");expect(text).toContain("not yet ready for content analysis");expect(text).toContain("| Total | 1 | 1 | 1 | 0 | 1 | 0 | 0 |");

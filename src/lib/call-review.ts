@@ -111,6 +111,13 @@ export function isCallReportCreationRequest(query: string): boolean {
     /\b(generate|create|prepare|produce)\b/i.test(query) && !/\b(post|script|email|blog|content|caption|newsletter)\b/i.test(query);
 }
 
+/** Small filter corrections are reports only in an existing report conversation. */
+export function isCallReportFilterFollowUp(query: string): boolean {
+  return query.trim().split(/\s+/).length <= 12 &&
+    /^(?:yes\b|all\s+calls?\b|and\b|what about\b|only\b|just\b|same for\b)/i.test(query.trim()) &&
+    !/\b(why|how to|coach|analy[sz]e|audit|write|draft|post|script|email|pricing|strategy)\b/i.test(query);
+}
+
 /** Common mobile typing joins must not turn a live report into a semantic sample. */
 export function normalizeCallReportQuery(query: string): string {
   return (query ?? "").replace(/\b(today|yesterday)(?:['’]?s)?(calls?)\b/gi, "$1 $2");
@@ -577,6 +584,7 @@ const FRAGMENT_FILLER = new Set<string>([
   "calls", "call", "transcripts", "transcript", "his", "her", "their", "those", "these", "them", "with",
   "yesterday", "yesterdays", "today", "todays", "last", "this", "past", "previous", "prior", "recent", "current",
   "day", "days", "week", "weeks", "month", "months", "year", "few", "st", "nd", "rd", "th",
+  "yes", "all", "low", "high", "ticket", "lt", "ht", "pending", "closed", "not", "disqualified", "follow", "up", "closings",
 ]);
 
 /** True when the turn is ONLY a filter swap: nothing but date / consultant / practice + filler words. */
@@ -597,6 +605,7 @@ function isShortFollowUp(query: string, own: CallReviewFilter): boolean {
   const words = q.split(/\s+/).filter(Boolean);
   if (!words.length || words.length > SHORT_FOLLOW_UP_WORDS) return false;
   if (GENERATION_RE.test(q)) return false;
+  if (isCallReportFilterFollowUp(q) && /\ball\s+calls?\b/i.test(q)) return true;
   // Naming a date / consultant / practice is a follow-up only when that is ALL the
   // turn says - "what's our NEMT pricing?" is a pricing question, not a review.
   if (hasFilterDims(own)) return isBareFilterFragment(q, own) || (FOLLOW_UP_VERB_RE.test(q) && !ACK_RE.test(q));
@@ -607,21 +616,22 @@ function isShortFollowUp(query: string, own: CallReviewFilter): boolean {
 /** `own` (what this turn names) over `prior` (the conversation's active filter), minus explicit widenings. */
 function mergeFilters(own: CallReviewFilter, prior: CallReviewFilter, query: string): CallReviewFilter {
   const out: CallReviewFilter = { isReview: false };
+  const allCalls = /\ball\s+calls?\b/i.test(query);
   const dateSrc = own.date || own.dateFrom ? own : WIDEN_DATE_RE.test(query) ? null : prior;
   if (dateSrc?.dateFrom && dateSrc.dateTo) {
     out.dateFrom = dateSrc.dateFrom;
     out.dateTo = dateSrc.dateTo;
   } else if (dateSrc?.date) out.date = dateSrc.date;
   if (own.consultants?.length) out.consultants = [...own.consultants];
-  else if (prior.consultants?.length && !WIDEN_CONSULTANTS_RE.test(query)) out.consultants = [...prior.consultants];
+  else if (prior.consultants?.length && !allCalls && !WIDEN_CONSULTANTS_RE.test(query)) out.consultants = [...prior.consultants];
   if (own.practiceType) out.practiceType = own.practiceType;
-  else if (prior.practiceType && !WIDEN_PRACTICE_RE.test(query)) out.practiceType = prior.practiceType;
+  else if (prior.practiceType && !allCalls && !WIDEN_PRACTICE_RE.test(query)) out.practiceType = prior.practiceType;
   if (own.ticketCategory) out.ticketCategory = own.ticketCategory;
-  else if (prior.ticketCategory && !/\b(?:all|both|any)\s+(?:ticket|categor)/i.test(query)) out.ticketCategory = prior.ticketCategory;
+  else if (prior.ticketCategory && !allCalls && !/\b(?:all|both|any)\s+(?:ticket|categor)/i.test(query)) out.ticketCategory = prior.ticketCategory;
   if (own.crmStatus) out.crmStatus = own.crmStatus;
-  else if (prior.crmStatus && !/\b(?:all|any)\s+(?:crm\s+)?status/i.test(query)) out.crmStatus = prior.crmStatus;
+  else if (prior.crmStatus && !allCalls && !/\b(?:all|any)\s+(?:crm\s+)?status/i.test(query)) out.crmStatus = prior.crmStatus;
   if (own.originalOutcome) out.originalOutcome = own.originalOutcome;
-  else if (prior.originalOutcome && !/\b(?:all|any)\s+(?:original\s+)?outcomes?/i.test(query)) out.originalOutcome = prior.originalOutcome;
+  else if (prior.originalOutcome && !allCalls && !/\b(?:all|any)\s+(?:original\s+)?outcomes?/i.test(query)) out.originalOutcome = prior.originalOutcome;
   out.isReview = hasFilterDims(out) || isCallCountRequest(query);
   return out;
 }

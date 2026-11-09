@@ -279,7 +279,7 @@ export async function POST(req: Request) {
 
       // A row-based report does not need semantic retrieval, transcript expansion
       // or an LLM to rewrite dates and arithmetic. Keep the same access gates.
-      if (wantsStructuredCallReport(query)) {
+      if (wantsStructuredCallReport(query, retrievalHistory)) {
         let report: Awaited<ReturnType<typeof fetchCallsByFilter>> | null = null;
         let filter = resolveReviewFilterWithHistory(query, retrievalHistory, { referenceDate: todayIn(timeZone), knownConsultants: [], timeZone });
         if (gates.callReview && callReviewInScope(scope) && knowledgeScope.retrieval.callReview !== "off") {

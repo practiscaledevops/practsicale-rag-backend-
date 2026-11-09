@@ -14,6 +14,10 @@ beforeEach(()=>{
   m.roster.mockResolvedValue({scorecard:[],totalMatched:0,complete:true});
 });
 describe("live call reports",()=>{
+  it("uses the conversation's date for a clarification and includes the resolved filter in the live version",async()=>{
+    const history=[{role:"user",content:"total LT calls from 1 to 11 November 2026"},{role:"user",content:"number of 10 nov calls"}];
+    const res=await POST(request({query:"yes all calls",history}));expect(res.status).toBe(200);expect((await res.json()).filter).toEqual({isReview:true,date:"2026-11-10"});
+  });
   it("authenticates and refuses capabilities/source/collection scope widening before reading",async()=>{
     m.ctx.mockRejectedValueOnce(new AuthError("Unauthorized",401));expect((await POST(request())).status).toBe(401);
     m.capabilities=[];expect((await POST(request())).status).toBe(403);

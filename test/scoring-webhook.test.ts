@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const m = vi.hoisted(() => ({ refresh: vi.fn(), from: vi.fn(), insertError: null as null | {code:string}, source: true, replayRecord: "22222222-2222-4222-8222-222222222222", after: vi.fn() }));
-vi.mock("@/lib/connectors/pull", () => ({ refreshScoringMetadata: m.refresh }));
+const m = vi.hoisted(() => ({ refresh: vi.fn(), remove: vi.fn(), from: vi.fn(), insertError: null as null | {code:string}, source: true, replayOperation:"upsert", replayRecord: "22222222-2222-4222-8222-222222222222", after: vi.fn() }));
+vi.mock("@/lib/connectors/pull", () => ({ refreshScoringMetadata: m.refresh, deleteScoringRecord:m.remove }));
 vi.mock("next/server", () => ({ after: m.after }));
 vi.mock("@/lib/connectors/scoring-events", () => ({ drainScoringEvents: vi.fn(async () => 0) }));
 vi.mock("@/lib/supabase", () => ({ supabaseAdmin: () => ({ from: m.from }) }));
@@ -18,9 +18,9 @@ const payload = () => JSON.stringify({ event_id:EVENT,report_id:REPORT,updated_a
 const call = (req:Request) => POST(req,{params:Promise.resolve({sourceId:SOURCE})});
 beforeEach(() => {
   m.refresh.mockResolvedValue(2);
-  vi.stubEnv("SCORING_WEBHOOK_SECRET",SECRET); vi.clearAllMocks(); m.insertError=null;m.source=true;m.replayRecord=REPORT;
+  vi.stubEnv("SCORING_WEBHOOK_SECRET",SECRET); vi.clearAllMocks(); m.insertError=null;m.source=true;m.replayRecord=REPORT;m.replayOperation="upsert";
   m.from.mockImplementation((table:string) => {
-    const q:any = { select:()=>q,eq:()=>q,insert:vi.fn(async()=>({error:m.insertError})),maybeSingle:async()=>({data:table==="data_sources"?(m.source?{id:SOURCE,org_id:"server-org"}:null):{data_source_id:SOURCE,record_id:m.replayRecord,status:"pending"},error:null}) };
+    const q:any = { select:()=>q,eq:()=>q,insert:vi.fn(async()=>({error:m.insertError})),maybeSingle:async()=>({data:table==="data_sources"?(m.source?{id:SOURCE,org_id:"server-org"}:null):{data_source_id:SOURCE,record_id:m.replayRecord,status:"pending",operation:m.replayOperation},error:null}) };
     return q;
   });
 });
@@ -40,7 +40,7 @@ describe("scoring webhook",()=>{
     const res=await call(request(payload()));expect(res.status).toBe(202);
     expect(await res.json()).toEqual({accepted:true,event_id:EVENT});
     const q=m.from.mock.results.find((_,i)=>m.from.mock.calls[i][0]==="scoring_sync_events")!.value;
-    expect(q.insert).toHaveBeenCalledWith({id:EVENT,org_id:"server-org",data_source_id:SOURCE,record_id:REPORT});
+    expect(q.insert).toHaveBeenCalledWith({id:EVENT,org_id:"server-org",data_source_id:SOURCE,record_id:REPORT,operation:"upsert",source_updated_at:expect.any(String)});
     expect(m.after).toHaveBeenCalledOnce();
   });
   it("does not acknowledge an undurable delivery",async()=>{m.insertError={code:"unavailable"};expect((await call(request(payload()))).status).toBe(503);expect(m.after).not.toHaveBeenCalled();});
@@ -57,4 +57,10 @@ describe("scoring webhook",()=>{
     m.replayRecord="44444444-4444-4444-8444-444444444444";expect((await call(request(payload()))).status).toBe(409);
   });
   it("does not accept an unknown or inactive source",async()=>{m.source=false;expect((await call(request(payload()))).status).toBe(404);});
+  it("publishes deletion before acknowledging and does not treat an operation collision as a replay",async()=>{
+    const body=JSON.stringify({...JSON.parse(payload()),operation:"delete"});
+    expect((await call(request(body))).status).toBe(202);expect(m.remove).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({id:SOURCE,org_id:"server-org"}),REPORT,expect.any(String));expect(m.refresh).not.toHaveBeenCalled();
+    m.insertError={code:"23505"};expect((await call(request(body))).status).toBe(409);
+    m.replayOperation="delete";expect((await call(request(body))).status).toBe(202);
+  });
 });

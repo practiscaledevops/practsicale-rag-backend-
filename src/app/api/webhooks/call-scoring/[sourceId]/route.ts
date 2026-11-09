@@ -3,12 +3,12 @@ import { after } from "next/server";
 import { z } from "zod";
 import { supabaseAdmin } from "@/lib/supabase";
 import { drainScoringEvents } from "@/lib/connectors/scoring-events";
-import { refreshScoringMetadata, type DataSourceRow } from "@/lib/connectors/pull";
+import { refreshScoringMetadata, deleteScoringRecord, type DataSourceRow } from "@/lib/connectors/pull";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1"];
 export const maxDuration = 300;
-const Event = z.object({ event_id: z.string().uuid(), report_id: z.string().uuid(), updated_at: z.string().datetime({ offset: true }) }).strict();
+const Event = z.object({ event_id: z.string().uuid(), report_id: z.string().uuid(), updated_at: z.string().datetime({ offset: true }), operation: z.enum(["upsert", "delete"]).default("upsert") }).strict();
 
 export async function POST(req: Request, { params }: { params: Promise<{ sourceId: string }> }) {
   const secret = process.env.SCORING_WEBHOOK_SECRET;
@@ -40,15 +40,20 @@ export async function POST(req: Request, { params }: { params: Promise<{ sourceI
   if (error || !source) return Response.json({ error: "Unknown scoring source" }, { status: 404 });
   // Org comes only from the registered source. The signed body carries IDs,
   // never an org or a snapshot that could overwrite newer source truth.
-  const { error: insertError } = await db.from("scoring_sync_events").insert({ id: parsed.data.event_id, org_id: source.org_id, data_source_id: source.id, record_id: parsed.data.report_id });
+  const { error: insertError } = await db.from("scoring_sync_events").insert({ id: parsed.data.event_id, org_id: source.org_id, data_source_id: source.id, record_id: parsed.data.report_id,
+    operation: parsed.data.operation, source_updated_at: parsed.data.updated_at });
   if (insertError && insertError.code !== "23505") return Response.json({ error: "Could not durably accept event; retry" }, { status: 503 });
   if (insertError) {
-    const { data: seen } = await db.from("scoring_sync_events").select("data_source_id,record_id,status").eq("id", parsed.data.event_id).eq("org_id", source.org_id).maybeSingle();
-    if (!seen || seen.data_source_id !== sourceId || seen.record_id !== parsed.data.report_id) return Response.json({ error: "Event id conflict" }, { status: 409 });
+    const { data: seen } = await db.from("scoring_sync_events").select("data_source_id,record_id,status,operation,source_updated_at").eq("id", parsed.data.event_id).eq("org_id", source.org_id).maybeSingle();
+    if (!seen || seen.data_source_id !== sourceId || seen.record_id !== parsed.data.report_id || seen.operation !== parsed.data.operation
+      || (seen.source_updated_at && Date.parse(seen.source_updated_at) !== Date.parse(parsed.data.updated_at))) return Response.json({ error: "Event id conflict" }, { status: 409 });
   }
   // Scalar truth must not wait behind the org's embedding/metrics lease. The
   // source has committed already; fetch its current values, never signed data.
-  try { await refreshScoringMetadata(db, source as DataSourceRow, parsed.data.report_id); }
+  try {
+    if (parsed.data.operation === "delete") await deleteScoringRecord(db, source as DataSourceRow, parsed.data.report_id, parsed.data.updated_at);
+    else await refreshScoringMetadata(db, source as DataSourceRow, parsed.data.report_id);
+  }
   catch { console.error("[scoring-sync] fast metadata refresh deferred to durable worker"); }
   after(() => drainScoringEvents().catch(() => console.error("[scoring-sync] background drain failed; cron will retry")));
   return Response.json({ accepted: true, event_id: parsed.data.event_id }, { status: 202 });
