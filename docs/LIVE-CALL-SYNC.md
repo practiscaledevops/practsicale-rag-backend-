@@ -57,6 +57,29 @@ all existing calls once to repair historical changes missed by creation cursors.
 
 ## Verification and operations
 
+### Complete operational reports (2026-11-10)
+
+Call totals, LT/HT categories, CRM statuses and original Follow Up outcomes route
+through the complete metadata roster, before semantic retrieval or persona/model
+generation. A low-ticket call does not require Closed status; a low-ticket
+closing requires both. Natural ranges such as `1 to 11 November 2026`,
+`November 1–11, 2026`, and `1 Nov to 11 Nov 2026` preserve both endpoints.
+Consultant summaries precede full per-call details.
+
+Short report clarifications retain the previous date. `yes all calls` explicitly
+removes the earlier consultant, practice, ticket, status and outcome narrowing.
+The live subscription receives bounded user-only filter history, so its date
+and ticket set match the chat's report rather than reverting to all-time data.
+Older model-generated text is never used as filter truth. The browser distinguishes
+an unrecognized report request, expired session and scope/access denial.
+
+`verify-live-daily-report.ts` supports `REPORT_FROM`, `REPORT_TO`, `REPORT_TICKET`,
+`REPORT_STATUS`, `REPORT_HISTORY`, `REPORT_MODE`, and `REPORT_MODEL`. It independently
+filters the source feed, matches every full row and consultant total, and requires
+the structured database engine receipt. Regression evidence from November 10:
+90 LT calls for November 1–11 (5 Closed, 85 Pending), 41 calls on November 10,
+and 353 LT calls all-time. These are verified snapshots, not hardcoded product values.
+
 ### Automatic deletion (2026-10-21)
 
 Apply Brain `20261020185806_scoring_deletions.sql` and deploy Brain before

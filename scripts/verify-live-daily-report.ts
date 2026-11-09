@@ -42,11 +42,13 @@ async function main() {
   const login = await auth.auth.signInWithPassword({ email: process.env.SETUP_ADMIN_EMAIL!, password: process.env.SETUP_ADMIN_PASSWORD! });
   if (login.error || (await auth.auth.getUser()).error) throw Error("Chatbot sign-in failed");
   const models = process.env.REPORT_MODELS?.split(",").filter(Boolean) ?? [process.env.REPORT_MODEL ?? ""];
+  const reportHistory = process.env.REPORT_HISTORY ? JSON.parse(process.env.REPORT_HISTORY) : [];
   for (const model of models) {
   const res = await fetch("https://practiscale-rag-chatbot.vercel.app/api/chat", { method: "POST",
     headers: { "content-type": "application/json", cookie: [...cookies].map(([k, v]) => `${k}=${v}`).join("; ") },
     // Deliberately omit model/tier and column instructions: test the live defaults.
     body: JSON.stringify({ messages: [
+      ...reportHistory,
       ...(process.env.REPORT_BAD_HISTORY ? [{ role: "user", content: "check yesterday calls", createdAt: "2026-10-19T12:00:00Z" }, { role: "assistant", content: "Yesterday was October 18. There were zero calls. The newest call is October 6." }] : []),
       { role: "user", content: query, createdAt: new Date().toISOString() }], ...(model ? { model } : {}), mode: process.env.REPORT_MODE ?? "general", timeZone: "Asia/Karachi" }), signal: AbortSignal.timeout(270_000) });
   const stream = await res.text(); let answer = ""; const errors: unknown[] = []; const events: any[] = [];
