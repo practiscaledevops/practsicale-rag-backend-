@@ -273,6 +273,11 @@ export async function POST(req: Request) {
     headers: { "x-model": modelId, "x-provider": provider, ...rateLimitHeaders(rl) },
     onError: (error) => {
       console.error("[v1/chat] stream error:", error);
+      const providerError = error as { statusCode?: number; data?: { error?: { code?: string } } } | null;
+      const code = providerError?.data?.error?.code;
+      if (providerError?.statusCode === 429 && (code === "credit_balance_exhausted" || code === "insufficient_quota")) {
+        return "The configured model provider has run out of API credits. Ask your administrator to restore credits for this provider.";
+      }
       return "The assistant hit an error while generating the answer. Please try again.";
     },
     execute: (dataStream) => withModelRequest(requestSignal, async () => {
