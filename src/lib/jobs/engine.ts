@@ -121,31 +121,11 @@ export async function planJob(job: Job): Promise<number> {
   return planned.length;
 }
 
-/** Optimistically claim one queued task (org-scoped if given), or null when the
- *  queue is empty. Fetches a small window and tries each so parallel workers
- *  don't give up early just because a peer grabbed the first candidate. */
+
 async function claimNextTask(orgId?: string): Promise<JobTask | null> {
-  const db = supabaseAdmin();
-  for (let attempt = 0; attempt < 6; attempt++) {
-    let q = db.from("job_tasks").select("id").eq("status", "queued").order("idx", { ascending: true }).limit(10);
-    if (orgId) q = q.eq("org_id", orgId);
-    const { data: candidates } = await q;
-    const ids = (candidates ?? []).map((c) => (c as { id: string }).id);
-    if (ids.length === 0) return null; // queue genuinely empty
-    for (const id of ids) {
-      // Claim only if still queued (loser of a race gets 0 rows → try the next).
-      const { data: claimed } = await db
-        .from("job_tasks")
-        .update({ status: "running", started_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-        .eq("id", id)
-        .eq("status", "queued")
-        .select(TASK_COLUMNS)
-        .maybeSingle();
-      if (claimed) return claimed as JobTask;
-    }
-    // Every candidate was taken between select and update — fetch a fresh window.
-  }
-  return null;
+  const { data, error } = await supabaseAdmin().rpc("claim_recoverable_job_task", { p_org: orgId ?? null });
+  if (error) throw new Error(error.message);
+  return (data?.[0] as JobTask) ?? null;
 }
 
 async function getJobRow(jobId: string): Promise<Job | null> {
@@ -158,20 +138,21 @@ async function getJobRow(jobId: string): Promise<Job | null> {
 async function runClaimedTask(task: JobTask): Promise<void> {
   const db = supabaseAdmin();
   const job = await getJobRow(task.job_id);
-  if (!job) return;
+  if (!job || job.status !== "running") return;
+  if (task.status === "failed") { await bumpAndMaybeFinalize(job.id); return; }
   try {
     const result = await handlerFor(job.type).runTask(job, task);
     await db
       .from("job_tasks")
-      .update({ status: "completed", result: result ?? null, attempts: task.attempts + 1, finished_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-      .eq("id", task.id);
+      .update({ status: "completed", result: result ?? null, lease_until: null, finished_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq("id", task.id).eq("status", "running").eq("attempts", task.attempts).gt("lease_until", new Date().toISOString());
     await bumpAndMaybeFinalize(job.id);
   } catch (e) {
     const message = e instanceof Error ? e.message : "task failed";
     await db
       .from("job_tasks")
-      .update({ status: "failed", error: message.slice(0, 2000), attempts: task.attempts + 1, finished_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-      .eq("id", task.id);
+      .update({ status: "failed", error: message.slice(0, 2000), lease_until: null, finished_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq("id", task.id).eq("status", "running").eq("attempts", task.attempts).gt("lease_until", new Date().toISOString());
     await bumpAndMaybeFinalize(job.id);
   }
 }
@@ -227,6 +208,12 @@ async function bumpAndMaybeFinalize(jobId: string): Promise<void> {
 export async function drainTasks(
   opts: { orgId?: string; maxTasks?: number; deadlineAt?: number; concurrency?: number } = {}
 ): Promise<number> {
+  const pending = await supabaseAdmin().rpc("jobs_ready_to_finalize", { p_org: opts.orgId ?? null });
+  if (pending.error) throw new Error(pending.error.message);
+  for (const id of (pending.data ?? []) as string[]) {
+    if (opts.deadlineAt && Date.now() >= opts.deadlineAt) return 0;
+    await bumpAndMaybeFinalize(id);
+  }
   const maxTasks = opts.maxTasks ?? 100;
   const concurrency = Math.max(1, opts.concurrency ?? (Number(process.env.JOB_CONCURRENCY) || 5));
   let ran = 0;

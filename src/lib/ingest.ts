@@ -182,25 +182,47 @@ export async function ingestOne(db: SupabaseClient, params: IngestParams): Promi
     p_org_id: params.orgId, p_document_id: documentId, p_document: document,
     p_chunks: chunks, p_collection_ids: cols, p_allow_duplicate: params.allowDuplicate ?? false,
   });
-  if (!params.allowDuplicate) {
-    const { data: existing, error: lookupError } = await commit(null);
-    if (lookupError) throw new Error(lookupError.message);
-    const found = Array.isArray(existing) ? existing[0] : existing;
-    if (found?.document_id) return { documentId: found.document_id, chunks: 0, skipped: true };
+  const scope = createHash("sha256").update(JSON.stringify([
+    params.orgId, document.source_type, document.data_source_id, contentHash,
+    params.intelligenceClass ?? null, params.domain ?? null, params.objectId ?? null,
+  ])).digest("hex");
+  let claimed = false;
+  try {
+    if (!params.allowDuplicate) {
+      const { data: existing, error: lookupError } = await commit(null);
+      if (lookupError) throw new Error(lookupError.message);
+      const found = Array.isArray(existing) ? existing[0] : existing;
+      if (found?.document_id) return { documentId: found.document_id, chunks: 0, skipped: true };
+    }
+    if (!params.allowDuplicate) {
+      const { data, error } = await db.rpc("claim_ingest_slot", { p_scope: scope, p_owner: documentId });
+      if (error) throw new Error(error.message);
+      if (data !== documentId) throw new Error("Identical content is being prepared. Retry after the upload finishes.");
+      claimed = true;
+      const { data: existing, error: lookupError } = await commit(null);
+      if (lookupError) throw new Error(lookupError.message);
+      const found = Array.isArray(existing) ? existing[0] : existing;
+      if (found?.document_id) return { documentId: found.document_id, chunks: 0, skipped: true };
+    }
+    const rows = await prepareChunkRows(db, {
+      orgId: params.orgId, documentId, cleanText, sourceType: params.sourceType,
+      metadata: params.metadata ?? {}, dataSourceId: params.dataSourceId ?? null, cols,
+      chunkStrategy: params.chunkStrategy ?? "auto", contextPrefix: params.contextPrefix ?? null,
+      contextualize: params.contextualize, intelligenceClass: params.intelligenceClass,
+      domain: params.domain, objectId: params.objectId,
+    });
+    if (!rows.length) throw new Error("Document has no searchable content");
+    const { data, error } = await commit(rows);
+    if (error) throw new Error(error.message);
+    const result = Array.isArray(data) ? data[0] : data;
+    if (!result?.document_id) throw new Error("Document commit did not return an identity");
+    return { documentId: result.document_id, chunks: result.chunks, skipped: result.skipped };
+  } finally {
+    if (claimed) {
+      const { error } = await db.rpc("release_ingest_slot", { p_scope: scope, p_owner: documentId });
+      if (error) console.warn("Could not release ingestion reservation:", error.message);
+    }
   }
-  const rows = await prepareChunkRows(db, {
-    orgId: params.orgId, documentId, cleanText, sourceType: params.sourceType,
-    metadata: params.metadata ?? {}, dataSourceId: params.dataSourceId ?? null, cols,
-    chunkStrategy: params.chunkStrategy ?? "auto", contextPrefix: params.contextPrefix ?? null,
-    contextualize: params.contextualize, intelligenceClass: params.intelligenceClass,
-    domain: params.domain, objectId: params.objectId,
-  });
-  if (!rows.length) throw new Error("Document has no searchable content");
-  const { data, error } = await commit(rows);
-  if (error) throw new Error(error.message);
-  const result = Array.isArray(data) ? data[0] : data;
-  if (!result?.document_id) throw new Error("Document commit did not return an identity");
-  return { documentId: result.document_id, chunks: result.chunks, skipped: result.skipped };
 }
 
 export interface ReingestParams extends LaneIdentity {

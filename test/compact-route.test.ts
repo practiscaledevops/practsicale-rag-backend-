@@ -138,3 +138,5 @@ describe("POST /api/v1/compact", () => {
     expect(res.status).toBe(400);
   });
 });
+
+vi.mock("@/lib/ratelimit", async (original) => ({ ...(await original<typeof import("@/lib/ratelimit")>()), checkRateLimit: async () => ({ok:true,limit:120,remaining:119,retryAfter:60}) }));

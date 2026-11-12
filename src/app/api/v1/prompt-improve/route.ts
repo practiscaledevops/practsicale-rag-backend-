@@ -17,7 +17,7 @@ export async function POST(req: Request) {
   let ctx;
   try { ctx = await resolveContext(req); requireCapability(ctx.key, "chat"); }
   catch (e) { if (e instanceof AuthError) return Response.json({ error: e.message }, { status: e.status }); throw e; }
-  const limited = checkRateLimit(ctx.key.id, Math.min(ctx.key.rate_limit_per_min || 20, 20));
+  const limited = await checkRateLimit(ctx.key.id, Math.min(ctx.key.rate_limit_per_min || 20, 20));
   if (!limited.ok) return Response.json({ error: "Rate limited" }, { status: 429 });
   const body = input.safeParse(await req.json().catch(() => null));
   if (!body.success) return Response.json({ error: "Invalid prompt" }, { status: 400 });

@@ -37,7 +37,7 @@ export async function POST(req: Request) {
     return Response.json({ error: err.message }, { status: err.status ?? 401 });
   }
 
-  const rl = checkRateLimit(ctx.key.id, ctx.key.rate_limit_per_min);
+  const rl = await checkRateLimit(ctx.key.id, ctx.key.rate_limit_per_min);
   if (!rl.ok) {
     return Response.json(
       { error: "Rate limit exceeded. Try again shortly." },

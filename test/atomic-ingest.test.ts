@@ -38,9 +38,21 @@ describe("atomic document publication",()=>{
    expect(mocks.embed).not.toHaveBeenCalled();expect(db.rpc.mock.calls[0][1].p_chunks).toBeNull();
  });
  it("accepts the canonical identity when a concurrent upload wins the commit",async()=>{
-   const db=database();db.rpc.mockResolvedValueOnce({data:[],error:null}).mockResolvedValueOnce({data:[{document_id:"winner",skipped:true,chunks:0}],error:null});
+   const db=database();
+   let checks=0;
+   db.rpc.mockImplementation(async (name, args) => {
+     if (name==="claim_ingest_slot") return {data:args.p_owner,error:null};
+     if (name==="release_ingest_slot") return {data:null,error:null};
+     return {data:++checks<3?[]:[{document_id:"winner",skipped:true,chunks:0}],error:null};
+   });
    expect(await ingestOne(db as any,{orgId:"org",sourceType:"document",text:"Shared evidence"})).toMatchObject({documentId:"winner",skipped:true});
-   expect(db.from).not.toHaveBeenCalled();expect(db.rpc).toHaveBeenCalledTimes(2);
+   expect(db.from).not.toHaveBeenCalled();expect(db.rpc).toHaveBeenCalledTimes(5);
+ });
+ it("does not start embeddings when a peer holds the preparation reservation",async()=>{
+   const db=database();
+   db.rpc.mockResolvedValueOnce({data:[],error:null}).mockResolvedValueOnce({data:null,error:null});
+   await expect(ingestOne(db as any,{orgId:"org",sourceType:"document",text:"Shared evidence"})).rejects.toThrow("being prepared");
+   expect(mocks.embed).not.toHaveBeenCalled();
  });
  it("preserves explicitly permitted duplicate knowledge objects",async()=>{
    const db=database();await ingestOne(db as any,{orgId:"org",sourceType:"document",text:"Compiled evidence",allowDuplicate:true});

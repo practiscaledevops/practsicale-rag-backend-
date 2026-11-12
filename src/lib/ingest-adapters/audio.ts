@@ -1,3 +1,4 @@
+import { reserveUsage } from "@/lib/provider-usage";
 // Voice note / call recording → transcript, via OpenAI transcription. The key
 // comes from getProviderKey (dashboard-set key overrides env — same as
 // embeddings.ts); the client is built per call so a rotated key is picked up.
@@ -60,12 +61,20 @@ export async function transcribeAudio(buffer: Buffer, filename: string, mime?: s
   let text = "";
   let duration: number | undefined;
   try {
+    const settle = await reserveUsage("openai", PRIMARY_MODEL, 16000, 2000);
     const r = await client.audio.transcriptions.create({ file: await upload(), model: PRIMARY_MODEL, response_format: "json" });
+    const usage = (r as { usage?: { type?: string; input_tokens?: number; output_tokens?: number } }).usage;
+    if (usage?.type === "tokens" && usage.input_tokens != null && usage.output_tokens != null) await settle(usage.input_tokens, usage.output_tokens);
     text = r.text ?? "";
   } catch (e) {
     if (!isModelError(e)) throw toExtractError(e, "Transcription");
     if (Date.now() - startedAt > 50_000) throw toExtractError(e, "Transcription");
     try {
+      // The legacy model returns duration rather than token usage. No verified
+      // duration bound is available before upload, so a capped deployment
+      // must not fall back to it. Uncapped attempts remain visible as unknown.
+      if (process.env.BRAIN_DAILY_MODEL_BUDGET_USD !== undefined) throw new Error("Legacy transcription is unavailable with a model spending limit");
+      await reserveUsage("openai", FALLBACK_MODEL, 0, 0);
       const r = await client.audio.transcriptions.create({ file: await upload(), model: FALLBACK_MODEL, response_format: "verbose_json" });
       text = r.text ?? "";
       if (Number.isFinite(r.duration)) duration = Math.round(r.duration);

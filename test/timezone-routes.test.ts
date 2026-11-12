@@ -334,3 +334,5 @@ describe("POST /api/admin/jobs — the zone is resolved and stored in the job pa
     });
   });
 });
+
+vi.mock("@/lib/ratelimit", async (original) => ({ ...(await original<typeof import("@/lib/ratelimit")>()), checkRateLimit: async () => ({ok:true,limit:120,remaining:119,retryAfter:60}) }));

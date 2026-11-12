@@ -30,7 +30,7 @@ export async function POST(req: Request) {
   try {
     const ctx = await resolveContext(req);
     requireCapability(ctx.key, "chat");
-    const rl = checkRateLimit(`call-reports:${ctx.key.id}`, ctx.key.rate_limit_per_min);
+    const rl = await checkRateLimit(`call-reports:${ctx.key.id}`, ctx.key.rate_limit_per_min);
     if (!rl.ok) return Response.json({ error: "Too many live report requests" }, { status: 429, headers: { ...headers, ...rateLimitHeaders(rl) } });
     const parsed = schema.safeParse(await req.json().catch(() => null));
     if (!parsed.success) return Response.json({ error: "Invalid live report request" }, { status: 400, headers });

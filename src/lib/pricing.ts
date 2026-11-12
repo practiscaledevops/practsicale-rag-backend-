@@ -12,11 +12,14 @@ export interface Rate {
 }
 
 export const PRICING: Record<string, Rate> = {
+  "text-embedding-3-large": { inputPer1M: 0.13, outputPer1M: 0 },
+  "text-embedding-3-small": { inputPer1M: 0.02, outputPer1M: 0 },
   // Anthropic (Claude) — family-level keys.
   "claude-opus": { inputPer1M: 5, outputPer1M: 25 },
   "claude-sonnet": { inputPer1M: 3, outputPer1M: 15 },
   "claude-haiku": { inputPer1M: 1, outputPer1M: 5 },
   // OpenAI (GPT) — the "gpt-4o-mini" key wins over "gpt-4o" via longest-prefix.
+  "gpt-4o-mini-transcribe": { inputPer1M: 1.25, outputPer1M: 5 },
   "gpt-4o-mini": { inputPer1M: 0.15, outputPer1M: 0.6 },
   "gpt-4o": { inputPer1M: 2.5, outputPer1M: 10 },
   // Official OpenAI list rates, checked 2026-10-20. Billing remains authoritative.

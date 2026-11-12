@@ -34,7 +34,7 @@ describe("request cancellation reaches every model helper", () => {
     });
     const model = boundModel({ specificationVersion: "v1", provider: "fixture", modelId: "fixture", doGenerate } as any);
     const abort = new AbortController();
-    const result = withModelRequest(abort.signal, () => model.doGenerate({} as any)).catch(e => e);
+    const result = withModelRequest(abort.signal, () => Promise.resolve(model.doGenerate({} as any))).catch(e => e);
     await vi.waitFor(() => expect(doGenerate).toHaveBeenCalledOnce());
     abort.abort();
     expect((await result).name).toBe("AbortError"); expect(observed.aborted).toBe(true);

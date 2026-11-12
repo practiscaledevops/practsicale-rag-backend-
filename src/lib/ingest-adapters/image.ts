@@ -1,3 +1,4 @@
+import { reserveUsage } from "@/lib/provider-usage";
 // Screenshot / photo → the text in it, via OpenAI vision (GPT-6.1 Sol). The
 // model is told to transcribe only — tables as Markdown, charts as their data,
 // no commentary — so what lands in the Brain is the source, not an opinion.
@@ -31,10 +32,11 @@ export async function extractImageText(buffer: Buffer, mime: string): Promise<Ex
 
   const key = await getProviderKey("openai");
   if (!key) throw new ExtractError(NO_KEY_MESSAGE, 400);
-  const client = new OpenAI({ apiKey: key, maxRetries: 1, timeout: 90_000 });
+  const client = new OpenAI({ apiKey: key, maxRetries: 0, timeout: 90_000 });
 
   let text = "";
   try {
+    const settle = await reserveUsage("openai", MODEL, 32768, 6144);
     const r = await client.chat.completions.create({
       model: MODEL,
       reasoning_effort: "low",
@@ -52,6 +54,7 @@ export async function extractImageText(buffer: Buffer, mime: string): Promise<Ex
         },
       ],
     });
+    if (r.usage) await settle(r.usage.prompt_tokens, r.usage.completion_tokens);
     text = r.choices[0]?.message?.content?.trim() ?? "";
   } catch (e) {
     if (e instanceof OpenAI.APIError) {
