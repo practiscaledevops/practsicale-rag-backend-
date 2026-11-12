@@ -11,6 +11,9 @@ export function wantsStructuredCallReport(query: string, history: ReviewHistoryT
     const prior=users.pop();
     if (prior && wantsStructuredCallReport(prior.content,users)) return true;
   }
+  // "Summarize our services ... not a long report" is not a call roster.
+  // Require an operational subject; generic summary/report verbs are insufficient.
+  if (!/\b(calls?|closings?|consultants?)\b/i.test(q)) return false;
   return looksLikeReview(q) && /\b(calls?|closings?|report|consultant.wise|summary)\b/i.test(q) &&
     (isCallCountRequest(q) || /\b(check|report|list|show|give|fetch|pull|summary|summarize|summarise|how many|total)\b/i.test(q) || /^\s*(?:today|yesterday)(?:['’]?s)?\s+calls?\s*[?.!]?\s*$/i.test(q)) &&
     !/\b(why|coach|coaching|improve|recommend|critique|analy[sz]e|analysis|audit|write|draft|script|post|content)\b/i.test(q) &&

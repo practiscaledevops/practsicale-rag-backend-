@@ -4,6 +4,7 @@ import { fetchCallsByFilter } from "@/lib/call-review";
 import { resolveReviewFilterWithHistory } from "@/lib/call-review";
 import type { SupabaseClient } from "@supabase/supabase-js";
 describe("model-independent call reports", () => {
+  it.each(["Summarize PractiScale's documented services. This is a concise quality check, not a request for a full course or long report.","Give me a report about our onboarding promise", "Summarize our hiring process"])("does not hijack general requests: %s",q=>expect(wantsStructuredCallReport(q)).toBe(false));
   it("keeps the date and clears the prior LT restriction for the actual 'yes all calls' follow-up",()=>{
     const history=[{role:"user",content:"what is the total number of LT calls taken by consultants from 1 nov to 11 nov 2026 give me full detyail"},{role:"user",content:"number of 10 nov calls"}];
     expect(wantsStructuredCallReport("yes all calls",history)).toBe(true);
