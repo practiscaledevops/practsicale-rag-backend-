@@ -1,3 +1,4 @@
+import { isSearchTimeout } from "@/lib/retrieval";
 // The Retrieval Orchestrator — how the Brain FINDS knowledge for a request.
 //
 //   UNDERSTAND the request (intent: work mode, job type, domains, entities,
@@ -590,7 +591,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     const embeddings = await Promise.all(queries.map((q) => embed(q)));
     const jobs: Promise<{ lane: Lane | "raw"; chunks: LaneChunk[] }>[] = [];
     const searchLane = async (lane: Lane | "raw", classes: string[]) => {
-      const lists = await Promise.all(
+      const searches = await Promise.allSettled(
         queries.map((q, i) =>
           hybridSearchLane({
             orgId,
@@ -605,11 +606,22 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
           })
         )
       );
+      const lists = searches.flatMap(search => search.status === "fulfilled" ? [search.value] : []);
+      for (const search of searches) {
+        if (search.status === "rejected" && !isSearchTimeout(search.reason)) throw search.reason;
+      }
+      if (!lists.length) throw searches.find(search => search.status === "rejected")?.reason;
       return { lane, chunks: interleave(lists, perLane) };
     };
     for (const l of active) jobs.push(searchLane(l, LANE_CLASS[l]));
     if (includeRaw) jobs.push(searchLane("raw", ["raw_archive"]));
-    laneResults = await Promise.all(jobs);
+    const searches = await Promise.allSettled(jobs);
+    laneResults = searches.flatMap(search => search.status === "fulfilled" ? [search.value] : []);
+    for (const search of searches) {
+      if (search.status === "rejected" && (!isSearchTimeout(search.reason) || !laneResults.some(lane => lane.chunks.length))) {
+        throw search.reason;
+      }
+    }
   } catch (e) {
     if (e instanceof Error && e.message === LANE_RPC_MISSING) {
       // Pre-migration: classic pipeline, same output shape.

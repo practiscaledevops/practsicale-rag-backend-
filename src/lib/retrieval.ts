@@ -68,7 +68,10 @@ export async function hybridSearchScoped(opts: {
   if (results.length < 3) {
     const orText = toOrQuery(opts.query);
     if (orText && orText !== opts.query) {
-      const orResults = await runSearch(db, { ...params, query_text: orText });
+      const orResults = await runSearch(db, { ...params, query_text: orText }).catch(error => {
+        if (results.length && isSearchTimeout(error)) return results;
+        throw error;
+      });
       if (orResults.length > results.length) results = orResults;
     }
   }
@@ -183,7 +186,10 @@ export async function hybridSearchLane(opts: {
   if (results.length < 3) {
     const orText = toOrQuery(opts.query);
     if (orText && orText !== opts.query) {
-      const orResults = await run({ ...params, query_text: orText });
+      const orResults = await run({ ...params, query_text: orText }).catch(error => {
+        if (results.length && isSearchTimeout(error)) return results;
+        throw error;
+      });
       if (orResults.length > results.length) results = orResults;
     }
   }
@@ -348,4 +354,11 @@ export async function expandTranscripts(
     chunksByDoc.set(c.document_id, [...(chunksByDoc.get(c.document_id) ?? []), c]);
   }
   return assembleFullCalls(chunks, chunksByDoc, maxCalls, maxTokens);
+}
+
+export function isSearchTimeout(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const failure = error;
+  return ("code" in failure && failure.code === "57014") ||
+    ("message" in failure && typeof failure.message === "string" && /TimeoutError|statement timeout/i.test(failure.message));
 }
