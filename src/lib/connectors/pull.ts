@@ -210,6 +210,7 @@ export interface DataSourceRow {
   /** Query-param NAME to send the watermark under (falls back to cursor_field). */
   cursor_param: string | null;
   cursor_value: string | null;
+  cursor_record_id?: string | null;
 }
 
 export interface PullResult {
@@ -279,19 +280,20 @@ export async function runPull(
     result.recordsFetched = records.length;
 
     let newCursor = source.cursor_value ?? null;
+    let newCursorId = source.cursor_record_id ?? null;
+    const composite = source.source_type === "call_score" && source.cursor_field === "updated_at";
 
-    for (const record of records) {
-      if (deadlineAt && Date.now() > deadlineAt) {
-        partial = true;
-        break;
-      }
-      if (!record || typeof record !== "object") continue;
+    const ingestRecord = async (record: unknown) => {
+      if (!record || typeof record !== "object") return;
 
       const rec = record as Record<string, unknown>;
       const recordId =
         source.record_id_field && rec[source.record_id_field] != null
           ? String(rec[source.record_id_field])
           : undefined;
+      if (composite && (!recordId || !rec.updated_at || !Number.isFinite(Date.parse(String(rec.updated_at))))) {
+        throw Error("Scoring record identity or revision is missing; checkpoint was not advanced");
+      }
 
       // The raw transcript (present when include_transcript=true) gets its OWN
       // document below; strip it here so the report doc's body + metadata stay
@@ -300,7 +302,7 @@ export async function runPull(
       const { transcript: _omitTranscript, ...recNoTx } = rec;
 
       const text = serializeRecord(recNoTx);
-      if (!text.trim()) continue;
+      if (!text.trim()) return;
 
       const title = buildTitle(recNoTx, source.source_type, recordId);
 
@@ -341,14 +343,31 @@ export async function runPull(
 
       // Advance the watermark to the largest cursor value seen this run.
       if (source.cursor_field && rec[source.cursor_field] != null) {
-        newCursor = maxCursor(newCursor, String(rec[source.cursor_field]));
+        const candidate = String(rec[source.cursor_field]);
+        const next = maxCursor(newCursor, candidate);
+        if (composite && recordId && next === candidate) {
+          newCursorId = candidate !== newCursor ? recordId : [newCursorId ?? "", recordId].sort().at(-1)!;
+        }
+        newCursor = next;
       }
+    };
+    // Finish a small contiguous batch before checkpointing. On any failure,
+    // await all siblings and retain the previous durable checkpoint; replay is
+    // idempotent. This cannot skip an in-flight earlier record.
+    const concurrency = composite ? 3 : 1;
+    for (let index = 0; index < records.length; index += concurrency) {
+      if (deadlineAt && Date.now() > deadlineAt) { partial = true; break; }
+      const batch = await Promise.allSettled(records.slice(index,index+concurrency).map(ingestRecord));
+      const failed = batch.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failed) throw failed.reason;
     }
 
     result.cursorValue = newCursor;
 
     // Update the source: cursor + last-run bookkeeping.
-    await db
+    const checkpoint = composite && newCursor && newCursorId ? await db.rpc("advance_scoring_cursor", {
+      p_org_id: source.org_id, p_source_id: source.id, p_cursor_value: newCursor, p_record_id: newCursorId,
+    }) : await db
       .from("data_sources")
       .update({
         cursor_value: newCursor,
@@ -358,6 +377,7 @@ export async function runPull(
       })
       .eq("id", source.id)
       .eq("org_id", source.org_id);
+    if (checkpoint.error) throw Error("Could not save the source checkpoint; the next run will retry safely");
 
     await db
       .from("ingestion_runs")
@@ -535,6 +555,9 @@ async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: Fe
     // allowing a partial first sweep to advance past unprocessed older calls.
     const cursor = source.cursor_value ?? (source.source_type === "call_score" && source.cursor_field === "updated_at" ? "1970-01-01T00:00:00.000Z" : null);
     if (cursor) baseParams.set(cursorParamName, cursor);
+    if (source.source_type === "call_score" && source.cursor_field === "updated_at" && source.cursor_record_id) {
+      baseParams.set("updated_after_id", source.cursor_record_id);
+    }
   }
 
   // Auto-paging: when a numeric `limit` is configured, keep fetching with an
@@ -572,6 +595,9 @@ async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: Fe
       json = JSON.parse(raw);
     } catch {
       throw new Error("pull response was not valid JSON");
+    }
+    if (baseParams.has("updated_after_id") && (json as {cursor_version?: number})?.cursor_version !== 2) {
+      throw Error("The scoring feed must support composite checkpoints before this sync can resume");
     }
     const extracted = getPath(json, source.records_path);
 

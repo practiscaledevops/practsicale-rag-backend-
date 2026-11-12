@@ -107,6 +107,44 @@ describe("pull connector — call dates", () => {
     expect(result.calls).toBe(26);
     expect(fetch).toHaveBeenCalledTimes(2);
   });
+  it("resumes within an equal-timestamp group after a deadline instead of replaying its first rows", async()=>{
+    const revision="2026-10-19T19:35:08.358221+00:00";
+    const ids=["11111111-1111-4111-8111-111111111111","22222222-2222-4222-8222-222222222222","33333333-3333-4333-8333-333333333333","44444444-4444-4444-8444-444444444444"];
+    let now=1000; const clock=vi.spyOn(Date,"now").mockImplementation(()=>now);
+    const rpc=vi.fn(async()=>({data:null,error:null}));
+    const q:any={insert:()=>q,select:()=>q,update:()=>q,eq:()=>q,single:async()=>({data:{id:"run"},error:null}),then:(done:any)=>Promise.resolve({error:null}).then(done)};
+    const db={from:()=>q,rpc} as unknown as SupabaseClient;
+    const source={...SOURCE,kind:"pull_http",records_path:"data",cursor_field:"updated_at",cursor_param:"updated_since",cursor_value:revision};
+    vi.stubGlobal("fetch",vi.fn(async(input:string)=>{
+      const after=new URL(input).searchParams.get("updated_after_id")??"";
+      return Response.json({cursor_version:2,data:ids.filter(id=>id>after).map(id=>({id,updated_at:revision,call_status:"pending"}))});
+    }));
+    m.ingestOne.mockImplementation(async()=>{now+=20;return {skipped:true,chunks:0};});
+    try {
+      const first=await runPull(source,{db,deadlineAt:1010});
+      expect(first.documentsSkipped).toBe(3);
+      expect(rpc).toHaveBeenLastCalledWith("advance_scoring_cursor",expect.objectContaining({p_cursor_value:revision,p_record_id:ids[2]}));
+      const second=await runPull({...source,cursor_record_id:ids[2]},{db,deadlineAt:2000});
+      expect(second.documentsSkipped).toBe(1);
+      expect(rpc).toHaveBeenLastCalledWith("advance_scoring_cursor",expect.objectContaining({p_record_id:ids[3]}));
+      expect(ingested().map(r=>r.metadata.source_record_id)).toEqual(ids);
+    } finally {clock.mockRestore();}
+  });
+  it("never advances past an unsuccessful member of a concurrent scoring batch",async()=>{
+    respondWith([1,2,3].map(id=>({id:String(id),updated_at:"2026-11-12T00:00:00Z"})));
+    const q:any={insert:()=>q,select:()=>q,update:()=>q,eq:()=>q,single:async()=>({data:{id:"run"},error:null}),then:(done:any)=>Promise.resolve({error:null}).then(done)};
+    const rpc=vi.fn();
+    m.ingestOne.mockImplementation(async(_db,input)=>{if(input.recordId==="2")throw Error("failed record");return {chunks:0,skipped:true};});
+    const result=await runPull({...SOURCE,kind:"pull_http",cursor_field:"updated_at",cursor_param:"updated_since",cursor_value:null},{db:{from:()=>q,rpc} as unknown as SupabaseClient});
+    expect(result.status).toBe("error");expect(rpc).not.toHaveBeenCalled();expect(m.ingestOne).toHaveBeenCalledTimes(3);
+  });
+  it("does not silently replay a feed that ignores the composite checkpoint",async()=>{
+    respondWith([]);
+    const q:any={insert:()=>q,select:()=>q,update:()=>q,eq:()=>q,single:async()=>({data:{id:"run"},error:null}),then:(done:any)=>Promise.resolve({error:null}).then(done)};
+    const rpc=vi.fn();
+    const result=await runPull({...SOURCE,kind:"pull_http",cursor_field:"updated_at",cursor_param:"updated_since",cursor_value:"2026-11-12T00:00:00Z",cursor_record_id:"11111111-1111-4111-8111-111111111111"},{db:{from:()=>q,rpc} as unknown as SupabaseClient});
+    expect(result.status).toBe("error");expect(result.error).toContain("composite checkpoints");expect(m.ingestOne).not.toHaveBeenCalled();expect(rpc).not.toHaveBeenCalled();
+  });
 
   it("refreshes the exact current source row and its transcript, ignoring the old creation cursor", async () => {
     respondWith([{ id: "r1", consultant_name: "Test consultant", created_at: "2026-09-01T10:00:00Z", updated_at: "2026-10-19T10:00:00Z", call_status: "closed", call_outcome: "FOLLOW_UP", ticket_category: "high_ticket", transcript: "Consultant: A synthetic transcript" }]);
