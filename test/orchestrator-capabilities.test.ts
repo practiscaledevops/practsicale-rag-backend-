@@ -220,8 +220,9 @@ describe("runOrchestratedRetrieval — Performance Memory scope gate", () => {
 describe("runOrchestratedRetrieval — call review gate", () => {
   it("does not expand incidental transcripts for a company services summary", async () => {
     vi.mocked(hybridSearchLane).mockResolvedValue([{id:"c1",content:"We provide onboarding.",metadata:{},document_id:"d1",parent_id:null,source_type:"transcript",object_id:null,intelligence_class:"business_reality",domain:"sales",rrf_score:1}]);
-    const out=await run("Summarize our documented services and current terms.",scope([]));
+    const out=await run("Summarize PractiScale's documented services and what you cannot confirm about current terms. Keep the entire answer within 120 words. This is a concise quality check, not a request for a full course or long report.",scope([]));
     expect(expandTranscripts).not.toHaveBeenCalled();
+    expect(m.fetchCalls).not.toHaveBeenCalled();
     expect(out.chunks).toHaveLength(1);
   });
   it("still reads full transcripts when the user asks to review a call", async () => {

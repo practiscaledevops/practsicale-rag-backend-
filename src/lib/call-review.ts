@@ -477,7 +477,7 @@ export function parseCallReviewFilter(
     if (hits.size) consultants = [...hits];
   }
   const hasFilter = !!date || !!range || !!practiceType || !!ticketCategory || !!crmStatus || !!originalOutcome || consultants.length > 0 || isCallCountRequest(q) || isCallReportCreationRequest(q) ||
-    (looksLikeReview(q) && /\b(list|show|give|fetch|pull|check|report)\b/i.test(q));
+    (looksLikeReview(q) && /\b(calls?|transcripts?|consultants?)\b/i.test(q) && /\b(list|show|give|fetch|pull|check|report)\b/i.test(q));
   const isReview = hasFilter && looksLikeReview(q) && (!GENERATION_RE.test(q) || isCallReportCreationRequest(q));
 
   const filter: CallReviewFilter = { isReview };
