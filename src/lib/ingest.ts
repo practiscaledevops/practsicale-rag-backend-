@@ -169,109 +169,38 @@ export async function prepareChunkRows(db: SupabaseClient, ctx: PersistContext):
   return [...parentRows, ...childRows];
 }
 
-async function persistChunks(db: SupabaseClient, ctx: PersistContext): Promise<number> {
-  const rows = await prepareChunkRows(db, ctx);
-  if (rows.length) {
-    const { error } = await db.from("chunks").insert(rows);
-    if (error) throw new Error(error.message);
-  }
-  return rows.length;
-}
-
-/**
- * Ingest a single document: redact PII, skip if unchanged, insert the document
- * (+ collection memberships), then chunk -> embed -> persist.
- *
- * Transactional-ish: if anything after the document insert throws (a chunk
- * insert failing, contextualisation erroring), the just-inserted document is
- * deleted before the error is rethrown — otherwise an orphan document keeps its
- * content_hash and every future ingest of the same content would skip forever,
- * never producing chunks. An embedding-provider outage does NOT throw: those
- * chunks persist with a null embedding (full-text searchable; Reprocess fills
- * the vectors later). Does NOT write an ingestion_runs row — the caller owns
- * provenance.
- */
+/** Prepare external work before atomically publishing the document and chunks. */
 export async function ingestOne(db: SupabaseClient, params: IngestParams): Promise<IngestResult> {
-  const { orgId, sourceType, title, text, uri, metadata, dataSourceId } = params;
-  const cols: string[] = Array.isArray(params.collectionIds) ? params.collectionIds : [];
-
-  const cleanText = redactPII(text);
+  const cleanText = redactPII(params.text);
   const contentHash = createHash("sha256").update(cleanText).digest("hex");
-
-  // Skip if unchanged (content-hash change detection) -> idempotent ingest.
+  const documentId = randomUUID();
+  const cols = Array.isArray(params.collectionIds) ? params.collectionIds : [];
+  const document = { source_type: params.sourceType, title: params.title ?? null,
+    uri: params.uri ?? null, content_hash: contentHash, metadata: params.metadata ?? {},
+    data_source_id: params.dataSourceId ?? null, ...laneColumns(params) };
+  const commit = (chunks: Record<string, unknown>[] | null) => db.rpc("commit_document_ingestion", {
+    p_org_id: params.orgId, p_document_id: documentId, p_document: document,
+    p_chunks: chunks, p_collection_ids: cols, p_allow_duplicate: params.allowDuplicate ?? false,
+  });
   if (!params.allowDuplicate) {
-    const { data: existing } = await db
-      .from("documents")
-      .select("id")
-      .eq("org_id", orgId)
-      .eq("content_hash", contentHash)
-      .maybeSingle();
-    if (existing) {
-      // A document with no chunks is an orphan from a run that was killed
-      // (function timeout) between the document insert and persistChunks —
-      // the rollback below only runs on a thrown error. Treat it as absent so
-      // the same file can be ingested again instead of being skipped forever.
-      const { count } = await db
-        .from("chunks")
-        .select("id", { count: "exact", head: true })
-        .eq("org_id", orgId)
-        .eq("document_id", existing.id);
-      if ((count ?? 0) > 0) {
-        return { documentId: existing.id, chunks: 0, skipped: true };
-      }
-      await db.from("documents").delete().eq("id", existing.id).eq("org_id", orgId);
-    }
+    const { data: existing, error: lookupError } = await commit(null);
+    if (lookupError) throw new Error(lookupError.message);
+    const found = Array.isArray(existing) ? existing[0] : existing;
+    if (found?.document_id) return { documentId: found.document_id, chunks: 0, skipped: true };
   }
-
-  const { data: doc, error } = await db
-    .from("documents")
-    .insert({
-      org_id: orgId,
-      source_type: sourceType,
-      title: title ?? null,
-      uri: uri ?? null,
-      content_hash: contentHash,
-      data_source_id: dataSourceId ?? null,
-      metadata: metadata ?? {},
-      ...laneColumns(params),
-    })
-    .select("id")
-    .single();
-  if (error || !doc) {
-    throw new Error(error?.message ?? "document insert failed");
-  }
-  const documentId = doc.id as string;
-
-  try {
-    // Map document into any requested collections.
-    if (cols.length > 0) {
-      await db.from("document_collections").insert(
-        cols.map((collection_id) => ({ org_id: orgId, document_id: documentId, collection_id }))
-      );
-    }
-
-    const chunks = await persistChunks(db, {
-      orgId,
-      documentId,
-      cleanText,
-      sourceType,
-      metadata: metadata ?? {},
-      dataSourceId: dataSourceId ?? null,
-      cols,
-      chunkStrategy: params.chunkStrategy ?? "auto",
-      contextPrefix: params.contextPrefix ?? null,
-      contextualize: params.contextualize,
-      intelligenceClass: params.intelligenceClass,
-      domain: params.domain,
-      objectId: params.objectId,
-    });
-
-    return { documentId, chunks, skipped: false };
-  } catch (e) {
-    // Roll back the orphan document (chunks + collection rows cascade).
-    await db.from("documents").delete().eq("id", documentId).eq("org_id", orgId);
-    throw e;
-  }
+  const rows = await prepareChunkRows(db, {
+    orgId: params.orgId, documentId, cleanText, sourceType: params.sourceType,
+    metadata: params.metadata ?? {}, dataSourceId: params.dataSourceId ?? null, cols,
+    chunkStrategy: params.chunkStrategy ?? "auto", contextPrefix: params.contextPrefix ?? null,
+    contextualize: params.contextualize, intelligenceClass: params.intelligenceClass,
+    domain: params.domain, objectId: params.objectId,
+  });
+  if (!rows.length) throw new Error("Document has no searchable content");
+  const { data, error } = await commit(rows);
+  if (error) throw new Error(error.message);
+  const result = Array.isArray(data) ? data[0] : data;
+  if (!result?.document_id) throw new Error("Document commit did not return an identity");
+  return { documentId: result.document_id, chunks: result.chunks, skipped: result.skipped };
 }
 
 export interface ReingestParams extends LaneIdentity {
@@ -289,14 +218,14 @@ export interface ReingestParams extends LaneIdentity {
 /**
  * Replace a document's content in place (same document id): used when a
  * knowledge object is ENRICHED or its markdown edited. Re-hashes, updates the
- * row, deletes the old chunks and persists new ones — so relationships, run
+ * row and swaps the old chunks in one transaction after preparing new ones — so relationships, run
  * history and retrieval logs that point at the document keep working.
  */
 export async function reingestDocument(db: SupabaseClient, params: ReingestParams): Promise<IngestResult> {
   const { orgId, documentId } = params;
   const { data: doc, error } = await db
     .from("documents")
-    .select("id, source_type, metadata, data_source_id")
+    .select("id, source_type, metadata, data_source_id, content_hash, updated_at, intelligence_class, domain, object_id")
     .eq("id", documentId)
     .eq("org_id", orgId)
     .maybeSingle();
@@ -312,22 +241,7 @@ export async function reingestDocument(db: SupabaseClient, params: ReingestParam
     .eq("document_id", documentId);
   const cols = ((colRows ?? []) as { collection_id: string }[]).map((r) => r.collection_id);
 
-  const { error: uErr } = await db
-    .from("documents")
-    .update({
-      content_hash: contentHash,
-      metadata,
-      ...(params.title !== undefined ? { title: params.title } : {}),
-      ...laneColumns(params),
-    })
-    .eq("id", documentId)
-    .eq("org_id", orgId);
-  if (uErr) throw new Error(uErr.message);
-
-  const { error: dErr } = await db.from("chunks").delete().eq("document_id", documentId).eq("org_id", orgId);
-  if (dErr) throw new Error(dErr.message);
-
-  const chunks = await persistChunks(db, {
+  const rows = await prepareChunkRows(db, {
     orgId,
     documentId,
     cleanText,
@@ -338,11 +252,23 @@ export async function reingestDocument(db: SupabaseClient, params: ReingestParam
     chunkStrategy: params.chunkStrategy ?? "auto",
     contextPrefix: params.contextPrefix ?? null,
     contextualize: params.contextualize,
-    intelligenceClass: params.intelligenceClass,
-    domain: params.domain,
-    objectId: params.objectId,
+    intelligenceClass: params.intelligenceClass === undefined ? doc.intelligence_class : params.intelligenceClass,
+    domain: params.domain === undefined ? doc.domain : params.domain,
+    objectId: params.objectId === undefined ? doc.object_id : params.objectId,
   });
-  return { documentId, chunks, skipped: false };
+  if (!rows.length) throw new Error("Replacement has no searchable content");
+  // A failure in this transaction leaves the old hash and ALL old chunks intact.
+  // The optimistic revision check rejects concurrent edits/deletes, rather than
+  // publishing a version prepared against stale metadata or lane membership.
+  const { error: commitError } = await db.rpc("replace_document_content", {
+    p_org_id: orgId, p_document_id: documentId,
+    p_expected_hash: doc.content_hash, p_expected_updated_at: doc.updated_at,
+    p_patch: { content_hash: contentHash, metadata,
+      ...(params.title !== undefined ? { title: params.title } : {}), ...laneColumns(params) },
+    p_chunks: rows,
+  });
+  if (commitError) throw new Error(commitError.message);
+  return { documentId, chunks: rows.length, skipped: false };
 }
 
 /**

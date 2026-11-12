@@ -7,6 +7,19 @@ const DIM = Number(process.env.EMBEDDING_DIM ?? 1024);
 
 const zeroVec = () => new Array(DIM).fill(0);
 
+/** Never send malformed, non-finite or zero provider vectors into the index. */
+export function validEmbedding(value: unknown): value is number[] {
+  return Array.isArray(value) && value.length === DIM &&
+    value.every(n => typeof n === "number" && Number.isFinite(n)) && value.some(n => n !== 0);
+}
+function orderedEmbeddings(data: unknown, count: number): number[][] {
+  if (!Array.isArray(data) || data.length !== count) throw new Error("Embedding provider returned an incomplete or invalid vector set");
+  const ordered = [...data].sort((a,b) => a.index-b.index);
+  if (ordered.some((d,i) => d?.index !== i || !validEmbedding(d?.embedding)))
+    throw new Error("Embedding provider returned an incomplete or invalid vector set");
+  return ordered.map(d => d.embedding);
+}
+
 // Resilience: if the embedding provider is unreachable, out of quota, or has no
 // key configured, the system degrades to keyword-only retrieval instead of
 // failing. A zero vector makes the semantic (pgvector) leg of hybrid search
@@ -30,7 +43,7 @@ let cached: { key: string; client: OpenAI } | null = null;
 async function client(): Promise<OpenAI | null> {
   const key = await getProviderKey("openai");
   if (!key) return null;
-  if (!cached || cached.key !== key) cached = { key, client: new OpenAI({ apiKey: key, maxRetries: 0 }) };
+  if (!cached || cached.key !== key) cached = { key, client: new OpenAI({ apiKey: key, maxRetries: 0, timeout: 30_000 }) };
   return cached.client;
 }
 
@@ -44,7 +57,7 @@ export async function embed(text: string): Promise<number[]> {
   }
   try {
     const res = await c.embeddings.create({ model: MODEL, input: text, dimensions: DIM });
-    return res.data[0].embedding;
+    return orderedEmbeddings(res.data, 1)[0];
   } catch (err) {
     onEmbedError(err);
     return zeroVec();
@@ -92,9 +105,8 @@ export async function embedForIngest(texts: string[]): Promise<(number[] | null)
     const batch = inputs.slice(i, end);
     try {
       const res = await c.embeddings.create({ model: MODEL, input: batch, dimensions: DIM });
-      const ordered = [...res.data].sort((a, b) => a.index - b.index);
-      if (ordered.length !== batch.length || ordered.some((d, j) => d.index !== j || d.embedding.length !== DIM || d.embedding.some(n => !Number.isFinite(n)) || d.embedding.every(n => n === 0))) throw new Error("Embedding provider returned an incomplete or invalid vector set");
-      for (let j = 0; j < ordered.length; j++) vectors[i + j] = ordered[j].embedding;
+      const ordered = orderedEmbeddings(res.data, batch.length);
+      for (let j = 0; j < ordered.length; j++) vectors[i + j] = ordered[j];
     } catch (err) {
       onEmbedError(err);
     }
@@ -118,7 +130,7 @@ export async function embedForIngest(texts: string[]): Promise<(number[] | null)
 // Batch embed (query-time helpers / object embeddings). Demo/no-key/outage ->
 // zero vectors, which make the semantic leg inert so RRF falls back to full-text.
 export async function embedMany(texts: string[]): Promise<number[][]> {
-  if (isDemo()) return texts.map(() => zeroVec());
+  if (!texts.length || isDemo()) return texts.map(() => zeroVec());
   const c = await client();
   if (!c) {
     onEmbedError(new Error("no OpenAI key configured"));
@@ -126,7 +138,7 @@ export async function embedMany(texts: string[]): Promise<number[][]> {
   }
   try {
     const res = await c.embeddings.create({ model: MODEL, input: texts, dimensions: DIM });
-    return res.data.map((d) => d.embedding);
+    return orderedEmbeddings(res.data, texts.length);
   } catch (err) {
     onEmbedError(err);
     return texts.map(() => zeroVec());
