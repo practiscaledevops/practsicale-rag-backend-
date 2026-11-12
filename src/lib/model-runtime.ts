@@ -18,7 +18,7 @@ export function modelSignal(timeoutMs: number, caller?: AbortSignal): AbortSigna
 export function boundModel(model: LanguageModelV1): LanguageModelV1 {
   return wrapLanguageModel({ model, middleware: {
     transformParams: async ({ type, params }) => {
-      const abortSignal = modelSignal(type === "stream" ? 270_000 : 90_000, params.abortSignal);
+      const abortSignal = modelSignal(type === "stream" ? 85_000 : 45_000, params.abortSignal);
       abortSignal.throwIfAborted();
       return { ...params, maxTokens: params.maxTokens ?? 8192, abortSignal };
     },

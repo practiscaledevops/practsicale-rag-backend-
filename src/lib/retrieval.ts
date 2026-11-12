@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "./supabase";
+import { modelSignal } from "./model-runtime";
 import { embed } from "./embeddings";
 import type { ScopeFilters } from "./auth/scope";
 
@@ -78,9 +79,25 @@ async function runSearch(
   db: ReturnType<typeof supabaseAdmin>,
   params: Record<string, unknown>
 ): Promise<RetrievedChunk[]> {
-  const { data, error } = await db.rpc("hybrid_search_scoped", params);
+  const { data, error } = await searchWithDeadline(db, "hybrid_search_scoped", params);
   if (error) throw error;
   return (data ?? []) as RetrievedChunk[];
+}
+
+/** Retry only timeouts, retaining the original organization and every scope filter. */
+async function searchWithDeadline(
+  db: ReturnType<typeof supabaseAdmin>,
+  name: "hybrid_search_scoped" | "hybrid_search_lane",
+  params: Record<string, unknown>,
+) {
+  const run = async (args: Record<string, unknown>, timeoutMs: number) => {
+    const signal = modelSignal(timeoutMs);
+    const result = await db.rpc(name, args).abortSignal(signal);
+    return { result, timedOut: signal.aborted || result.error?.code === "57014" };
+  };
+  const first = await run(params, 6000);
+  if (!first.timedOut || params.semantic_weight === 0) return first.result;
+  return (await run({ ...params, semantic_weight: 0, full_text_weight: 1 }, 4000)).result;
 }
 
 /** Join a query's significant terms with the websearch OR operator. */
@@ -151,10 +168,10 @@ export async function hybridSearchLane(opts: {
   if (typeof opts.rrfK === "number") params.rrf_k = opts.rrfK;
 
   const run = async (p: Record<string, unknown>): Promise<LaneChunk[]> => {
-    const { data, error } = await db.rpc("hybrid_search_lane", p);
+    const { data, error } = await searchWithDeadline(db, "hybrid_search_lane", p);
     if (error) {
       const msg = String(error.message ?? "");
-      if (error.code === "42883" || /hybrid_search_lane/i.test(msg) || /schema cache/i.test(msg)) {
+      if (error.code === "42883" || error.code === "PGRST202" || /schema cache/i.test(msg)) {
         throw new Error(LANE_RPC_MISSING);
       }
       throw error;

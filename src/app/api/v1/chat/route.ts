@@ -316,6 +316,7 @@ export async function POST(req: Request) {
           model: resolvedModel,
           system: SMALLTALK_SYSTEM,
           messages: convertToCoreMessages(messages),
+          maxRetries: 0,
           ...generationParams(modelId, { temperature: settings.generation.temperature, maxTokens: 400 }),
           onFinish({ usage }) {
             const inputTokens = usage?.promptTokens ?? 0;
@@ -560,6 +561,7 @@ export async function POST(req: Request) {
           model: resolvedModel,
           system,
           messages: stepMessages,
+          maxRetries: 0,
           ...generationParams(modelId, { temperature: settings.generation.temperature, maxTokens: stepTokens }),
           abortSignal: AbortSignal.timeout(Math.max(1000, deadline - Date.now() - (verifyBeforeRelease ? 60_000 : 15_000))),
         });
@@ -605,7 +607,7 @@ export async function POST(req: Request) {
       if (creative && creativeContext.freshness === "fresh" && overlap.repeated && Date.now() < deadline - 75_000) {
         dataStream.writeData({ type: "status", stage: "quality", label: "Reworking repeated wording" });
         try {
-          const revision = await generateText({ model: resolvedModel, system,
+          const revision = await generateText({ model: resolvedModel, system, maxRetries: 0,
             messages: [...baseMessages, { role: "assistant", content: fullText }, { role: "user", content: "Create a fresh alternative to this draft. Change the hook, structure and explanation; keep the original user's task and every verified fact. Avoid the earlier case example if other evidence supports an alternative; otherwise state the evidence limitation. Output only the replacement draft." }],
             ...generationParams(modelId, { maxTokens: Math.min(maxTokens, 5000), temperature: settings.generation.temperature }),
             abortSignal: AbortSignal.timeout(Math.max(1000, deadline - Date.now() - 15_000)),
