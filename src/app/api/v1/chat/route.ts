@@ -517,7 +517,9 @@ export async function POST(req: Request) {
       // visible "send continue" note instead of a silent cut.
       const maxSteps = wantsLong ? 4 : 2;
       const deadline = startedAt + GENERATION_DEADLINE_MS;
-      const verifyBeforeRelease = !creative && settings.features.groundOrRefuse && settings.features.faithfulnessCheck;
+      // Creative work can contain factual promises and customer stories too.
+      // Check those premises before release while allowing clearly new proposals.
+      const verifyBeforeRelease = settings.features.groundOrRefuse && settings.features.faithfulnessCheck;
       let factualVerdict: FaithfulnessVerdict | null = null;
       let verificationLabel = "not verified in this receipt";
       let withheld = false;
@@ -554,6 +556,7 @@ export async function POST(req: Request) {
           system,
           messages: stepMessages,
           ...generationParams(modelId, { temperature: settings.generation.temperature, maxTokens: stepTokens }),
+          abortSignal: AbortSignal.timeout(Math.max(1000, deadline - Date.now() - (verifyBeforeRelease ? 60_000 : 15_000))),
         });
         // Write text parts ourselves (not mergeIntoDataStream) so steps append to
         // one message in strict order and we control the single finish part.
@@ -615,7 +618,7 @@ export async function POST(req: Request) {
         if (Date.now() < deadline - 10_000) {
           try {
             const fp = await getActivePrompt(ctx.orgId, "faithfulness");
-            factualVerdict = await checkFaithfulness(context + performanceSection + (hasAttachments ? attachmentBlock : ""), fullText, fp, "recommended", AbortSignal.timeout(Math.max(1000, Math.min(45_000, deadline - Date.now() - 5000))));
+            factualVerdict = await checkFaithfulness(context + performanceSection + (hasAttachments ? attachmentBlock : ""), fullText, fp, "recommended", AbortSignal.timeout(Math.max(1000, Math.min(45_000, deadline - Date.now() - 5000))), {question:query,trustedPolicy:groundingPrompt});
           } catch { /* A failed check never certifies an answer. */ }
         }
         const checked = verifiedFactualAnswer(fullText, factualVerdict, validateCitations(fullText,retrievedIds).fabricated);
