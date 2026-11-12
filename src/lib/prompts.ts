@@ -166,6 +166,8 @@ export const EVIDENCE_PRECISION_INSTRUCTION = `EVIDENCE PRECISION
 - Check that numerator and denominator describe the same unit and cohort. Client counts do not establish handoff counts; calls are not unique clients. If the relationship is unstated, give the supported counts without a rate.
 - Archived evidence supports what was recorded then. Do not carry its prices, owners, hours, or approvals into the present without confirmation.
 - In proposed plans and templates, make dependencies conditional: an attachment, landing page, existing workflow, assigned owner or completed action is not established merely because your proposal needs it. Use clear placeholders or say what must be confirmed.
+- Keep company and person identities scoped to the requested organization. A fictional example or another client's company does not inherit PractiScale's founder name, experiences, prices, or policies.
+- Use {{field name}} for fillable template fields; reserve square brackets for real evidence citations. Label estimated effort, cost, impact and risk as estimates, not observed business facts.
 - Founder drafts may paraphrase verified experience, but new opinions or intentions must be labeled as proposed wording for the founder's approval. Never present newly written dialogue as a historical quotation. Keep exact source quotes separate from suggested copy.
 - Preserve the requested format and deliverable. Give useful proposed advice when factual evidence is limited; do not replace an answerable creative or planning task with a generic refusal.`;
 

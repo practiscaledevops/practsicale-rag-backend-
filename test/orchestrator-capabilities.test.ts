@@ -50,6 +50,7 @@ import {
 import { narrowScope, narrowSourceTypes, type ScopeFilters } from "@/lib/auth/scope";
 import { DEFAULT_SETTINGS } from "@/lib/settings";
 import type { ApiKeyRecord } from "@/lib/auth/context";
+import { hybridSearchLane, expandTranscripts } from "@/lib/retrieval";
 
 const ALL_CAPS = ["chat.knowledge", "chat.call_review", "knowledge.performance", "knowledge.conflicts", "learning.write"];
 const scope = (sourceTypes: string[] = [], over: Partial<ScopeFilters> = {}): ScopeFilters => ({
@@ -160,6 +161,7 @@ function run(query: string, s: ScopeFilters, extra: { capabilities?: string[]; k
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(hybridSearchLane).mockResolvedValue([]);
   m.perf.mockResolvedValue({ block: "| Close rate | 2026-09-01 → 2026-09-30 | 17.2 % | consultant=David | call_scores |", count: 1, keys: ["close_rate"], metrics: [METRIC] });
   m.known.mockResolvedValue(["David"]);
   m.fetchCalls.mockResolvedValue({ chunks: [], callCount: 0, note: null, scorecard: [], totalMatched: 0 });
@@ -216,6 +218,17 @@ describe("runOrchestratedRetrieval — Performance Memory scope gate", () => {
 });
 
 describe("runOrchestratedRetrieval — call review gate", () => {
+  it("does not expand incidental transcripts for a company services summary", async () => {
+    vi.mocked(hybridSearchLane).mockResolvedValue([{id:"c1",content:"We provide onboarding.",metadata:{},document_id:"d1",parent_id:null,source_type:"transcript",object_id:null,intelligence_class:"business_reality",domain:"sales",rrf_score:1}]);
+    const out=await run("Summarize our documented services and current terms.",scope([]));
+    expect(expandTranscripts).not.toHaveBeenCalled();
+    expect(out.chunks).toHaveLength(1);
+  });
+  it("still reads full transcripts when the user asks to review a call", async () => {
+    vi.mocked(hybridSearchLane).mockResolvedValue([{id:"c1",content:"Call excerpt",metadata:{},document_id:"d1",parent_id:null,source_type:"transcript",object_id:null,intelligence_class:"business_reality",domain:"sales",rrf_score:1}]);
+    await run("Review this call",scope([]));
+    expect(expandTranscripts).toHaveBeenCalledTimes(1);
+  });
   it("no capabilities: a review ask runs the structured path (today's behaviour)", async () => {
     const out = await run(REVIEW_Q, scope([]));
     expect(m.known).toHaveBeenCalled();

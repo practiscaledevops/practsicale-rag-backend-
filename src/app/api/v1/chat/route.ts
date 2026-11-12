@@ -633,6 +633,7 @@ export async function POST(req: Request) {
         layers: creativeContext.layerNames, evidenceDocuments: docIds.length, evidenceChunks: chunks.length,
         validCitations: citationCheck.valid.length, invalidCitations: citationCheck.fabricated.length,
         faithfulness: verificationLabel, seed: creative ? seed : null,
+        verificationUsage: factualVerdict?.usage ?? null,
         warnings: [...creativeContext.warnings, ...(creative && overlap.repeated ? ["Substantial wording overlap remains; limited source material may constrain variation."] : [])],
       });
       dataStream.write(

@@ -54,7 +54,10 @@ export async function syncSourceDocument(db: SupabaseClient, params: IngestParam
     p_chunks: rows,
   });
   if (syncError?.code === "PT410") return { documentId: null, chunks: 0, skipped: true };
-  if (syncError) throw new Error(`Source refresh failed (migration 0021 is required): ${syncError.message}`);
+  if (syncError) {
+    const missingFunction = syncError.code === "42883" || syncError.code === "PGRST202";
+    throw new Error(`Source refresh failed${missingFunction ? " (migration 0021 is required)" : ""}: ${syncError.message}`);
+  }
   const row = Array.isArray(result) ? result[0] : result;
   if (!row?.document_id) throw new Error("Source refresh returned no document");
   return { documentId: row.document_id, chunks: row.chunks, skipped: row.skipped };

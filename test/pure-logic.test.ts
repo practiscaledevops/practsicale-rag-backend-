@@ -73,6 +73,11 @@ describe("citations", () => {
     expect(valid).toEqual(["a"]);
     expect(fabricated).toEqual(["ghost"]);
   });
+
+  it("keeps fillable planning fields separate from fabricated evidence citations", () => {
+    const result=validateCitations("{{owner}} [Section] [items] [Metric] [Channel] [evidence-1] [made-up-evidence]",["evidence-1"]);
+    expect(result).toEqual({valid:["evidence-1"],fabricated:["made-up-evidence"]});
+  });
 });
 
 describe("mergeSettings", () => {

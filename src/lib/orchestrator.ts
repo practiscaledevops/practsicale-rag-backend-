@@ -22,7 +22,7 @@
 
 import { z } from "zod";
 import { isCreativeRequest, isCreativeRevision, searchHistoryForRequest } from "@/lib/creative-quality";
-import { uniqueEvidence } from "@/lib/evidence-diversity";
+import { uniqueEvidence, budgetEvidence } from "@/lib/evidence-diversity";
 import { supabaseAdmin } from "@/lib/supabase";
 import { embed } from "@/lib/embeddings";
 import { hybridSearchLane, expandParents, expandTranscripts, LANE_RPC_MISSING, type LaneChunk, type RetrievedChunk } from "@/lib/retrieval";
@@ -758,7 +758,12 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   const semantic = reviewDocIds.size
     ? final.filter((c) => !(c.source_type === "transcript" && reviewDocIds.has(c.document_id)))
     : final;
-  if (!isCreativeRequest(query) && semantic.some((c) => c.source_type === "transcript")) {
+  // Finding a useful excerpt in a call does not mean the user requested a
+  // full call audit. Unconditional expansion used to send ~200k input tokens
+  // even for a short service question, drowning the relevant policy evidence.
+  const needsTranscriptDepth = gates.callReview && reviewGate &&
+    (!!review || reviewThread || /\b(calls?|transcripts?|consultants?)\b/i.test(query));
+  if (needsTranscriptDepth && !isCreativeRequest(query) && semantic.some((c) => c.source_type === "transcript")) {
     emit({ stage: "expanding", label: "Reading the full call transcript" });
     const annByDoc = new Map<string, OrchestratedChunk>();
     for (const c of semantic) {
@@ -771,7 +776,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
       return ann ? { ...ann, id: c.id, content: c.content, metadata: c.metadata, parent_id: c.parent_id } : (c as OrchestratedChunk);
     });
   } else {
-    final = semantic;
+    final = budgetEvidence(semantic);
   }
 
   // (a) prepend the structured full calls as high-priority Business Reality

@@ -10,7 +10,7 @@
 // identically and honour the same dashboard settings.
 
 import { hybridSearchScoped, expandParents, type RetrievedChunk } from "@/lib/retrieval";
-import { uniqueEvidence } from "@/lib/evidence-diversity";
+import { uniqueEvidence, budgetEvidence } from "@/lib/evidence-diversity";
 import { isCreativeRequest } from "@/lib/creative-quality";
 import { rerank } from "@/lib/rerank";
 import { rewriteQueries, type ChatTurn } from "@/lib/query-transform";
@@ -155,7 +155,7 @@ export async function runRetrieval(opts: {
     emit({ stage: "expanding", label: "Gathering full context" });
     chunks = await expandParents(top);
   }
-  chunks = uniqueEvidence(chunks, isCreativeRequest(query));
+  chunks = budgetEvidence(uniqueEvidence(chunks, isCreativeRequest(query)));
 
   emit({ stage: "retrieved", label: `Retrieved ${chunks.length} source${chunks.length === 1 ? "" : "s"}`, count: chunks.length });
   return { chunks, effectiveQuery: queries.join(" | "), rewritten, sourceTypes, confidence };

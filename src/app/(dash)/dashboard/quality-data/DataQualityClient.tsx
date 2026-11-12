@@ -43,6 +43,7 @@ import { fmtDateTime, fmtInt, relTime } from "@/lib/format";
 import { sourceTypeLabel, triggerLabel } from "@/lib/ui-labels";
 import { cn } from "@/lib/utils";
 import type { DataQuality, QualityDoc } from "@/lib/data-quality";
+import { ingestionErrorSummary } from "@/lib/ingestion-error";
 
 /** In-page anchors: each summary tile links to its section. */
 const SECTION_IDS = {
@@ -389,7 +390,7 @@ export function DataQualityClient({ data }: { data: DataQuality }) {
         <StatTile
           icon={AlertTriangle}
           tone={tileTone(counts.failedRuns, "danger")}
-          label="Failed runs"
+          label="Recent failed runs"
           value={fmtInt(counts.failedRuns)}
           hint="Syncs that errored"
           href={anchor(counts.failedRuns, SECTION_IDS.failedRuns)}
@@ -504,8 +505,8 @@ export function DataQualityClient({ data }: { data: DataQuality }) {
             <Section
               id={SECTION_IDS.failedRuns}
               icon={AlertTriangle}
-              title="Failed ingestion runs"
-              description="Select runs to sync their sources again, or open a source."
+              title="Recent failed ingestion runs"
+              description="Failure history, including earlier attempts that may since have succeeded. Open a source to check its latest sync, or select it to retry."
               tone="danger"
               shown={data.failedRuns.length}
               total={counts.failedRuns}
@@ -532,7 +533,7 @@ export function DataQualityClient({ data }: { data: DataQuality }) {
                       {src ? (
                         <RowCheckbox
                           {...runSelect.row(r.id)}
-                          label={`Select failed run: ${(r.error || "Unknown error").slice(0, 80)}`}
+                          label={`Select failed run: ${ingestionErrorSummary(r.error)}`}
                         />
                       ) : (
                         // Uploads have no source to re-sync; keep the rows aligned.
@@ -540,7 +541,7 @@ export function DataQualityClient({ data }: { data: DataQuality }) {
                       )}
                       <div className="min-w-0 flex-1">
                         <p className="break-words text-[13px] font-medium text-foreground">
-                          {r.error || "Unknown error"}
+                          {ingestionErrorSummary(r.error)}
                         </p>
                         <p className="truncate text-xs text-muted-foreground">
                           {triggerLabel(r.trigger)} · <TimeAgo iso={r.startedAt} />

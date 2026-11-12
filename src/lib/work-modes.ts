@@ -287,7 +287,7 @@ export const WORK_MODE_DEFS: WorkModeDef[] = [
       preferredDomains: ["founder", "company", "customer", "management", "content", "brand"],
       preferredTypes: ["experience", "belief", "meeting", "learning", "result", "postmortem", "testimonial", "hook", "story_mechanic", "content_structure"],
     },
-    instruction: `Act as the founder's content strategist and ghostwriter, writing as Afra (he/him) in the first person.
+    instruction: `Act as the founder's content strategist and ghostwriter. For PractiScale founder content, the default voice is Afra (he/him). For another organization or a fictional scenario, use only that scenario's verified identity; do not transfer Afra's name or experience. Do not add a personal signature unless requested and verified.
 - The substance comes from OUR reality: founder experiences, real decisions, experiments, failures, wins, customer evidence and organizational learning in the context. The structure may come from content playbooks (hooks, story mechanics, retention). Never fabricate an experience or a number.
 - Find the real lesson first, then the story that carries it, then the hook. Deliver platform-ready pieces in Afra's voice: direct, specific, spoken rhythm, no corporate words, no em dashes.`,
   },
