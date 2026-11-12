@@ -9,7 +9,7 @@ process.env.EMBEDDINGS_STRICT = "1";
 
 async function main() {
   const { supabaseAdmin } = await import("../src/lib/supabase");
-  const { syncScoringRecord } = await import("../src/lib/connectors/pull");
+  const { syncScoringRecord, deleteScoringRecord } = await import("../src/lib/connectors/pull");
   const { rebuildCallScoreMetrics } = await import("../src/lib/call-score-metrics");
   const db = supabaseAdmin();
   const deadline = Date.now() + 2 * 60 * 60_000;
@@ -19,7 +19,7 @@ async function main() {
     const token = randomUUID();
     const { data, error } = await db.rpc("claim_scoring_sync_events", { p_token: token, p_limit: 10 });
     if (error) throw Error(`Inbox claim failed: ${error.code}`);
-    const events = data as { id: string; org_id: string; data_source_id: string; record_id: string }[];
+    const events = data as { id: string; org_id: string; data_source_id: string; record_id: string; operation?: string; source_updated_at?: string }[];
     if (!events?.length) {
       const { count, error } = await db.from("scoring_sync_events").select("id", { count: "exact", head: true }).in("status", ["pending", "running"]);
       if (error) throw Error(`Inbox count failed: ${error.code}`);
@@ -61,9 +61,14 @@ async function main() {
         if (leaseError) throw Error("Lease renewal failed; refusing to acknowledge work");
         await Promise.all(events.slice(i, i + 5).map(async event => {
           try {
-            await syncScoringRecord(db, sources.get(event.data_source_id), event.record_id);
+            if (event.operation === "delete") {
+              if (!event.source_updated_at) throw Error("Deletion revision unavailable");
+              await deleteScoringRecord(db, sources.get(event.data_source_id), event.record_id, event.source_updated_at);
+            } else await syncScoringRecord(db, sources.get(event.data_source_id), event.record_id);
             successful.push(event.id);
-          } catch {
+          } catch (e) {
+            const error=e as {name?:string;code?:string;statusCode?:number;message?:string};
+            console.error(JSON.stringify({recordId:event.record_id,errorType:error.name,status:error.statusCode,code:error.code,timeout:/timeout|timed out/i.test(error.message??""),lease:/lease|revision/i.test(error.message??"")}));
             failed.push(event.id);
           }
         }));

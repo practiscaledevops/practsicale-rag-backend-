@@ -11,6 +11,7 @@ This records the existing product behavior and the corrected document-list contr
 | Select/listbox | `src/components/ui/Select.tsx` | Reuse the existing authored primitive; no new select is introduced by this change. |
 | Dates | `src/lib/format.ts`, `src/lib/timezone.ts` | Use shared formatting; never substitute import date for occurrence or outcome date. |
 | Feedback | `src/components/ui/Alert.tsx`, `LiveDocumentUpdates.tsx` | Inline persistent failure, explicit retry, loading status, separate empty result. Live refresh retains current URL filters. |
+| Source health | `SourceHealthClient.tsx` | Poll visible source health every 15 seconds; pause during actions. A completed partial batch is labeled as continuing reconciliation. Batch duration never claims event-to-searchable latency. Historical errors use readable recovery messages. |
 | Destructive actions | Existing document API, `ConfirmDialog.tsx` | Existing named-object permanent-delete confirmation and server permissions remain required. Pagination does not change what a confirmed deletion targets. |
 | Scrollbar/theme | `src/app/globals.css` | Existing application tokens and overflow ownership remain canonical. |
 

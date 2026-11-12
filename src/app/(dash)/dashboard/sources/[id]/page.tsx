@@ -37,12 +37,15 @@ export default async function SourceHealthPage({ params }: { params: Promise<{ i
   if (!source) notFound();
   const s = source as Record<string, unknown>;
 
-  const { data: runsData } = await db
+  const { data: runsData, error: runsError } = await db
     .from("ingestion_runs")
     .select("status, trigger, documents_ingested, chunks_ingested, documents_skipped, error, started_at, finished_at")
     .eq("data_source_id", id)
+    .eq("org_id", session.orgId)
     .order("started_at", { ascending: false })
     .limit(40);
+
+  if (runsError) throw new Error("Source history is temporarily unavailable");
 
   const runs: SourceRun[] = ((runsData ?? []) as Record<string, unknown>[]).map((r) => ({
     status: String(r.status ?? "running"),
@@ -55,7 +58,7 @@ export default async function SourceHealthPage({ params }: { params: Promise<{ i
     finishedAt: (r.finished_at as string) ?? null,
   }));
 
-  // Throughput aggregates + average time-to-searchable from successful runs.
+  // Batch duration is not the latency from a source event to searchable data.
   const totals = runs.reduce(
     (acc, r) => {
       acc.ingested += r.ingested;
@@ -95,7 +98,7 @@ export default async function SourceHealthPage({ params }: { params: Promise<{ i
     totalIngested: totals.ingested,
     totalChunks: totals.chunks,
     totalSkipped: totals.skipped,
-    avgTimeToSearchableMs: totals.durCount > 0 ? Math.round(totals.durMs / totals.durCount) : null,
+    avgSyncDurationMs: totals.durCount > 0 ? Math.round(totals.durMs / totals.durCount) : null,
   };
 
   return <SourceHealthClient health={health} runs={runs} />;

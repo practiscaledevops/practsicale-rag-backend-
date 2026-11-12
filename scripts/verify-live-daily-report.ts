@@ -10,6 +10,8 @@ async function main() {
   const { data: source, error } = await db.from("data_sources").select("*").eq("slug", "call-scoring").single();
   if (error) throw Error(error.message);
   const localDate = (v: string | number) => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Karachi", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(v));
+  const outcomeDate = process.env.REPORT_DATE_BASIS === "outcome";
+  const reportDate = (r: any): string => outcomeDate ? (r.outcome_event_at ? localDate(r.outcome_event_at) : "") : (r.call_date || "");
   const today = localDate(Date.now());
   const allHistory = process.env.REPORT_ALL === "1";
   const rangeFrom = process.env.REPORT_FROM, rangeTo = process.env.REPORT_TO;
@@ -24,11 +26,11 @@ async function main() {
     const res = await fetch(url, { headers: { "x-api-key": process.env[source.auth_secret_ref] ?? "" }, signal: AbortSignal.timeout(45_000) });
     if (!res.ok) throw Error(`Source HTTP ${res.status}`);
     const rows = (await res.json()).data as any[];
-    records.push(...rows.filter(r => (rangeFrom && rangeTo ? localDate(r.created_at) >= rangeFrom && localDate(r.created_at) <= rangeTo : allHistory || localDate(r.created_at) === yesterday)
+    records.push(...rows.filter(r => (rangeFrom && rangeTo ? reportDate(r) >= rangeFrom && reportDate(r) <= rangeTo : allHistory || reportDate(r) === yesterday)
       && (!expectedTicket || r.ticket_category === expectedTicket) && (!expectedStatus || (r.call_status || "pending") === expectedStatus)));
     if (rows.length < 25) break;
   }
-  const dates = records.map(r => localDate(r.created_at)).sort();
+  const dates = records.map(reportDate).filter(Boolean).sort();
   const scope = rangeFrom && rangeTo ? {from:rangeFrom,to:rangeTo} : allHistory ? { from: dates[0], to: dates[dates.length - 1] } : { from: yesterday, to: yesterday };
   if (!records.length) throw Error("No source records in verification scope");
   const query = process.env.REPORT_QUERY ?? (allHistory ? `give me report of all calls from ${scope.from} to ${scope.to}` : process.env.REPORT_DATE ? `give me report of calls on ${yesterday}` : "give me report of yesterday calls");
@@ -68,21 +70,20 @@ async function main() {
     original: normalized.findIndex(h => /original.*outcome|calloutcome/.test(h)),
     status: normalized.findIndex(h => /crm.*status|currentstatus/.test(h)),
     ticket: normalized.findIndex(h => /closingtype|ticket/.test(h)),
-    time: normalized.findIndex(h => h.startsWith("time")), practice: normalized.findIndex(h => h === "practice"),
+    time: normalized.findIndex(h => h === "calldate"), practice: normalized.findIndex(h => h === "practice"),
     score: normalized.findIndex(h => h === "score"), band: normalized.findIndex(h => h === "band"), duration: normalized.findIndex(h => h === "duration"),
   };
   const rows = lines.slice(index + 1).filter(l => !/^\|[\s:|\-]+\|$/.test(l)).map(cells).filter(r => r.length === headers.length);
-  // Match a multiset of complete rows, including local minute timestamps.
+  // Match a multiset of complete rows, using source occurrence dates.
   // Consultant+prospect alone is not unique across a historical call roster.
   const unusedRows = new Set(rows.map((_, i) => i));
-  const localTime = (v: string) => new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Karachi", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(v));
   const results = records.map(r => {
     const expectedStatus = clean(r.call_status || "Pending"), expectedTicket = clean(r.ticket_category || "Unclassified");
     const expectedOriginal = clean(({ FOLLOW_UP: "Follow Up", LOST: "Lost", CLOSED: "Closed" } as Record<string, string>)[r.call_outcome] ?? "Unknown");
     const matchesRecord = (row: string[]) => {
       const sequence = row[columns.sequence]?.match(/\b(?:Call\s*)?(\d+)\b/i)?.[1];
       return clean(row[columns.consultant]) === clean(r.consultant_name || "Unknown") && clean(row[columns.prospect]) === clean(r.prospect_name || "Unknown")
-        && clean(row[columns.time]) === clean(`${localDate(r.created_at)} ${localTime(r.created_at)}`)
+        && clean(row[columns.time]) === clean(r.call_date || "Unknown")
         && clean(row[columns.status]) === expectedStatus && clean(row[columns.ticket]) === expectedTicket
         && clean(row[columns.original]) === expectedOriginal && (r.call_sequence == null ? /unknown|unavailable|notrecorded/i.test(row[columns.sequence]) : Number(sequence) === r.call_sequence)
         && clean(row[columns.practice]) === clean(r.practice_type || "Unknown")

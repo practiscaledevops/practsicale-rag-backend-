@@ -45,6 +45,7 @@ import {
 } from "@/components/ui";
 import { fmtDateTime, fmtDuration, fmtInt, humanize, relTime } from "@/lib/format";
 import { sourceTypeLabel, statusTone, triggerLabel } from "@/lib/ui-labels";
+import { ingestionErrorSummary } from "@/lib/ingestion-error";
 
 export interface SourceRun {
   status: string;
@@ -78,7 +79,7 @@ export interface SourceHealth {
   totalIngested: number;
   totalChunks: number;
   totalSkipped: number;
-  avgTimeToSearchableMs: number | null;
+  avgSyncDurationMs: number | null;
 }
 
 const AUTH_LABELS: Record<string, string> = {
@@ -133,7 +134,13 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
   const [toggling, setToggling] = React.useState(false);
   const [backfilling, setBackfilling] = React.useState(false);
   const [repairing, setRepairing] = React.useState(false);
-  const [msg, setMsg] = React.useState<{ tone: "success" | "danger"; text: string } | null>(null);
+  const [msg, setMsg] = React.useState<{ tone: "success" | "warning" | "danger"; text: string } | null>(null);
+  React.useEffect(() => {
+    const refresh = () => { if (document.visibilityState === "visible" && !syncing && !toggling && !backfilling && !repairing) router.refresh(); };
+    const timer = setInterval(refresh, 15000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
+  }, [router, syncing, toggling, backfilling, repairing]);
 
   async function syncNow() {
     setSyncing(true);
@@ -146,7 +153,9 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
         return;
       }
       const found = json.documents_ingested ?? json.documentsIngested ?? 0;
-      setMsg({ tone: "success", text: `Sync complete — ${found} new record${found === 1 ? "" : "s"} ingested.` });
+      setMsg(/^partial:/i.test(json.error ?? "")
+        ? { tone: "warning", text: `Batch saved — ${found} new records. The next sync resumes from the saved checkpoint.` }
+        : { tone: "success", text: `Sync complete — ${found} new record${found === 1 ? "" : "s"} ingested.` });
       router.refresh();
     } catch {
       setMsg({ tone: "danger", text: "Network error — please try again." });
@@ -265,15 +274,19 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
   // P0: a source that has never completed a sync is not "Connected" (and not green).
   const hasSucceeded = Boolean(health.lastSuccessAt) || health.lastStatus === "success";
   const neverSynced = !health.lastStatus || !hasSucceeded;
-  const running = health.lastStatus === "running";
+  const running = runs[0]?.status === "running" || health.lastStatus === "running";
+  const partial = runs[0]?.status === "success" && /^partial:/i.test(runs[0]?.error ?? "");
+  const scheduled = runs.some(r => r.trigger === "schedule");
 
   const syncState: { label: string; tone: BadgeTone } = errorState
     ? { label: "Last sync failed", tone: "danger" }
     : running
       ? { label: "Syncing", tone: "accent" }
-      : neverSynced
+      : partial
+        ? { label: "Reconciliation continues", tone: "warning" }
+        : neverSynced
         ? { label: "Never synced", tone: "neutral" }
-        : { label: "Healthy", tone: "success" };
+        : { label: "Last batch succeeded", tone: "success" };
 
   const connection: { value: string; tone: StatTone; icon: LucideIcon } = paused
     ? { value: "Paused", tone: "neutral", icon: Pause }
@@ -289,7 +302,7 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
   const description = [
     sourceTypeLabel(health.sourceType),
     kindLabel,
-    health.scheduleCron ? `Schedule ${health.scheduleCron}` : "Manual or webhook syncs",
+    health.scheduleCron ? `Schedule ${health.scheduleCron}` : scheduled ? "Automatic reconciliation and event updates" : "Manual or webhook syncs",
   ].join(" · ");
 
   const busyLabel = repairing ? "Repairing call dates…" : backfilling ? "Back-filling transcripts…" : null;
@@ -365,21 +378,21 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
         <StatTile
           icon={health.lastSuccessAt ? CheckCircle2 : CircleDashed}
           tone={health.lastSuccessAt ? "success" : "default"}
-          label="Last successful sync"
+          label="Last completed batch"
           value={<TimeAgo iso={health.lastSuccessAt} />}
-          hint={health.lastSuccessAt ? "Newest successful run" : "No successful sync yet"}
+          hint={health.lastSuccessAt ? "A batch may cover part of the source" : "No successful batch yet"}
         />
         <StatTile
           icon={Clock}
           label="Last attempted"
           value={<TimeAgo iso={health.lastRunAt} />}
-          hint={health.scheduleCron ? `Schedule: ${health.scheduleCron}` : "Manual only"}
+          hint={health.scheduleCron ? `Schedule: ${health.scheduleCron}` : scheduled ? "Automatic reconciliation observed" : "Manual or event-driven"}
         />
         <StatTile
           icon={Gauge}
-          label="Avg time to searchable"
-          value={fmtDuration(health.avgTimeToSearchableMs)}
-          hint="From call to embedded"
+          label="Average batch duration"
+          value={fmtDuration(health.avgSyncDurationMs)}
+          hint="Run time; not live update latency"
         />
       </StatGrid>
 
@@ -399,10 +412,10 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
         />
         <StatTile
           icon={AlertTriangle}
-          tone={health.totalSkipped > 0 ? "warning" : "default"}
-          label="Skipped as duplicates"
+          tone="default"
+          label="Already stored"
           value={fmtInt(health.totalSkipped)}
-          hint="Idempotent by content hash"
+          hint="No new content to ingest"
         />
       </StatGrid>
 
@@ -441,7 +454,7 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
             </Row>
             <Row label="Record id field">{health.recordIdField || <Muted>—</Muted>}</Row>
             <Row label="Source type">{sourceTypeLabel(health.sourceType)}</Row>
-            <Row label="Schedule">{health.scheduleCron || <Muted>Manual or webhook only</Muted>}</Row>
+            <Row label="Schedule">{health.scheduleCron || <Muted>{scheduled ? "Automatic reconciliation observed in recent runs" : "Manual or webhook"}</Muted>}</Row>
           </dl>
         </SectionCard>
       </div>
@@ -466,7 +479,8 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
             ) : (
               runs.map((r, i) => {
                 const dur = r.finishedAt ? new Date(r.finishedAt).getTime() - new Date(r.startedAt).getTime() : null;
-                const firstLine = r.error ? r.error.split("\n")[0] : "";
+                const runPartial = r.status === "success" && /^partial:/i.test(r.error ?? "");
+                const errorSummary = runPartial ? "Batch saved. The next sync resumes from the checkpoint." : ingestionErrorSummary(r.error);
                 return (
                   <Tr key={i}>
                     <Td className="whitespace-nowrap align-top text-muted-foreground">
@@ -477,19 +491,19 @@ export function SourceHealthClient({ health, runs }: { health: SourceHealth; run
                     </Td>
                     <Td className="align-top">
                       <div className="flex max-w-[44ch] flex-col items-start gap-1">
-                        <Badge tone={statusTone(r.status)}>{RUN_STATUS_LABELS[r.status] ?? humanize(r.status)}</Badge>
+                        <Badge tone={runPartial ? "warning" : statusTone(r.status)}>{runPartial ? "Batch saved · more to check" : RUN_STATUS_LABELS[r.status] ?? humanize(r.status)}</Badge>
                         {r.error && (
-                          <details className="group w-full text-xs text-danger">
+                          <details className="group w-full text-xs text-muted-foreground">
                             <summary className="flex cursor-pointer list-none items-center gap-1 rounded-md [&::-webkit-details-marker]:hidden">
                               <ChevronRight
                                 size={12}
                                 aria-hidden
                                 className="shrink-0 transition-transform group-open:rotate-90"
                               />
-                              <span className="truncate">{firstLine || "Show error"}</span>
+                              <span className="truncate">{errorSummary}</span>
                             </summary>
-                            <p className="mt-1 whitespace-pre-wrap break-words rounded-lg bg-danger/5 px-2 py-1.5 font-mono text-xs text-danger">
-                              {r.error}
+                            <p className="mt-1 whitespace-pre-wrap break-words rounded-lg bg-muted/50 px-2 py-1.5 text-xs">
+                              {errorSummary}
                             </p>
                           </details>
                         )}

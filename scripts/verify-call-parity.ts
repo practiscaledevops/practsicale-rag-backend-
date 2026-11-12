@@ -41,7 +41,7 @@ function expectedHashes(raw: Record<string, unknown>): Record<string, string> {
   }
   return hashes;
 }
-type SourceRecord = { id: string; status: string; ticket: string; outcome: string; sequence: number | null; revision: unknown; hasTranscript: boolean; hashes: Record<string, string> };
+type SourceRecord = { id: string; status: string; ticket: string; outcome: string; sequence: number | null; callDate: unknown; outcomeDate: unknown; revision: unknown; hasTranscript: boolean; hashes: Record<string, string> };
 type Issue = { recordId?: string; documentId?: string; chunkId?: string; type: string; expected?: unknown; actual?: unknown };
 
 async function main() {
@@ -62,16 +62,19 @@ async function main() {
       const json = await response.json();
       const rows = (source.records_path ? source.records_path.split(".").reduce((o: any, k: string) => o?.[k], json) : json) as Record<string, unknown>[];
       if (!Array.isArray(rows)) throw Error("Scoring feed records are not an array");
-      for (const r of rows) records.set(String(r[source.record_id_field ?? "id"]), { id: String(r[source.record_id_field ?? "id"]), status: status(r.call_status), ticket: ticket(r.ticket_category), outcome: outcome(r.call_outcome), sequence: sequence(r.call_sequence), revision: r.updated_at, hasTranscript: typeof r.transcript === "string" && !!r.transcript.trim(), hashes: expectedHashes(r) });
+      for (const r of rows) records.set(String(r[source.record_id_field ?? "id"]), { id: String(r[source.record_id_field ?? "id"]), status: status(r.call_status), ticket: ticket(r.ticket_category), outcome: outcome(r.call_outcome), sequence: sequence(r.call_sequence), callDate:r.call_date??null, outcomeDate:r.outcome_event_at??null, revision: r.updated_at, hasTranscript: typeof r.transcript === "string" && !!r.transcript.trim(), hashes: expectedHashes(r) });
       if (rows.length < 25) break;
       if (offset > 100_000) throw Error("Source pagination safety limit exceeded");
     }
     const issues: Issue[] = [];
     const documents: any[] = [];
-    for (let offset = 0; ; offset += 1000) {
-      const { data, error } = await db.from("documents").select("id,source_type,content_hash,metadata").eq("org_id", source.org_id).eq("data_source_id", source.id).order("id").range(offset, offset + 999);
-      if (error) throw Error(error.message);
-      documents.push(...data); if (data.length < 1000) break;
+    for (let after = ""; ;) {
+      let query = db.from("documents").select("id,source_type,content_hash,metadata").eq("org_id", source.org_id).eq("data_source_id", source.id).order("id").limit(200);
+      if(after)query=query.gt("id",after);
+      const {data,error}=await query;
+      if (error) throw Error(`Documents page: ${error.message}`);
+      documents.push(...data); if (data.length < 200) break;
+      after=data[data.length-1].id;
     }
     const grouped = new Map<string, any[]>();
     const docRecords = new Map<string, SourceRecord>();
@@ -90,6 +93,8 @@ async function main() {
       if (ticket(d.metadata.ticket_category) !== r.ticket) issues.push({ recordId: id, documentId: d.id, type: "document_ticket", expected: r.ticket, actual: ticket(d.metadata.ticket_category) });
       if (outcome(d.metadata.call_outcome) !== r.outcome) issues.push({ recordId: id, documentId: d.id, type: "document_original_outcome", expected: r.outcome, actual: outcome(d.metadata.call_outcome) });
       if (sequence(d.metadata.call_sequence) !== r.sequence) issues.push({ recordId: id, documentId: d.id, type: "document_sequence", expected: r.sequence, actual: sequence(d.metadata.call_sequence) });
+      if ((d.metadata.call_date??null) !== r.callDate) issues.push({recordId:id,documentId:d.id,type:"document_call_date",expected:r.callDate,actual:d.metadata.call_date});
+      if (revision(d.metadata.outcome_event_at) !== revision(r.outcomeDate)) issues.push({recordId:id,documentId:d.id,type:"document_outcome_date",expected:r.outcomeDate,actual:d.metadata.outcome_event_at});
       if (d.content_hash !== r.hashes[d.source_type]) issues.push({ recordId: id, documentId: d.id, type: "document_body_hash" });
       if (revision(d.metadata.source_body_updated_at ?? d.metadata.source_updated_at) !== revision(r.revision)) revisionLag++;
     }
@@ -101,11 +106,13 @@ async function main() {
     }
     let chunkCount = 0;
     let chunkRevisionLag = 0;
-    for (let offset = 0; ; offset += 1000) {
-      const { data, error } = await db.from("chunks")
-        .select("id,document_id,status:metadata->>call_status,ticket:metadata->>ticket_category,revision:metadata->>source_updated_at,body_revision:metadata->>source_body_updated_at,outcome:metadata->>call_outcome,sequence:metadata->>call_sequence")
-        .eq("org_id", source.org_id).eq("data_source_id", source.id).order("id").range(offset, offset + 999);
-      if (error) throw Error(error.message);
+    for (let after = ""; ;) {
+      let query = db.from("chunks")
+        .select("id,document_id,status:metadata->>call_status,ticket:metadata->>ticket_category,revision:metadata->>source_updated_at,body_revision:metadata->>source_body_updated_at,outcome:metadata->>call_outcome,sequence:metadata->>call_sequence,call_date:metadata->>call_date,outcome_date:metadata->>outcome_event_at")
+        .eq("org_id", source.org_id).eq("data_source_id", source.id).order("id").limit(250);
+      if(after)query=query.gt("id",after);
+      const {data,error}=await query;
+      if (error) throw Error(`Chunks page: ${error.message}`);
       for (const c of data) {
         chunkCount++;
         const r = docRecords.get(c.document_id); if (!r) continue;
@@ -114,9 +121,12 @@ async function main() {
         if (ticket(c.ticket) !== r.ticket) issues.push({ recordId: r.id, documentId: c.document_id, chunkId: c.id, type: "chunk_ticket", expected: r.ticket, actual: ticket(c.ticket) });
         if (outcome(c.outcome) !== r.outcome) issues.push({ recordId: r.id, documentId: c.document_id, chunkId: c.id, type: "chunk_original_outcome", expected: r.outcome, actual: outcome(c.outcome) });
         if (sequence(c.sequence) !== r.sequence) issues.push({ recordId: r.id, documentId: c.document_id, chunkId: c.id, type: "chunk_sequence", expected: r.sequence, actual: sequence(c.sequence) });
+        if ((c.call_date??null) !== r.callDate) issues.push({recordId:r.id,documentId:c.document_id,chunkId:c.id,type:"chunk_call_date",expected:r.callDate,actual:c.call_date});
+        if (revision(c.outcome_date) !== revision(r.outcomeDate)) issues.push({recordId:r.id,documentId:c.document_id,chunkId:c.id,type:"chunk_outcome_date",expected:r.outcomeDate,actual:c.outcome_date});
         if (revision(c.body_revision ?? c.revision) !== revision(r.revision)) chunkRevisionLag++;
       }
-      if (data.length < 1000) break;
+      if (data.length < 250) break;
+      after=data[data.length-1].id;
     }
     for (const d of documents) if (docRecords.has(d.id) && !docChunkCounts.has(d.id)) issues.push({ recordId: docRecords.get(d.id)!.id, documentId: d.id, type: "missing_chunks" });
     const embeddings = await db.from("chunks").select("id", { count: "exact", head: true }).eq("org_id", source.org_id).eq("data_source_id", source.id).is("embedding", null);
