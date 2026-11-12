@@ -266,6 +266,7 @@ export async function POST(req: Request) {
   ]);
   const modelId = resolvedModel.modelId;
   const provider = modelId.startsWith("claude") ? "anthropic" : "openai";
+  const verifierModel = provider === "anthropic" ? modelId : "recommended";
 
   const abort = new AbortController();
   const requestSignal = AbortSignal.any([req.signal, abort.signal, AbortSignal.timeout(Math.max(1, startedAt + GENERATION_DEADLINE_MS - Date.now()))]);
@@ -639,7 +640,7 @@ export async function POST(req: Request) {
           verify: async text => {
             if (Date.now() >= deadline - 10_000) return null;
             fp ??= await getActivePrompt(ctx.orgId, "faithfulness");
-            return checkFaithfulness(context + performanceSection + (hasAttachments ? attachmentBlock : ""), text, fp, "recommended",
+            return checkFaithfulness(context + performanceSection + (hasAttachments ? attachmentBlock : ""), text, fp, verifierModel,
               AbortSignal.timeout(Math.max(1000, Math.min(shortAnswer ? 12_000 : 45_000, deadline - Date.now() - 5000))),
               { question: query, trustedPolicy: `${groundingPrompt}\n\n${modeBlock}` });
           },
@@ -709,7 +710,7 @@ export async function POST(req: Request) {
             try {
               const fp = await getActivePrompt(ctx.orgId, "faithfulness");
               // Judge against everything the model was given, numbers included.
-              const verdict = await checkFaithfulness(`${context}${performanceSection}`, fullText, fp);
+              const verdict = await checkFaithfulness(`${context}${performanceSection}`, fullText, fp, verifierModel);
               grounded = verdict.checked ? verdict.grounded : null;
             } catch (e) {
               console.error("[faithfulness] check failed:", e instanceof Error ? e.message : e);

@@ -73,7 +73,7 @@ export async function checkFaithfulness(
   context: string,
   answer: string,
   systemPrompt: string,
-  tier: "fast" | "recommended" | "max" = "recommended",
+  tier: string = "recommended",
   signal?: AbortSignal,
   task?: { question: string; trustedPolicy: string }
 ): Promise<FaithfulnessVerdict> {
