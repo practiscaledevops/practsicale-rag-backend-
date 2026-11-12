@@ -37,6 +37,7 @@ import { recordedCallDate, outcomeTimestamp } from "@/lib/call-dates";
 export interface CallReviewFilter {
   /** Client closings use the CRM outcome event; call rosters use occurrence date. */
   dateBasis?: "outcome";
+  closingCountOnly?: boolean;
   /** ISO call_date "YYYY-MM-DD" the request named (exact match), if any. */
   date?: string;
   /** Inclusive ISO range ("last 3 days", "this week") — used instead of `date`. */
@@ -105,6 +106,7 @@ export function looksLikeReview(query: string): boolean {
 
 /** Business users ask for clients/deals/names, often without the word 'calls'. */
 export function isOperationalClientReport(query: string): boolean {
+  if (isMonthlyClosingAmountQuestion(query)) return true;
   const q = normalizeCallReportQuery(query);
   return /\b(clients?|prospects?|customers?|deals?|closings?|names?)\b/i.test(q) &&
     /\b(closed|closings?|won|pending|not[- ]closed|follow[- ]?ups?|ht|lt|high[- ]ticket|low[- ]ticket)\b/i.test(q) &&
@@ -142,6 +144,10 @@ const MONTHS: Record<string, number> = {
   october: 10, oct: 10, november: 11, nov: 11, december: 12, dec: 12,
 };
 const MONTH_ALT = "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?";
+
+function isMonthlyClosingAmountQuestion(query: string): boolean {
+  return new RegExp("^\\s*how\\s+much\\s+(?:have\\s+we\\s+closed|we\\s+have\\s+closed|did\\s+we\\s+close)\\s+in\\s+(?:" + MONTH_ALT + ")(?:\\s+\\d{4})?\\s*[?.!]?\\s*$", "i").test(query);
+}
 
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
@@ -481,6 +487,10 @@ export function parseCallReviewFilter(
   const isReview = hasFilter && looksLikeReview(q) && (!GENERATION_RE.test(q) || isCallReportCreationRequest(q));
 
   const filter: CallReviewFilter = { isReview };
+  if (isMonthlyClosingAmountQuestion(q)) {
+    filter.dateBasis = "outcome";
+    filter.closingCountOnly = true;
+  }
   if (crmStatus === "closed" && !/\bcalls?\b/i.test(q) && /\b(clients?|prospects?|customers?|deals?|closings?|names?)\b/i.test(q)) filter.dateBasis = "outcome";
   if (/\b(closing|closed|outcome)\s+(?:date|month|day)\b/i.test(q)) filter.dateBasis = "outcome";
   if (range) { filter.dateFrom = range.from; filter.dateTo = range.to; }
