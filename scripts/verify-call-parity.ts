@@ -18,7 +18,8 @@ const hash = (text: string) => createHash("sha256").update(redactPII(text)).dige
 // Independently reconstruct the source bodies. Matching revisions alone cannot
 // establish that a historical report/transcript was actually refreshed.
 function expectedHashes(raw: Record<string, unknown>): Record<string, string> {
-  const { transcript, ...r } = raw;
+  // Outcome dates are live metadata; introducing them must not rewrite bodies.
+  const { transcript, outcome_event_at: _eventDate, ...r } = raw;
   const crm = ({ closed: "Closed", not_closed: "Not Closed", pending: "Pending", disqualified: "Disqualified" } as Record<string, string>)[status(r.call_status)] ?? status(r.call_status);
   const closing = r.ticket_category === "high_ticket" ? "High Ticket" : r.ticket_category === "low_ticket" ? "Low Ticket" : "Unclassified";
   const hashes: Record<string, string> = { call_score: hash(`Current CRM status: ${crm}\nClosing type: ${closing}\nThe call_outcome in the original report is historical, not current CRM truth.\n\n${serializeRecord(r)}`) };

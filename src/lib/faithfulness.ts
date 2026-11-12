@@ -9,8 +9,8 @@
 //      is supported by the context. Returns a verdict the caller can surface (or
 //      use to trigger a refusal / regeneration).
 //
-// Graceful: demo mode or any error yields a permissive verdict, so verification
-// never blocks a response — it annotates it.
+// Demo mode or any error returns checked=false. This is NOT certification:
+// factual-answer callers must withhold an answer that could not be verified.
 
 import { generateText } from "ai";
 import { getModel } from "@/lib/llm";
@@ -69,7 +69,8 @@ export async function checkFaithfulness(
   context: string,
   answer: string,
   systemPrompt: string,
-  tier: "fast" | "recommended" | "max" = "recommended"
+  tier: "fast" | "recommended" | "max" = "recommended",
+  signal?: AbortSignal
 ): Promise<FaithfulnessVerdict> {
   const permissive: FaithfulnessVerdict = { grounded: true, unsupported: [], checked: false };
   if (isDemo() || !answer.trim() || !context.trim()) return permissive;
@@ -81,6 +82,7 @@ export async function checkFaithfulness(
       system: systemPrompt,
       prompt: `CONTEXT:\n${context}\n\nANSWER:\n${answer}\n\nJSON verdict:`,
       ...generationParams(m.modelId, { temperature: 0, maxTokens: 300 }),
+      abortSignal: signal,
     });
     const parsed = safeParseVerdict(text);
     if (!parsed) return permissive;

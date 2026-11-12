@@ -22,7 +22,7 @@ describe("complete operational count filters",()=>{
   });
   it("counts LT calls independently of CRM closure, and applies closed only for closings",()=>{
     expect(parseCallReviewFilter("What is the total of LT calls from 1 to 11 November 2026 across all consultants?",{referenceDate:"2026-11-10"})).toEqual({isReview:true,dateFrom:"2026-11-01",dateTo:"2026-11-11",ticketCategory:"low_ticket"});
-    expect(parse("total HT closings")).toEqual({isReview:true,ticketCategory:"high_ticket",crmStatus:"closed"});
+    expect(parse("total HT closings")).toEqual({isReview:true,ticketCategory:"high_ticket",crmStatus:"closed",dateBasis:"outcome"});
     expect(parse("number of not closed calls")).toEqual({isReview:true,crmStatus:"not_closed"});
     expect(parse("total pending calls")).toEqual({isReview:true,crmStatus:"pending"});
     expect(parse("total follow up calls")).toEqual({isReview:true,originalOutcome:"FOLLOW_UP"});
@@ -33,9 +33,9 @@ describe("complete operational count filters",()=>{
     expect(f.ticketCategory).toBeUndefined();expect(f.crmStatus).toBeUndefined();expect(f.originalOutcome).toBeUndefined();
   });
   it("enforces ticket, source, tenant, timestamp and nullable-pending predicates in the database",()=>{
-    const calls:unknown[]=[];const q:any={};for(const method of ["eq","gte","lt","or","ilike"])q[method]=(...args:unknown[])=>{calls.push([method,...args]);return q;};
+    const calls:unknown[]=[];const q:any={};for(const method of ["eq","gte","lte","lt","or","ilike"])q[method]=(...args:unknown[])=>{calls.push([method,...args]);return q;};
     applyCallReviewFilter(q,"tenant",{isReview:true,ticketCategory:"low_ticket",crmStatus:"pending",dateFrom:"2026-11-01",dateTo:"2026-11-11"},"Asia/Karachi");
-    expect(calls).toContainEqual(["eq","org_id","tenant"]);expect(calls).toContainEqual(["eq","source_type","transcript"]);expect(calls).toContainEqual(["eq","metadata->>ticket_category","low_ticket"]);expect(calls).toContainEqual(["or","metadata->>call_status.is.null,metadata->>call_status.eq.pending"]);expect(calls).toContainEqual(["gte","metadata->>created_at","2026-10-31T19:00:00.000Z"]);expect(calls).toContainEqual(["lt","metadata->>created_at","2026-11-11T19:00:00.000Z"]);
+    expect(calls).toContainEqual(["eq","org_id","tenant"]);expect(calls).toContainEqual(["eq","source_type","transcript"]);expect(calls).toContainEqual(["eq","metadata->>ticket_category","low_ticket"]);expect(calls).toContainEqual(["or","metadata->>call_status.is.null,metadata->>call_status.eq.pending"]);expect(calls).toContainEqual(["gte","metadata->>call_date","2026-11-01"]);expect(calls).toContainEqual(["lte","metadata->>call_date","2026-11-11"]);
   });
 });
 

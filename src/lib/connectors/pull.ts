@@ -23,6 +23,7 @@ import { assertPublicUrl } from "@/lib/net-guard";
 import { isAllowedSecretRef } from "@/lib/connectors/secret-ref";
 import { syncSourceDocument, syncSourceMetadata, type SourceSyncResult } from "@/lib/connectors/sync-document";
 import { callStatusLabel, closingTypeLabel } from "@/lib/call-status";
+import { validCallDate, outcomeTimestamp } from "@/lib/call-dates";
 
 // Big free-text fields belong in the chunked BODY, not in metadata. The raw
 // `transcript` is a ~46 KB field that gets its own document (see runPull), so it
@@ -42,21 +43,7 @@ const OMIT_FROM_META = new Set(["full_report", "report", "full_report_md", "anal
 // not personal contact data. (Emails/phones in free-text fields are still redacted.)
 const NO_REDACT_KEY = /(^|_)(id|date|at|slug|url|links|status|band|outcome|type|version|count|score|scores|ratio|duration|pct|percent)$/i;
 
-// The scoring app leaves `call_date` blank on many recent records, and its UI
-// shows `created_at` (the report/scored date) as the call's date. To match the
-// app exactly — and never lose a recent call to a blank date — the canonical
-// `call_date` we store is the DATE PART of created_at, falling back to a reported
-// call_date. Returns "YYYY-MM-DD" or null.
-function isoDatePart(v: unknown): string | null {
-  const m = String(v ?? "").trim().match(/^(\d{4}-\d{2}-\d{2})/);
-  return m ? m[1] : null;
-}
-/** The date to group/filter a call by: created_at's date (app-matching), else call_date. */
-function effectiveCallDate(rec: Record<string, unknown>): string | null {
-  return isoDatePart(rec.created_at) || isoDatePart(rec.call_date);
-}
-
-function recordMetadata(rec: Record<string, unknown>): Record<string, unknown> {
+export function recordMetadata(rec: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(rec)) {
     if (OMIT_FROM_META.has(k) || v == null || v === "") continue;
@@ -79,16 +66,11 @@ function recordMetadata(rec: Record<string, unknown>): Record<string, unknown> {
   // call and transcript groups by practice type (NEMT, Phlebotomy, Home Care…).
   // Only when the record actually carries one — otherwise leave it unset ("—").
   if (typeof out.practice_type === "string" && out.practice_type) out.category = out.practice_type;
-  // Canonical call date = created_at's date (what the scoring app UI shows and
-  // always present); keep the raw reported one under `reported_call_date` when it
-  // differs. This makes every date filter/review match the app and stops recent
-  // calls (blank call_date) from falling into "no date".
-  const eff = effectiveCallDate(rec);
-  if (eff) {
-    const reported = isoDatePart(rec.call_date);
-    if (reported && reported !== eff) out.reported_call_date = reported;
-    out.call_date = eff;
-  }
+  // Occurrence and outcome dates never use import timestamps.
+  out.call_date = validCallDate(rec.call_date);
+  out.reported_call_date = out.call_date;
+  out.call_date_basis = "source";
+  out.outcome_event_at = outcomeTimestamp(rec.outcome_event_at);
   // Keep explicit nulls: clearing a CRM status/classification is an update too.
   out.call_status = rec.call_status ?? null;
   out.ticket_category = rec.ticket_category ?? null;
@@ -112,7 +94,10 @@ function buildTitle(rec: Record<string, unknown>, sourceType: string, recordId?:
 }
 
 function scoringText(record: Record<string, unknown>): string {
-  return `Current CRM status: ${callStatusLabel(record)}\nClosing type: ${closingTypeLabel(record)}\nThe call_outcome in the original report is historical, not current CRM truth.\n\n${serializeRecord(record)}`;
+  // The event timestamp is authoritative metadata, overlaid at retrieval time.
+  // Adding it to the feed must not re-embed every historical report body.
+  const { outcome_event_at: _outcomeEventAt, ...body } = record;
+  return `Current CRM status: ${callStatusLabel(record)}\nClosing type: ${closingTypeLabel(record)}\nThe call_outcome in the original report is historical, not current CRM truth.\n\n${serializeRecord(body)}`;
 }
 
 // ---- transcript document -----------------------------------------------------
@@ -471,7 +456,7 @@ export async function backfillTranscripts(
 
 // ---- HTTP + extraction helpers -----------------------------------------------
 
-const MAX_PAGES = 40; // safety cap: MAX_PAGES * limit records per sync
+const MAX_PAGES = 400; // explicit cap; exhaustive scans fail instead of truncating
 const FETCH_TIMEOUT_MS = 20_000;
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // one page of records
 
@@ -535,9 +520,15 @@ async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: Fe
   // Keep pages small and let the existing offset loop fetch the complete set.
   if (source.source_type === "call_score") {
     const requested = Number(baseParams.get("limit"));
-    baseParams.set("limit", String(Math.min(25, requested > 0 && Number.isFinite(requested) ? Math.max(1, Math.floor(requested)) : 25)));
+    const cap = opts.metadataOnly ? 500 : 25;
+    baseParams.set("limit", String(Math.min(cap, requested > 0 && Number.isFinite(requested) ? Math.max(1, Math.floor(requested)) : cap)));
   }
   const cursorParamName = source.cursor_param ?? source.cursor_field;
+  if (opts.ignoreCursor && source.source_type === "call_score" && !opts.recordId) {
+    if (cursorParamName) baseParams.delete(cursorParamName);
+    // Immutable creation ordering keeps pagination stable while statuses change.
+    baseParams.set("since", "1970-01-01T00:00:00.000Z");
+  }
   if (!opts.ignoreCursor && cursorParamName) {
     // A reset update cursor must still select oldest-updated-first ordering.
     // Without this parameter the scoring API defaults to newest-created-first,
@@ -597,6 +588,7 @@ async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: Fe
 
     all.push(...batch);
     if (opts.recordId || !paged || batch.length < limit) break; // exact lookup or last page reached
+    if (opts.ignoreCursor && page === MAX_PAGES - 1) throw Error("Exhaustive source read exceeded the safety limit; no complete count is available");
     // Out of time for this run: stop paging. Records are ingested in order and
     // the cursor advances to the last one processed, so the next run resumes.
     if (deadlineAt && Date.now() > deadlineAt) break;
@@ -607,6 +599,25 @@ async function fetchRecords(source: DataSourceRow, deadlineAt?: number, opts: Fe
 }
 
 /** Fetch the authoritative CURRENT row, never an untrusted webhook snapshot. */
+export async function repairSourceMetadata(db: SupabaseClient, source: DataSourceRow): Promise<{ records: number; documents: number }> {
+  const records = await fetchRecords(source, undefined, { ignoreCursor: true, metadataOnly: true, limit: 500 });
+  let documents = 0;
+  for (let offset = 0; offset < records.length; offset += 5) {
+    const results = await Promise.allSettled(records.slice(offset, offset + 5).map(async raw => {
+      const rec = raw as Record<string, unknown>;
+      const id = String(rec[source.record_id_field ?? "id"] ?? "");
+      if (!id || !rec.updated_at || !Number.isFinite(Date.parse(String(rec.updated_at)))) throw Error("Source record identity/revision unavailable");
+      return syncSourceMetadata(db, { orgId: source.org_id, dataSourceId: source.id, recordId: id, title: buildTitle(rec,"call_score",id),
+        metadata: { data_source: source.name, data_source_slug: source.slug ?? null, source_record_id: id, ...recordMetadata(rec) } });
+    }));
+    for (const result of results) {
+      if (result.status === "rejected") throw result.reason;
+      documents += result.value;
+    }
+  }
+  return { records: records.length, documents };
+}
+
 export async function refreshScoringMetadata(db: SupabaseClient, source: DataSourceRow, recordId: string): Promise<number> {
   const records = await fetchRecords(source, Date.now() + 8000, { ignoreCursor: true, metadataOnly: true, recordId, limit: 1 });
   const rec = records.find(row => !!row && typeof row === "object" && String((row as Record<string, unknown>)[source.record_id_field ?? "id"]) === recordId) as Record<string, unknown> | undefined;

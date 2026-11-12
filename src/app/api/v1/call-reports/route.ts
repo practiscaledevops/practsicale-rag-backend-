@@ -45,7 +45,8 @@ export async function POST(req: Request) {
     const timeZone = resolveTimeZone(callerTimeZone(body.timeZone));
     const filter = resolveReviewFilterWithHistory(body.query,body.history ?? [], { referenceDate: todayIn(timeZone), timeZone, knownConsultants: await knownConsultants(db, ctx.orgId) });
     const revision = async () => {
-      const { data, count, error } = await applyCallReviewFilter(db.from("documents").select("id,updated_at", { count: "exact" }), ctx.orgId, filter, timeZone)
+      const revisionFilter = filter.dateBasis === "outcome" ? { ...filter, date: undefined, dateFrom: undefined, dateTo: undefined } : filter;
+      const { data, count, error } = await applyCallReviewFilter(db.from("documents").select("id,updated_at", { count: "exact" }), ctx.orgId, revisionFilter, timeZone)
         .order("updated_at", { ascending: false }).order("id", { ascending: true }).limit(1);
       if (error || count == null) throw Error("Call revision lookup failed");
       const latest = data?.[0] ?? null;
@@ -64,7 +65,7 @@ export async function POST(req: Request) {
       const roster = await fetchCallsByFilter(db, ctx.orgId, filter, { maxCalls: 0, maxTokens: 0, metadataOnly: true, timeZone });
       if (roster.complete === false) throw Error("Incomplete call roster");
       const after = await revision();
-      if (after.version === current.version) return Response.json({ ...current, content: renderCallReport(roster.scorecard, filter, timeZone), count: roster.totalMatched, filter, timeZone, checkedAt: new Date().toISOString() }, { headers });
+      if (after.version === current.version) return Response.json({ ...current, content: renderCallReport(roster.scorecard, filter, timeZone, true, roster.undated), count: roster.totalMatched, undated: roster.undated ?? 0, filter, timeZone, checkedAt: new Date().toISOString() }, { headers });
       current = after;
     }
     throw Error("Call roster changed during read");

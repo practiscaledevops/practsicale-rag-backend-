@@ -16,24 +16,27 @@
 // alerts.ts (`metadata->>review_date`) and knowledge-read.ts (`attributes->>snapshot`)
 // use, so this stays on the verified filter surface.
 //
-// The parse helpers are PURE (no DB) and unit-tested; the DB fetch is edge-safe
-// (no matches / DB error → empty, never throws) and org-scoped on every query.
+// The parse helpers are PURE (no DB) and unit-tested. Fetches are org-scoped;
+// lookup errors are explicitly incomplete and must never become a zero count.
 //
 // Dates are the ASKING USER's calendar days: "today", "yesterday", "this week",
 // "Sep 24" resolve in the caller's IANA time zone (`timeZone`, lib/timezone;
-// default = the business zone, Asia/Karachi), and a day filter matches calls
-// whose created_at falls inside that zone's day (DST-exact UTC bounds).
+// default = the business zone, Asia/Karachi). Calls use their source calendar
+// date; closings use DST-exact bounds around the recorded CRM outcome event.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { RetrievedChunk } from "@/lib/retrieval";
 import { callStatusLabel, closingTypeLabel, originalOutcomeLabel, callSequenceLabel } from "@/lib/call-status";
 import { DEFAULT_TIME_ZONE, localDate, localDateTime, resolveTimeZone, zonedDayBoundsUTC } from "@/lib/timezone";
+import { recordedCallDate, outcomeTimestamp } from "@/lib/call-dates";
 
 // ---------------------------------------------------------------------------
 // The filter a review request resolves to
 // ---------------------------------------------------------------------------
 
 export interface CallReviewFilter {
+  /** Client closings use the CRM outcome event; call rosters use occurrence date. */
+  dateBasis?: "outcome";
   /** ISO call_date "YYYY-MM-DD" the request named (exact match), if any. */
   date?: string;
   /** Inclusive ISO range ("last 3 days", "this week") — used instead of `date`. */
@@ -53,9 +56,10 @@ export interface CallReviewFilter {
 
 /** One row of the complete roster for a review (every matching call, cheap metadata). */
 export interface ScorecardRow {
-  /** The call's local date ("YYYY-MM-DD") in the review's zone; the stored call_date when created_at is unusable. */
+  outcomeAt?: string | null;
+  /** Source occurrence date (YYYY-MM-DD), independent of import timestamps. */
   date: string;
-  /** The call's local clock time ("HH:mm") in the review's zone; null when created_at is unusable. */
+  /** Null until the source provides an actual call-start time. */
   time: string | null;
   consultant: string;
   consultantId?: string;
@@ -96,7 +100,16 @@ const REVIEW_RE = new RegExp(
 /** True when the query carries a review/audit/analyse verb (no filter required). */
 export function looksLikeReview(query: string): boolean {
   const q = normalizeCallReportQuery(query);
-  return REVIEW_RE.test(q) || isCallCountRequest(q) || isCallReportCreationRequest(q) || /^\s*(?:please\s+)?(?:today|yesterday)(?:['’]?s)?\s+calls?\s*[?.!]?\s*$/i.test(q);
+  return REVIEW_RE.test(q) || isOperationalClientReport(q) || isCallCountRequest(q) || isCallReportCreationRequest(q) || /^\s*(?:please\s+)?(?:today|yesterday)(?:['’]?s)?\s+calls?\s*[?.!]?\s*$/i.test(q);
+}
+
+/** Business users ask for clients/deals/names, often without the word 'calls'. */
+export function isOperationalClientReport(query: string): boolean {
+  const q = normalizeCallReportQuery(query);
+  return /\b(clients?|prospects?|customers?|deals?|closings?|names?)\b/i.test(q) &&
+    /\b(closed|closings?|won|pending|not[- ]closed|follow[- ]?ups?|ht|lt|high[- ]ticket|low[- ]ticket)\b/i.test(q) &&
+    /\b(give|show|list|names?|who|which|how many|count|total|number|report|summary|fetch|pull)\b/i.test(q) &&
+    !/\b(why|how to|tips?|advice|write|draft|post|script|email|blog|coach|improve|recommend|analy[sz]e)\b/i.test(q);
 }
 
 /** Aggregate questions must use the full roster, never top-k evidence chunks. */
@@ -179,12 +192,13 @@ function localStamp(ts: unknown, timeZone: string): string | null {
   const t = Date.parse(String(ts ?? ""));
   return Number.isNaN(t) ? null : localDateTime(t, timeZone);
 }
-/** A scorecard row from a transcript summary chunk's metadata (date + time = created_at in `timeZone`). */
+/** A scorecard row from authoritative occurrence/outcome metadata. */
 function toScorecardRow(m: Record<string, unknown>, timeZone: string): ScorecardRow {
-  const local = localStamp(m.created_at, timeZone);
+  const outcomeAt = outcomeTimestamp(m.outcome_event_at);
   return {
-    date: local ? local.slice(0, 10) : (typeof m.call_date === "string" ? m.call_date : ""),
-    time: local ? local.slice(11) : null,
+    date: recordedCallDate(m) ?? "Not recorded",
+    time: null,
+    outcomeAt: outcomeAt ? localStamp(outcomeAt, timeZone) : null,
     consultant: typeof m.consultant_name === "string" ? m.consultant_name : "Unknown",
     consultantId: typeof m.consultant_id === "string" ? m.consultant_id : undefined,
     prospect: typeof m.prospect_name === "string" ? m.prospect_name : "",
@@ -312,6 +326,12 @@ export function resolveDateRange(
   m = new RegExp(`\\b${LAST}\\s+(\\d{1,2})\\s+months?\\b`).exec(q);
   if (m) { const nn = Math.max(1, Math.min(12, Number(m[1]))); return { from: shiftISO(ref, -(nn * 30 - 1)), to: ref }; }
   if (/\bthis\s+week\b/.test(q)) { const dow = (new Date(ref + "T00:00:00Z").getUTCDay() + 6) % 7; return { from: shiftISO(ref, -dow), to: ref }; }
+  // A bare calendar month is a range, not an unfiltered all-history query.
+  const month = new RegExp(String.raw`\b(${MONTH_ALT})(?:\s+(20\d{2}))?\b`, "i").exec(q);
+  if (month && !resolveDate(q, ref)) {
+    const y = Number(month[2] || ry), mo = MONTHS[month[1]];
+    return { from: firstOf(y, mo), to: y === ry && mo === rm ? ref : lastOf(y, mo) };
+  }
   return undefined;
 }
 
@@ -346,6 +366,7 @@ const NAME_STOPWORDS = new Set<string>([
   "coach", "them", "these", "those", "both", "everyone", "everybody", "team", "whole",
   "last", "this", "next", "past", "previous", "recent", "current", "week", "month", "year",
   "low", "high", "ticket", "lt", "ht", "total", "count", "number", "closed", "pending", "not", "disqualified", "follow", "up", "closing", "closings",
+  "give", "names", "name", "client", "clients", "customer", "customers", "deal", "deals", "won",
 ]);
 
 // A broad run of capitalised tokens (each starts uppercase; possessive marks and
@@ -436,7 +457,7 @@ export function parseCallReviewFilter(
   if (/\bnot[-\s]*closed\b/i.test(q)) statuses.add("not_closed");
   if (/\bpending\b/i.test(q)) statuses.add("pending");
   if (/\bdisqualified\b/i.test(q)) statuses.add("disqualified");
-  if (/\b(?:closed|closings?)\b/i.test(q.replace(/\bnot[-\s]*closed\b/gi,""))) statuses.add("closed");
+  if (/\b(?:closed|closings?|won)\b/i.test(q.replace(/\bnot[-\s]*closed\b/gi,""))) statuses.add("closed");
   const crmStatus = statuses.size === 1 ? [...statuses][0] : undefined;
   // "Call 2+" and "original Follow Up outcome" are different source fields.
   const originalOutcome = /\bfollow[-\s]*ups?\b/i.test(q) && !/\b(?:including|include|columns?|and|with)\b/i.test(q) ? "FOLLOW_UP" as const : undefined;
@@ -460,6 +481,8 @@ export function parseCallReviewFilter(
   const isReview = hasFilter && looksLikeReview(q) && (!GENERATION_RE.test(q) || isCallReportCreationRequest(q));
 
   const filter: CallReviewFilter = { isReview };
+  if (crmStatus === "closed" && !/\bcalls?\b/i.test(q) && /\b(clients?|prospects?|customers?|deals?|closings?|names?)\b/i.test(q)) filter.dateBasis = "outcome";
+  if (/\b(closing|closed|outcome)\s+(?:date|month|day)\b/i.test(q)) filter.dateBasis = "outcome";
   if (range) { filter.dateFrom = range.from; filter.dateTo = range.to; }
   else if (date) filter.date = date;
   if (consultants.length) filter.consultants = consultants;
@@ -480,6 +503,7 @@ export function describeFilter(f: CallReviewFilter): string {
   if (f.ticketCategory) parts.push(f.ticketCategory === "low_ticket" ? "Low Ticket" : "High Ticket");
   if (f.crmStatus) parts.push(`CRM ${f.crmStatus.replaceAll("_", " ")}`);
   if (f.originalOutcome) parts.push(`original ${f.originalOutcome.replaceAll("_", " ")}`);
+  if (f.dateBasis === "outcome") parts.push("by recorded CRM outcome date");
   return parts.join(" · ") || "matching calls";
 }
 
@@ -616,6 +640,7 @@ function isShortFollowUp(query: string, own: CallReviewFilter): boolean {
 /** `own` (what this turn names) over `prior` (the conversation's active filter), minus explicit widenings. */
 function mergeFilters(own: CallReviewFilter, prior: CallReviewFilter, query: string): CallReviewFilter {
   const out: CallReviewFilter = { isReview: false };
+  if (own.dateBasis || (!/\bcalls?\b/i.test(query) && prior.dateBasis)) out.dateBasis = own.dateBasis ?? prior.dateBasis;
   const allCalls = /\ball\s+calls?\b/i.test(query);
   const dateSrc = own.date || own.dateFrom ? own : WIDEN_DATE_RE.test(query) ? null : prior;
   if (dateSrc?.dateFrom && dateSrc.dateTo) {
@@ -902,66 +927,18 @@ function sanitizeConsultant(name: string): string {
   return (name ?? "").replace(/[%,(){}"'\\.]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
 }
 
-// Bound the lightweight match scan. The whole transcript corpus is ~1,600 chunks,
-// so this never truncates a real filter (a single practice type is ≤ ~800 chunks).
-const MAX_MATCH_ROWS = 5000;
-
-/**
- * The data's newest transcript `call_date` (ISO), or null. Anchors "today"/
- * "yesterday" and an omitted year to the data, not the wall clock. Best-effort.
- */
-/** Every matching call's document_id + a complete scorecard, no transcript fetch
- *  (used to PLAN a background audit job). Filters by created_at's day in
- *  `opts.timeZone` (the requester's zone; default: the business zone). */
-export async function matchingCallDocs(
-  db: SupabaseClient,
-  orgId: string,
-  filter: CallReviewFilter,
-  opts?: { timeZone?: string }
-): Promise<{ docIds: string[]; scorecard: ScorecardRow[] }> {
-  const timeZone = resolveTimeZone(opts?.timeZone);
-  const apply = <T extends { eq: Function; ilike: Function; or: Function; gte: Function; lt: Function }>(q: T): T => {
-    let out = q.eq("org_id", orgId).eq("source_type", "transcript");
-    if (filter.date) {
-      const b = dayBoundsUTC(filter.date, timeZone);
-      out = out.gte("metadata->>created_at", b.start).lt("metadata->>created_at", b.end);
-    } else if (filter.dateFrom && filter.dateTo) {
-      out = out
-        .gte("metadata->>created_at", dayBoundsUTC(filter.dateFrom, timeZone).start)
-        .lt("metadata->>created_at", dayBoundsUTC(filter.dateTo, timeZone).end);
-    }
-    if (filter.practiceType) out = out.ilike("metadata->>practice_type", filter.practiceType);
-    if (filter.ticketCategory) out = out.eq("metadata->>ticket_category", filter.ticketCategory);
-    if (filter.crmStatus === "pending") out = out.or("metadata->>call_status.is.null,metadata->>call_status.eq.pending");
-    else if (filter.crmStatus) out = out.eq("metadata->>call_status", filter.crmStatus);
-    if (filter.originalOutcome) out = out.eq("metadata->>call_outcome", filter.originalOutcome);
-    const cands = (filter.consultants ?? []).map(sanitizeConsultant).filter(Boolean);
-    if (cands.length) out = out.or(cands.map((c) => `metadata->>consultant_name.ilike.%${c}%`).join(","));
-    return out;
-  };
-  try {
-    const { data } = await apply(db.from("chunks").select("document_id, metadata, created_at"))
-      .order("document_id", { ascending: true })
-      .order("created_at", { ascending: true })
-      .limit(MAX_MATCH_ROWS);
-    const docIds: string[] = [];
-    const cardByDoc = new Map<string, ScorecardRow>();
-    for (const r of (data ?? []) as { document_id: string; metadata: Record<string, unknown> }[]) {
-      if (!r.document_id) continue;
-      if (!docIds.includes(r.document_id)) docIds.push(r.document_id);
-      if (!cardByDoc.has(r.document_id)) cardByDoc.set(r.document_id, toScorecardRow(r.metadata ?? {}, timeZone));
-    }
-    return { docIds, scorecard: [...cardByDoc.values()] };
-  } catch {
-    return { docIds: [], scorecard: [] };
-  }
+/** Planning and reporting share one complete, paginated roster. */
+export async function matchingCallDocs(db: SupabaseClient, orgId: string, filter: CallReviewFilter, opts?: { timeZone?: string }): Promise<{ docIds: string[]; scorecard: ScorecardRow[] }> {
+  const roster = await fetchCallsByFilter(db, orgId, filter, { maxCalls: 0, maxTokens: 0, metadataOnly: true, timeZone: opts?.timeZone });
+  if (roster.complete === false) throw new Error(roster.note ?? "Complete call roster unavailable");
+  return { docIds: roster.documentIds ?? [], scorecard: roster.scorecard };
 }
 
 /** Distinct consultant names present in the org's transcripts (for name matching). */
 export async function knownConsultants(db: SupabaseClient, orgId: string): Promise<string[]> {
   try {
     const { data } = await db
-      .from("chunks")
+      .from("documents")
       .select("cn:metadata->>consultant_name")
       .eq("org_id", orgId)
       .eq("source_type", "transcript")
@@ -1010,17 +987,10 @@ export async function newestCallDate(db: SupabaseClient, orgId: string): Promise
  */
 export function applyCallReviewFilter<T extends { eq: Function; ilike: Function; or: Function; gte: Function; lte: Function; lt: Function }>(q: T, orgId: string, filter: CallReviewFilter, timeZone: string): T {
     let out = q.eq("org_id", orgId).eq("source_type", "transcript");
-    // Filter by created_at's day in the user's zone (always clean — the stored
-    // call_date is not) via a half-open range on the ISO timestamp, whose bounds
-    // come from that zone's real offsets (a DST day is 23 or 25 hours). ISO UTC
-    // timestamps compare lexicographically.
-    if (filter.date) {
-      const b = dayBoundsUTC(filter.date, timeZone);
-      out = out.gte("metadata->>created_at", b.start).lt("metadata->>created_at", b.end);
-    } else if (filter.dateFrom && filter.dateTo) {
-      out = out
-        .gte("metadata->>created_at", dayBoundsUTC(filter.dateFrom, timeZone).start)
-        .lt("metadata->>created_at", dayBoundsUTC(filter.dateTo, timeZone).end);
+    const from = filter.date ?? filter.dateFrom, to = filter.date ?? filter.dateTo;
+    if (from && to) {
+      if (filter.dateBasis === "outcome") out = out.gte("metadata->>outcome_event_at", dayBoundsUTC(from,timeZone).start).lt("metadata->>outcome_event_at", dayBoundsUTC(to,timeZone).end);
+      else out = out.eq("metadata->>call_date_basis", "source").gte("metadata->>call_date", from).lte("metadata->>call_date", to);
     }
     if (filter.practiceType) out = out.ilike("metadata->>practice_type", filter.practiceType);
     if (filter.ticketCategory) out = out.eq("metadata->>ticket_category", filter.ticketCategory);
@@ -1037,11 +1007,18 @@ export async function fetchCallsByFilter(
   orgId: string,
   filter: CallReviewFilter,
   opts: { maxCalls: number; maxTokens: number; timeZone?: string; metadataOnly?: boolean }
-): Promise<{ chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number; complete?: boolean }> {
+): Promise<{ chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number; complete?: boolean; undated?: number; documentIds?: string[] }> {
   const timeZone = resolveTimeZone(opts.timeZone);
 
 
   try {
+    let undated = 0;
+    if (filter.dateBasis === "outcome") {
+      const { count, error } = await applyCallReviewFilter(db.from("documents").select("id", { count: "exact", head: true }), orgId, { ...filter, date: undefined, dateFrom: undefined, dateTo: undefined }, timeZone)
+        .is("metadata->>outcome_event_at", null);
+      if (error || count == null) throw Error("Undated closing coverage could not be checked");
+      undated = count;
+    }
     // 1) Which calls match — document_id + summary metadata (never `select *`).
     //    Also builds the COMPLETE scorecard (every matching call), so a 50-call
     //    day is fully enumerated even though we deep-read only a subset.
@@ -1069,9 +1046,9 @@ export async function fetchCallsByFilter(
     );
     const totalMatched = orderedDocs.length;
     if (totalMatched === 0) {
-      return { chunks: [], callCount: 0, note: `No calls found for ${describeFilter(filter)} in the Brain.`, scorecard: [], totalMatched: 0 };
+      return { chunks: [], callCount: 0, note: `No calls found for ${describeFilter(filter)} in the Brain.`, scorecard: [], totalMatched: 0, complete: true, undated };
     }
-    if (opts.metadataOnly) return { chunks: [], callCount: 0, note: null, scorecard, totalMatched, complete: true };
+    if (opts.metadataOnly) return { chunks: [], callCount: 0, note: null, scorecard, totalMatched, complete: true, undated, documentIds: orderedDocs };
 
     // 2) Full chunks for the chosen calls only, in reading order (created_at ASC
     //    = summary → body by timestamp). Select just the pipeline's fields — never
@@ -1097,10 +1074,10 @@ export async function fetchCallsByFilter(
       // the user's zone: the stored "Call date:" line is the source's UTC /
       // reported value and can be a day off from the scorecard (a 01:10Z call is
       // the previous evening in New York). Existing chunk text is never rewritten.
-      const local = rowsByDoc.has(r.document_id) ? null : localStamp(md.created_at, timeZone);
+      const local = rowsByDoc.has(r.document_id) ? null : recordedCallDate(md);
       const shaped: RetrievedChunk = {
         id: r.id,
-        content: local ? `Call date/time (${timeZone}): ${local}\n${r.content}` : r.content,
+        content: rowsByDoc.has(r.document_id) ? r.content : `Actual call date: ${local ?? "Not recorded"}\n${r.content}`,
         metadata: md,
         document_id: r.document_id,
         parent_id: null,

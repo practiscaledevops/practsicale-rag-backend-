@@ -22,6 +22,13 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllEnvs());
 describe("durable Brain inbox", () => {
+  it("refreshes a bounded backlog batch and rebuilds metrics only once",async()=>{
+    const events=Array.from({length:5},(_,i)=>({...EVENT,id:`event-${i}`,record_id:`report-${i}`}));
+    m.rpc.mockReset().mockResolvedValueOnce({data:events,error:null}).mockResolvedValue({data:[],error:null});
+    expect(await drainScoringEvents()).toBe(5);
+    expect(m.sync).toHaveBeenCalledTimes(5);expect(m.rebuild).toHaveBeenCalledOnce();
+    expect(m.rpc).toHaveBeenCalledWith("claim_scoring_sync_events",expect.objectContaining({p_limit:5}));
+  });
   it("retries verified deletion and rebuilds totals before completing its event",async()=>{
     m.rpc.mockReset().mockResolvedValueOnce({data:[{...EVENT,operation:"delete",source_updated_at:"2026-10-20T10:00:00Z"}],error:null}).mockResolvedValue({data:[],error:null});
     expect(await drainScoringEvents()).toBe(1);expect(m.sync).not.toHaveBeenCalled();expect(m.remove).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({id:"source"}),"report","2026-10-20T10:00:00Z");expect(m.rebuild).toHaveBeenCalledOnce();

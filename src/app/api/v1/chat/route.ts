@@ -72,7 +72,8 @@ import { runRetrieval } from "@/lib/pipeline";
 import { runOrchestratedRetrieval, capabilityGates, performanceAllowed, callReviewInScope, buildDateNote, type OrchestrationOutput } from "@/lib/orchestrator";
 import { metricEventRows } from "@/lib/performance-memory";
 import { detectLearning, looksLikeLearning } from "@/lib/learning-detect";
-import { validateCitations, checkFaithfulness } from "@/lib/faithfulness";
+import { validateCitations, checkFaithfulness, type FaithfulnessVerdict } from "@/lib/faithfulness";
+import { verifiedFactualAnswer } from "@/lib/answer-verification";
 import { resolveContext, AuthError } from "@/lib/auth/context";
 import { requireCapability, narrowScope, narrowSourceTypes, matchesNoSourceType } from "@/lib/auth/scope";
 import { KNOWLEDGE_SCOPE_IDS, knowledgeScopeDef, scopeUnavailableMessage } from "@/lib/knowledge-scopes";
@@ -291,7 +292,7 @@ export async function POST(req: Request) {
             report = await fetchCallsByFilter(db, ctx.orgId, filter, { maxCalls: 0, maxTokens: 0, timeZone, metadataOnly: true });
           }
         }
-        const text = report ? renderCallReport(report.scorecard, filter, timeZone, report.complete !== false)
+        const text = report ? renderCallReport(report.scorecard, filter, timeZone, report.complete !== false, report.undated)
           : "I couldn't run a complete structured call lookup with the current permissions, source selection or date filter. Missing retrieved records do not mean there were zero calls. Specify a date or consultant, and use the Consultant calls scope if your access permits.";
         dataStream.writeData({ type: "call_review", count: report?.totalMatched ?? 0, note: report?.note ?? null, filter: { date: filter.date ?? null, dateFrom: filter.dateFrom ?? null, dateTo: filter.dateTo ?? null, consultants: filter.consultants ?? null, practiceType: filter.practiceType ?? null, ticketCategory: filter.ticketCategory ?? null, crmStatus: filter.crmStatus ?? null, originalOutcome: filter.originalOutcome ?? null }, timeZone });
         dataStream.write(formatDataStreamPart("text", text));
@@ -516,6 +517,10 @@ export async function POST(req: Request) {
       // visible "send continue" note instead of a silent cut.
       const maxSteps = wantsLong ? 4 : 2;
       const deadline = startedAt + GENERATION_DEADLINE_MS;
+      const verifyBeforeRelease = !creative && settings.features.groundOrRefuse && settings.features.faithfulnessCheck;
+      let factualVerdict: FaithfulnessVerdict | null = null;
+      let verificationLabel = "not verified in this receipt";
+      let withheld = false;
       let fullText = "";
       let promptTokens = 0;
       let completionTokens = 0;
@@ -529,7 +534,7 @@ export async function POST(req: Request) {
         // one — a long orchestration must not leave step 0 a budget the wall
         // clock can't honour (that is the silent cut this loop exists to prevent).
         const rate = step === 0 ? ASSUMED_TOKENS_PER_SEC : tokensPerSec;
-        const affordable = Math.floor(((deadline - Date.now() - 15_000) / 1000) * rate);
+        const affordable = Math.floor(((deadline - Date.now() - (verifyBeforeRelease ? 60_000 : 15_000)) / 1000) * rate);
         const stepTokens = Math.min(maxTokens, Math.max(step === 0 ? MIN_CONTINUATION_TOKENS : 0, affordable));
         if (step > 0 && stepTokens < MIN_CONTINUATION_TOKENS) {
           clipped = true;
@@ -560,7 +565,7 @@ export async function POST(req: Request) {
         const flush = (upTo: number) => {
           const chunk = pending.slice(0, upTo);
           if (!chunk) return;
-          if (!creative) dataStream.write(formatDataStreamPart("text", chunk));
+          if (!creative && !verifyBeforeRelease) dataStream.write(formatDataStreamPart("text", chunk));
           fullText += chunk;
           pending = pending.slice(upTo);
         };
@@ -584,7 +589,7 @@ export async function POST(req: Request) {
       }
 
       if (clipped) {
-        if (!creative) dataStream.write(formatDataStreamPart("text", CLIPPED_NOTE));
+        if (!creative && !verifyBeforeRelease) dataStream.write(formatDataStreamPart("text", CLIPPED_NOTE));
         fullText += CLIPPED_NOTE;
       }
       let overlap = wordingOverlap(fullText, priorDrafts);
@@ -605,7 +610,18 @@ export async function POST(req: Request) {
           }
         } catch (e) { console.error("[creative] revision unavailable", e instanceof Error ? e.name : "error"); }
       }
-      if (creative) dataStream.write(formatDataStreamPart("text", fullText));
+      if (verifyBeforeRelease) {
+        dataStream.writeData({ type: "status", stage: "quality", label: "Verifying claims against the evidence" });
+        if (Date.now() < deadline - 10_000) {
+          try {
+            const fp = await getActivePrompt(ctx.orgId, "faithfulness");
+            factualVerdict = await checkFaithfulness(context + performanceSection + (hasAttachments ? attachmentBlock : ""), fullText, fp, "recommended", AbortSignal.timeout(Math.max(1000, Math.min(45_000, deadline - Date.now() - 5000))));
+          } catch { /* A failed check never certifies an answer. */ }
+        }
+        const checked = verifiedFactualAnswer(fullText, factualVerdict, validateCitations(fullText,retrievedIds).fabricated);
+        fullText = checked.text; verificationLabel = checked.label; withheld = !checked.verified;
+      }
+      if (creative || verifyBeforeRelease) dataStream.write(formatDataStreamPart("text", fullText));
       const citationCheck = validateCitations(fullText, retrievedIds);
       dataStream.writeData({ type: "generation_receipt", model: modelId, mode: effectiveMode, creative,
         words: fullText.trim().split(/\s+/).length, targetWords: creative ? creativeContext.targetWords ?? null : null,
@@ -613,7 +629,7 @@ export async function POST(req: Request) {
         overlapPercent: creative && priorDrafts.length ? overlap.percent : null, revised,
         layers: creativeContext.layerNames, evidenceDocuments: docIds.length, evidenceChunks: chunks.length,
         validCitations: citationCheck.valid.length, invalidCitations: citationCheck.fabricated.length,
-        faithfulness: "not verified in this receipt", seed: creative ? seed : null,
+        faithfulness: verificationLabel, seed: creative ? seed : null,
         warnings: [...creativeContext.warnings, ...(creative && overlap.repeated ? ["Substantial wording overlap remains; limited source material may constrain variation."] : [])],
       });
       dataStream.write(
@@ -645,10 +661,10 @@ export async function POST(req: Request) {
       const latencyMs = Date.now() - startedAt;
       waitUntil(
         (async () => {
-          let grounded: boolean | null = null;
+          let grounded: boolean | null = factualVerdict?.checked ? !withheld && factualVerdict.grounded : null;
           // The faithfulness judge is an LLM call; skip it when the wall clock is
           // nearly spent rather than lose the metering row with it.
-          if (settings.features.faithfulnessCheck && Date.now() < deadline - 30_000) {
+          if (!verifyBeforeRelease && settings.features.faithfulnessCheck && Date.now() < deadline - 30_000) {
             try {
               const fp = await getActivePrompt(ctx.orgId, "faithfulness");
               // Judge against everything the model was given, numbers included.
@@ -666,7 +682,7 @@ export async function POST(req: Request) {
               cost_usd: costUsd(modelId, promptTokens, completionTokens),
               latency_ms: latencyMs, grounded, fabricated_citations: fabricated.length,
             }).then(({ error }) => error && console.error("[usage] insert failed:", error.message), (e) => console.error("[usage] insert error:", e)),
-            logQuery({ orgId: ctx.orgId, apiKeyId: ctx.key.id, query, mode: effectiveMode, sourceTypes: retrievedSourceTypes, retrievedDocIds: docIds, grounded, confidence, refused: false }),
+            logQuery({ orgId: ctx.orgId, apiKeyId: ctx.key.id, query, mode: effectiveMode, sourceTypes: retrievedSourceTypes, retrievedDocIds: docIds, grounded, confidence, refused: withheld }),
             logChunkRetrievals(
               ctx.orgId,
               chunks.map((c) => ({ chunkId: c.id, documentId: c.document_id, score: c.score ?? null, cited: citedSet.has(c.id) }))

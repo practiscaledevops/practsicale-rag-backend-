@@ -1,5 +1,6 @@
 // A manager/CRM status is current truth; call_outcome is the model's original
 // interpretation and may still say FOLLOW_UP after the deal has closed.
+import { recordedCallDate, outcomeTimestamp } from "@/lib/call-dates";
 export function callStatus(meta: Record<string, unknown>): string {
   return typeof meta.call_status === "string" && meta.call_status.trim() ? meta.call_status.trim().toLowerCase() : "pending";
 }
@@ -29,6 +30,9 @@ export function currentCallEvidence(content: string, sourceType: string | null |
   if (sourceType !== "call_score" && sourceType !== "transcript") return content;
   const historical = content.replace(/(^|\n)Outcome:\s*(CLOSED|FOLLOW_UP|LOST)(?=\r?\n|$)/g, "$1Original model outcome (historical; not CRM status): $2");
   return [
+    `Actual call date: ${recordedCallDate(meta) ?? "Not recorded"}`,
+    `Current CRM outcome event at: ${outcomeTimestamp(meta.outcome_event_at) ?? "Not recorded"}`,
+    "Report created_at/updated_at are import/update times, not call or closing dates. A closed status without a recorded outcome date cannot establish the month it closed.",
     `Call sequence: ${callSequenceLabel(meta)}`,
     `Original call outcome: ${originalOutcomeLabel(meta)} (historical; separate from current CRM status)`,
     `Current CRM status: ${callStatusLabel(meta)}`,

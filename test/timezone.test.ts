@@ -264,8 +264,8 @@ function fakeDb(idRows: unknown[], rows: unknown[] = []) {
     },
   };
   const bounds = (i = 0) => ({
-    gte: calls[i].find((c) => c.method === "gte" && c.args[0] === "metadata->>created_at")?.args[1],
-    lt: calls[i].find((c) => c.method === "lt" && c.args[0] === "metadata->>created_at")?.args[1],
+    gte: calls[i].find((c) => c.method === "gte" && c.args[0] === "metadata->>call_date")?.args[1],
+    lt: calls[i].find((c) => c.method === "lte" && c.args[0] === "metadata->>call_date")?.args[1],
   });
   return { db: db as unknown as SupabaseClient, calls, bounds };
 }
@@ -274,7 +274,7 @@ function fakeDb(idRows: unknown[], rows: unknown[] = []) {
 const CALL_ROW = {
   document_id: "doc-1",
   created_at: "2026-09-25T02:30:00Z",
-  metadata: { created_at: "2026-09-25T02:30:00Z", call_date: "2026-09-25", consultant_name: "James Ephrim", prospect_name: "Acme", practice_type: "NEMT", overall_score: 82 },
+  metadata: { created_at: "2026-09-25T02:30:00Z", call_date_basis: "source", call_date: "2026-09-25", consultant_name: "James Ephrim", prospect_name: "Acme", practice_type: "NEMT", overall_score: 82 },
 };
 const CHUNK_ROW = { id: "c-1", content: "summary", metadata: { tokens: 10 }, document_id: "doc-1", created_at: "2026-09-25T02:30:00Z" };
 
@@ -294,53 +294,53 @@ describe("fetchCallsByFilter / matchingCallDocs — day bounds + scorecard dates
     expect(sep24).toEqual({ isReview: true, date: "2026-09-24" });
   });
 
-  for (const [tz, gte, lt] of [
+  for (const [tz] of [
     [NY, "2026-09-24T04:00:00.000Z", "2026-09-25T04:00:00.000Z"],
     [PK, "2026-09-23T19:00:00.000Z", "2026-09-24T19:00:00.000Z"],
     [LA, "2026-09-24T07:00:00.000Z", "2026-09-25T07:00:00.000Z"],
   ] as const) {
-    it(`'24 sep' for a ${tz} user filters created_at to that zone's day`, async () => {
+    it(`'24 sep' for a ${tz} user filters the calendar call date without shifting it`, async () => {
       const f = fakeDb([CALL_ROW], [CHUNK_ROW]);
       await fetchCallsByFilter(f.db, "org-1", sep24, { maxCalls: 25, maxTokens: 140_000, timeZone: tz });
-      expect(f.bounds(0)).toEqual({ gte, lt });
+      expect(f.bounds(0)).toEqual({ gte: "2026-09-24", lt: "2026-09-24" });
       const m = fakeDb([CALL_ROW]);
       await matchingCallDocs(m.db, "org-1", sep24, { timeZone: tz });
-      expect(m.bounds(0)).toEqual({ gte, lt });
+      expect(m.bounds(0)).toEqual({ gte: "2026-09-24", lt: "2026-09-24" });
     });
   }
 
-  it("a DST day's filter covers the whole 25-hour day", async () => {
+  it("calendar call dates do not shift on DST days", async () => {
     const f = fakeDb([]);
     await fetchCallsByFilter(f.db, "org-1", { isReview: true, date: "2026-11-01" }, { maxCalls: 25, maxTokens: 1000, timeZone: NY });
-    expect(f.bounds(0)).toEqual({ gte: "2026-11-01T04:00:00.000Z", lt: "2026-11-02T05:00:00.000Z" });
+    expect(f.bounds(0)).toEqual({ gte: "2026-11-01", lt: "2026-11-01" });
   });
 
   it("a range filter runs from the first day's start to the last day's end", async () => {
     const f = fakeDb([]);
     await fetchCallsByFilter(f.db, "org-1", { isReview: true, dateFrom: "2026-09-22", dateTo: "2026-09-24" }, { maxCalls: 25, maxTokens: 1000, timeZone: NY });
-    expect(f.bounds(0)).toEqual({ gte: "2026-09-22T04:00:00.000Z", lt: "2026-09-25T04:00:00.000Z" });
+    expect(f.bounds(0)).toEqual({ gte: "2026-09-22", lt: "2026-09-24" });
   });
 
   it("scorecard dates and times are the call's local day and clock time in the user's zone", async () => {
     const ny = await fetchCallsByFilter(fakeDb([CALL_ROW], [CHUNK_ROW]).db, "org-1", sep24, { maxCalls: 25, maxTokens: 140_000, timeZone: NY });
-    expect(ny.scorecard.map((r) => [r.date, r.time])).toEqual([["2026-09-24", "22:30"]]);
+    expect(ny.scorecard.map((r) => [r.date, r.time])).toEqual([["2026-09-25", null]]);
     const pk = await fetchCallsByFilter(fakeDb([CALL_ROW], [CHUNK_ROW]).db, "org-1", sep24, { maxCalls: 25, maxTokens: 140_000, timeZone: PK });
-    expect(pk.scorecard.map((r) => [r.date, r.time])).toEqual([["2026-09-25", "07:30"]]);
+    expect(pk.scorecard.map((r) => [r.date, r.time])).toEqual([["2026-09-25", null]]);
     const plan = await matchingCallDocs(fakeDb([CALL_ROW]).db, "org-1", sep24, { timeZone: NY });
-    expect(plan).toEqual({ docIds: ["doc-1"], scorecard: [expect.objectContaining({ date: "2026-09-24", time: "22:30", consultant: "James Ephrim" })] });
+    expect(plan).toEqual({ docIds: ["doc-1"], scorecard: [expect.objectContaining({ date: "2026-09-25", time: null, consultant: "James Ephrim" })] });
   });
 
   it("each call's FIRST chunk leads with its date/time in the user's zone (the stored 'Call date:' is UTC)", async () => {
     // The summary's own "Call date: 2026-09-25" is the UTC date; the NY user's call was the 24th at 22:30.
-    const summary = { ...CHUNK_ROW, content: "Call transcript — James Ephrim → Acme\nCall date: 2026-09-25", metadata: { tokens: 10, created_at: "2026-09-25T02:30:00Z", call_date: "2026-09-25" } };
+    const summary = { ...CHUNK_ROW, content: "Call transcript — James Ephrim → Acme\nCall date: 2026-09-25", metadata: { tokens: 10, created_at: "2026-09-25T02:30:00Z", call_date_basis: "source", call_date: "2026-09-25" } };
     const body = { ...summary, id: "c-2", content: "[James Ephrim → Acme · NEMT · 2026-09-25]\nHello", created_at: "2026-09-25T02:30:01Z" };
     const ny = await fetchCallsByFilter(fakeDb([CALL_ROW], [summary, body]).db, "org-1", sep24, { maxCalls: 25, maxTokens: 140_000, timeZone: NY });
     expect(ny.chunks.map((c) => c.content)).toEqual([
-      "Call date/time (America/New_York): 2026-09-24 22:30\nCall transcript — James Ephrim → Acme\nCall date: 2026-09-25",
+      "Actual call date: 2026-09-25\nCall transcript — James Ephrim → Acme\nCall date: 2026-09-25",
       "[James Ephrim → Acme · NEMT · 2026-09-25]\nHello",
     ]);
     const pk = await fetchCallsByFilter(fakeDb([CALL_ROW], [summary, body]).db, "org-1", sep24, { maxCalls: 25, maxTokens: 140_000, timeZone: PK });
-    expect(pk.chunks[0].content.startsWith("Call date/time (Asia/Karachi): 2026-09-25 07:30\n")).toBe(true);
+    expect(pk.chunks[0].content.startsWith("Actual call date: 2026-09-25\n")).toBe(true);
   });
 
   it("an unusable created_at (PII-mangled) never throws: no stamp, the stored call_date, no time", async () => {
@@ -348,19 +348,18 @@ describe("fetchCallsByFilter / matchingCallDocs — day bounds + scorecard dates
     const chunk = { ...CHUNK_ROW, metadata: { tokens: 10, created_at: "[PHONE]" } };
     const out = await fetchCallsByFilter(fakeDb([mangled], [chunk]).db, "org-1", sep24, { maxCalls: 25, maxTokens: 140_000, timeZone: NY });
     expect(out.callCount).toBe(1);
-    expect(out.chunks.map((c) => c.content)).toEqual(["summary"]);
+    expect(out.chunks.map((c) => c.content)).toEqual(["Actual call date: Not recorded\nsummary"]);
     expect(out.scorecard.map((r) => [r.date, r.time])).toEqual([["2026-09-25", null]]);
   });
 
   it("no zone / an invalid zone → the default zone's day (the previous behaviour)", async () => {
-    const expected = zonedDayBoundsUTC("2026-09-24", DEFAULT_TIME_ZONE);
     for (const timeZone of [undefined, "Mars/Olympus_Mons"]) {
       const f = fakeDb([]);
       await fetchCallsByFilter(f.db, "org-1", sep24, { maxCalls: 25, maxTokens: 1000, timeZone });
-      expect(f.bounds(0)).toEqual({ gte: expected.startISO, lt: expected.endISO });
+      expect(f.bounds(0)).toEqual({ gte: "2026-09-24", lt: "2026-09-24" });
     }
     const m = fakeDb([]);
     await matchingCallDocs(m.db, "org-1", sep24);
-    expect(m.bounds(0)).toEqual({ gte: expected.startISO, lt: expected.endISO });
+    expect(m.bounds(0)).toEqual({ gte: "2026-09-24", lt: "2026-09-24" });
   });
 });

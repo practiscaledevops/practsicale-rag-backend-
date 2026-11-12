@@ -131,16 +131,16 @@ describe("pull connector — call dates", () => {
     expect(m.ingestOne).not.toHaveBeenCalled();
   });
 
-  it("metadata.call_date is created_at's date part; a differing reported date is kept as reported_call_date", async () => {
+  it("metadata retains the source call date and never invents one for historical imports", async () => {
     respondWith([
       { id: "r1", consultant_name: "James Ephrim", prospect_name: "Acme", created_at: "2026-09-25T01:10:00.000Z", call_date: "2026-09-24", transcript: "James: Hi" },
       { id: "r2", consultant_name: "David Park", prospect_name: "Beta", created_at: "2026-09-25T09:00:00Z", transcript: "David: Hello" },
     ]);
     await backfillTranscripts(SOURCE, { db: {} as SupabaseClient });
     const [a, b] = ingested();
-    expect(a.metadata).toMatchObject({ call_date: "2026-09-25", reported_call_date: "2026-09-24", created_at: "2026-09-25T01:10:00.000Z" });
-    expect(b.metadata).toMatchObject({ call_date: "2026-09-25", created_at: "2026-09-25T09:00:00Z" });
-    expect(b.metadata).not.toHaveProperty("reported_call_date");
+    expect(a.metadata).toMatchObject({ call_date: "2026-09-24", reported_call_date: "2026-09-24", call_date_basis: "source", created_at: "2026-09-25T01:10:00.000Z" });
+    expect(b.metadata).toMatchObject({ call_date: null, created_at: "2026-09-25T09:00:00Z" });
+    expect(b.metadata).toHaveProperty("reported_call_date", null);
   });
 
   it("the transcript body keeps the source's date string verbatim (stable content hash)", async () => {
