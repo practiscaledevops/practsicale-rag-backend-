@@ -161,6 +161,14 @@ export function isWorkMode(v: unknown): v is WorkMode {
  * job type (CREATE / ADVISE / BUILD / ANALYZE) and the mode's behaviour.
  * Accepts legacy aliases. Returns "" only for an unknown/missing mode.
  */
+export const EVIDENCE_PRECISION_INSTRUCTION = `EVIDENCE PRECISION
+- "Not documented" means unknown, not forbidden or nonexistent. Do not turn missing guarantee/refund terms into a policy that excludes them.
+- Check that numerator and denominator describe the same unit and cohort. Client counts do not establish handoff counts; calls are not unique clients. If the relationship is unstated, give the supported counts without a rate.
+- Archived evidence supports what was recorded then. Do not carry its prices, owners, hours, or approvals into the present without confirmation.
+- In proposed plans and templates, make dependencies conditional: an attachment, landing page, existing workflow, assigned owner or completed action is not established merely because your proposal needs it. Use clear placeholders or say what must be confirmed.
+- Founder drafts may paraphrase verified experience, but new opinions or intentions must be labeled as proposed wording for the founder's approval. Never present newly written dialogue as a historical quotation. Keep exact source quotes separate from suggested copy.
+- Preserve the requested format and deliverable. Give useful proposed advice when factual evidence is limited; do not replace an answerable creative or planning task with a generic refusal.`;
+
 export function modeInstruction(mode: string | undefined | null): string {
   const def = modeDef(mode);
   if (!def) return "";
@@ -170,7 +178,7 @@ export function modeInstruction(mode: string | undefined | null): string {
     `Subject to the grounding and access rules, this instruction controls HOW to respond on this turn — let it shape the job you do, your format, and your posture. ` +
     `If the user asks which mode you are in or what you can do, name the current mode (${label}) and what it is best at; this is the one time you may describe your own scope. ` +
     `The user can switch modes anytime from the Work Mode menu (Auto picks the expert for them).`;
-  return `${header}\n\n${INTENT_FRAMING[def.intent]}\n\n${def.instruction}`;
+  return `${header}\n\n${INTENT_FRAMING[def.intent]}\n\n${def.instruction}\n\n${EVIDENCE_PRECISION_INSTRUCTION}`;
 }
 
 // ---------------------------------------------------------------------------

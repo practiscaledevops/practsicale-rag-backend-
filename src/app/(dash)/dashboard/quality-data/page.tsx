@@ -2,7 +2,8 @@ import { redirect } from "next/navigation";
 import { pageAccess } from "@/lib/auth/page-guard";
 import { NoAccessNotice } from "@/components/auth/PermissionGate";
 import { getDataQuality } from "@/lib/data-quality";
-import { PageHeader } from "@/components/ui";
+import { Alert, PageHeader } from "@/components/ui";
+import Link from "next/link";
 import { DataQualityClient } from "./DataQualityClient";
 import type { Metadata } from "next";
 
@@ -21,12 +22,14 @@ export default async function DataQualityPage() {
   const { session, allowed } = await pageAccess("documents:read");
   if (!session) redirect("/login");
   if (!allowed) return <NoAccessNotice />;
-  const data = await getDataQuality(session.orgId);
+  const data = await getDataQuality(session.orgId).catch(()=>null);
 
   return (
     <div>
       <PageHeader title="Data quality" description="Documents and collections that need attention." />
-      <DataQualityClient data={data} />
+      {data ? <DataQualityClient data={data} /> : <Alert tone="danger" title="Data quality check unavailable">
+        The complete library could not be checked. This is not a healthy or empty result. <Link href="/dashboard/quality-data" className="underline">Retry the check</Link>
+      </Alert>}
     </div>
   );
 }

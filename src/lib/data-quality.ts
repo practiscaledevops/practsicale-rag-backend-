@@ -53,14 +53,22 @@ function ageDays(iso: string): number {
 
 export async function getDataQuality(orgId: string): Promise<DataQuality> {
   const db = supabaseAdmin();
+  const readDocuments = async () => {
+    const documents: unknown[] = [];
+    for (let after = ""; ;) {
+      let q = db.from("documents").select("id, title, source_type, updated_at, metadata, chunks(count)")
+        .eq("org_id",orgId).order("id").limit(200);
+      if(after)q=q.gt("id",after);
+      const {data,error}=await q;
+      if(error)throw Error("Document quality read unavailable");
+      documents.push(...(data??[]));
+      if(!data||data.length<200)return documents;
+      after=data[data.length-1].id;
+    }
+  };
 
-  const [docsRes, colsRes, runsRes] = await Promise.all([
-    db
-      .from("documents")
-      .select("id, title, source_type, updated_at, metadata, chunks(count)")
-      .eq("org_id", orgId)
-      .order("updated_at", { ascending: true })
-      .limit(2000),
+  const [allDocuments, colsRes, runsRes] = await Promise.all([
+    readDocuments(),
     db.from("collections").select("id, name, settings").eq("org_id", orgId),
     db
       .from("ingestion_runs")
@@ -71,7 +79,8 @@ export async function getDataQuality(orgId: string): Promise<DataQuality> {
       .limit(LIST_CAP),
   ]);
 
-  const docs = (docsRes.data ?? []) as {
+  if(colsRes.error||runsRes.error)throw Error("Data quality read unavailable");
+  const docs = allDocuments as {
     id: string;
     title: string | null;
     source_type: string;
@@ -92,7 +101,7 @@ export async function getDataQuality(orgId: string): Promise<DataQuality> {
     const reviewDate = metaStr(d.metadata, "review_date", "expiry_date");
 
     if (chunkCount === 0) {
-      unsearchable.push({ id: d.id, title: d.title, sourceType: d.source_type, updatedAt, reason: "No embedded chunks" });
+      unsearchable.push({ id: d.id, title: d.title, sourceType: d.source_type, updatedAt, reason: "No indexed sections" });
       continue; // an unsearchable doc's freshness is moot
     }
     if (reviewDate) {
