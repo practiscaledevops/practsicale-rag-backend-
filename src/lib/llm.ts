@@ -3,6 +3,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { wrapLanguageModel, type LanguageModelV1, type LanguageModelV1Middleware } from "ai";
 import { getProviderKey } from "@/lib/secrets";
 import { supportsTemperature } from "@/lib/models-catalog";
+import { boundModel } from "@/lib/model-runtime";
 
 // Selectable model tiers (see docs/00-master-plan.md §0.10). The UI exposes these
 // with "recommended" as the default; hard queries can escalate to "max".
@@ -86,13 +87,13 @@ export async function getModel(tierOrId?: string) {
   const id = resolveId(tierOrId);
   if (id.startsWith("claude")) {
     const apiKey = await getProviderKey("anthropic");
-    return guardSamplingParams(createAnthropic({ apiKey })(id));
+    return boundModel(guardSamplingParams(createAnthropic({ apiKey })(id)));
   }
   const apiKey = await getProviderKey("openai");
   // The v1 provider defaults to OpenAI-compatible mode, which omits
   // stream_options.include_usage. Official OpenAI streams then have NaN token
   // counts: metering inserts fail and the spoke records zero usage/cost.
-  return openAIModel(id, apiKey);
+  return boundModel(openAIModel(id, apiKey));
 }
 
 // ---- Env-only variants (kept for callers/scripts that don't resolve DB keys) ----
@@ -105,7 +106,7 @@ export function modelForTier(tierOrId?: string) {
 /** Choose a provider model by id using the default (env) credentials. */
 export function model(name?: string) {
   const id = name ?? TIER_ENV.recommended;
-  return id.startsWith("claude") ? guardSamplingParams(anthropic(id)) : openAIModel(id);
+  return boundModel(id.startsWith("claude") ? guardSamplingParams(anthropic(id)) : openAIModel(id));
 }
 
 // TODO: route through the Vercel AI Gateway for automatic provider failover

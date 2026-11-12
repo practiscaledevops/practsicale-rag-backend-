@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { modelSignal } from "@/lib/model-runtime";
 import { isDemo } from "@/lib/demo/mode";
 import { getProviderKey } from "@/lib/secrets";
 
@@ -56,7 +57,7 @@ export async function embed(text: string): Promise<number[]> {
     return zeroVec();
   }
   try {
-    const res = await c.embeddings.create({ model: MODEL, input: text, dimensions: DIM });
+    const res = await c.embeddings.create({ model: MODEL, input: text, dimensions: DIM }, { signal: modelSignal(30_000) });
     return orderedEmbeddings(res.data, 1)[0];
   } catch (err) {
     onEmbedError(err);
@@ -104,7 +105,7 @@ export async function embedForIngest(texts: string[]): Promise<(number[] | null)
     }
     const batch = inputs.slice(i, end);
     try {
-      const res = await c.embeddings.create({ model: MODEL, input: batch, dimensions: DIM });
+      const res = await c.embeddings.create({ model: MODEL, input: batch, dimensions: DIM }, { signal: modelSignal(30_000) });
       const ordered = orderedEmbeddings(res.data, batch.length);
       for (let j = 0; j < ordered.length; j++) vectors[i + j] = ordered[j];
     } catch (err) {
@@ -137,7 +138,7 @@ export async function embedMany(texts: string[]): Promise<number[][]> {
     return texts.map(() => zeroVec());
   }
   try {
-    const res = await c.embeddings.create({ model: MODEL, input: texts, dimensions: DIM });
+    const res = await c.embeddings.create({ model: MODEL, input: texts, dimensions: DIM }, { signal: modelSignal(30_000) });
     return orderedEmbeddings(res.data, texts.length);
   } catch (err) {
     onEmbedError(err);

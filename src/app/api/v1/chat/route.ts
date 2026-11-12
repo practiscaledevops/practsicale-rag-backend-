@@ -63,6 +63,8 @@ import { creativeContextSchema, creativeInstruction, isCreativeRequest, wordingO
 import { waitUntil } from "@vercel/functions";
 import { z } from "zod";
 import { getModel } from "@/lib/llm";
+import { withModelRequest } from "@/lib/model-runtime";
+import { cancellableBody } from "@/lib/cancellable-stream";
 import { generationParams, MODELS } from "@/lib/models-catalog";
 import { buildContext, buildAttachmentBlock, modeInstruction, outputInstruction, isSmallTalk, SMALLTALK_SYSTEM } from "@/lib/prompts";
 import { REASONING_ORDER_INSTRUCTION, MODE_LABELS, normalizeMode, modeDef } from "@/lib/work-modes";
@@ -265,13 +267,16 @@ export async function POST(req: Request) {
   const modelId = resolvedModel.modelId;
   const provider = modelId.startsWith("claude") ? "anthropic" : "openai";
 
-  return createDataStreamResponse({
+  const abort = new AbortController();
+  const requestSignal = AbortSignal.any([req.signal, abort.signal, AbortSignal.timeout(Math.max(1, startedAt + GENERATION_DEADLINE_MS - Date.now()))]);
+  const response = createDataStreamResponse({
     headers: { "x-model": modelId, "x-provider": provider, ...rateLimitHeaders(rl) },
     onError: (error) => {
       console.error("[v1/chat] stream error:", error);
       return "The assistant hit an error while generating the answer. Please try again.";
     },
-    execute: async (dataStream) => {
+    execute: (dataStream) => withModelRequest(requestSignal, async () => {
+      requestSignal.throwIfAborted();
       dataStream.writeData({ type: "status", stage: "planning", label: "Understanding the request" });
 
       if (requestedSel === "smart" || requestedSel === "auto" || deepAnalysis) {
@@ -714,8 +719,9 @@ export async function POST(req: Request) {
           ]);
         })()
       );
-    },
+    }),
   });
+  return new Response(response.body ? cancellableBody(response.body, abort) : null, response);
 }
 
 // A whole turn (messages + attachments + directives + summary) may not exceed

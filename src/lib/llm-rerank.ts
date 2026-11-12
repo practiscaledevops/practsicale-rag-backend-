@@ -65,6 +65,7 @@ export async function llmRerank(
     const m = await getModel(tier);
     const { text } = await generateText({
       model: m,
+      abortSignal: AbortSignal.timeout(20_000), maxRetries: 0,
       system:
         "You rank passages by how well each one helps answer the user's question. Judge relevance only. Output ONLY compact JSON, no prose.",
       prompt:

@@ -50,6 +50,7 @@ export async function rewriteQuery(
     const m = await getModel(tier);
     const { text } = await generateText({
       model: m,
+      abortSignal: AbortSignal.timeout(20_000), maxRetries: 0,
       system: systemPrompt,
       prompt: recent
         ? `Conversation so far:\n${recent}\n\nLatest question: ${question}\n\nRewritten standalone search query:`
@@ -93,6 +94,7 @@ export async function rewriteQueries(
     const m = await getModel(tier);
     const { text } = await generateText({
       model: m,
+      abortSignal: AbortSignal.timeout(20_000), maxRetries: 0,
       system: systemPrompt,
       prompt: recent
         ? `Conversation so far:\n${recent}\n\nLatest question: ${question}\n\nSearch queries:`

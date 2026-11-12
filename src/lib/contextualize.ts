@@ -19,6 +19,7 @@ export interface ContextualizeOptions {
   tier: "fast" | "recommended" | "max";
   concurrency: number;
   maxChunksPerDoc: number;
+  signal?: AbortSignal;
 }
 
 /** Keep the cached document reasonably sized in the prompt (chars ≈ 4/token). */
@@ -43,6 +44,8 @@ export async function contextualizeChunks(
     ? documentText.slice(0, MAX_DOC_CHARS)
     : documentText;
 
+  const signal = AbortSignal.any([AbortSignal.timeout(60_000), ...(opts.signal ? [opts.signal] : [])]);
+  const boundedOpts = { ...opts, signal };
   const out = [...empty];
   const concurrency = Math.max(1, Math.min(20, opts.concurrency));
   let cursor = 0;
@@ -50,8 +53,8 @@ export async function contextualizeChunks(
   async function worker() {
     while (true) {
       const i = cursor++;
-      if (i >= chunkContents.length) return;
-      out[i] = await oneContext(doc, chunkContents[i], opts).catch(() => "");
+      if (i >= chunkContents.length || signal.aborted) return;
+      out[i] = await oneContext(doc, chunkContents[i], boundedOpts).catch(() => "");
     }
   }
 
@@ -67,6 +70,8 @@ async function oneContext(
   const m = await getModel(opts.tier);
   const { text } = await generateText({
     model: m,
+    abortSignal: AbortSignal.any([AbortSignal.timeout(20_000), ...(opts.signal ? [opts.signal] : [])]),
+    maxRetries: 0,
     system: opts.systemPrompt,
     prompt: `<document>\n${doc}\n</document>\n\n<chunk>\n${chunk}\n</chunk>\n\nContext for this chunk:`,
     ...generationParams(m.modelId, { temperature: 0, maxTokens: 120 }),
