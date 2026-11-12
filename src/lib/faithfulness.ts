@@ -88,6 +88,7 @@ export async function checkFaithfulness(
       prompt: JSON.stringify({ applicationPolicy: task?.trustedPolicy ?? "", userTask: task?.question ?? "", context, answer }),
       ...generationParams(m.modelId, { temperature: 0, maxTokens: 300 }),
       abortSignal: signal,
+      maxRetries: 0,
     });
     const metering = usage ? { model: m.modelId, inputTokens: usage.promptTokens, outputTokens: usage.completionTokens,
       estimatedCostUsd: costUsd(m.modelId, usage.promptTokens, usage.completionTokens) } : undefined;
