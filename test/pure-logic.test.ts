@@ -63,6 +63,11 @@ describe("citations", () => {
     expect(extractCitationIds("see [abc] and [abc] and [xyz]")).toEqual(["abc", "xyz"]);
   });
 
+  it("does not withhold a valid SOP because it has template fields or Markdown links", () => {
+    const result=validateCitations("Hi [Name], please send [Item] to [Recipient]. [guide](https://example.com) Verified [1]. Invented [ghost].",["1"]);
+    expect(result.valid).toEqual(["1"]);expect(result.fabricated).toEqual(["ghost"]);
+  });
+
   it("splits cited ids into valid vs fabricated against the retrieved set", () => {
     const { valid, fabricated } = validateCitations("from [a] and [ghost]", ["a", "b"]);
     expect(valid).toEqual(["a"]);

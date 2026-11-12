@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Search } from "lucide-react";
+import { Search, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /** The chatbot's form-field recipe (36px, rounded-xl, accent focus ring). */
@@ -30,6 +30,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
 Input.displayName = "Input";
 
 export interface SearchInputProps extends Omit<InputProps, "type"> {
+  onClear?:()=>void;
   /** Required: a search field has no visible label. */
   "aria-label": string;
   /** Class for the positioning wrapper (width, flex). */
@@ -38,14 +39,15 @@ export interface SearchInputProps extends Omit<InputProps, "type"> {
 
 /** Search field with a leading magnifier; compact (32px) by default. */
 export const SearchInput = React.forwardRef<HTMLInputElement, SearchInputProps>(
-  ({ className, wrapperClassName, density = "compact", ...props }, ref) => (
+  ({ className, wrapperClassName, density = "compact", onClear, ...props }, ref) => (
     <div className={cn("relative min-w-0", wrapperClassName)}>
       <Search
         size={14}
         aria-hidden
         className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
       />
-      <Input ref={ref} type="search" density={density} className={cn("pl-8", className)} {...props} />
+      <Input ref={ref} type="search" density={density} className={cn("pl-8",onClear&&"pr-9", className)} {...props} />
+      {onClear && String(props.value??"").length>0 && <button type="button" aria-label="Clear search" className="absolute right-1 top-1/2 flex h-7 w-7 -translate-y-1/2 cursor-pointer items-center justify-center rounded-lg text-muted-foreground hover:bg-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" onClick={e=>{onClear();e.currentTarget.parentElement?.querySelector("input")?.focus();}}><X size={14} aria-hidden /></button>}
     </div>
   )
 );

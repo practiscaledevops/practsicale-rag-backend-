@@ -28,9 +28,11 @@ export interface FaithfulnessVerdict {
 export function extractCitationIds(answer: string): string[] {
   const ids = new Set<string>();
   // chunk ids are uuids or short slugs; accept [word-ish] tokens up to 64 chars.
-  const re = /\[([A-Za-z0-9][A-Za-z0-9_-]{0,63})\]/g;
+  // Template fields and Markdown link labels are not evidence citations.
+  const re = /\[([A-Za-z0-9][A-Za-z0-9_-]{0,63})\](?!\()/g;
+  const placeholders = /^(?:Name|Owner|Date|Time|Item|Recipient|Company|Client|Contact|Action|Reason|Role|Input|Output|TBD|TODO)$/i;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(answer)) !== null) ids.add(m[1]);
+  while ((m = re.exec(answer)) !== null) if (!placeholders.test(m[1])) ids.add(m[1]);
   return [...ids];
 }
 

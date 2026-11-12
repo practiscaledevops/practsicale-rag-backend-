@@ -53,6 +53,7 @@ import {
 import { fmtDate, fmtDateTime, fmtInt } from "@/lib/format";
 import { ACCESS_LABELS, sourceTypeLabel, statusTone } from "@/lib/ui-labels";
 import { cn } from "@/lib/utils";
+import { documentListHref, type DocumentListState } from "@/lib/document-list";
 
 /** One document row for the list; enriched with collection/category/access/etc. */
 export interface DocumentRow {
@@ -320,13 +321,18 @@ export function DocumentsClient({
   documents,
   collections = [],
   truncated = false,
+  paging,
 }: {
   documents: DocumentRow[];
   /** The org's collections, for the bulk Add to / Move to picker. */
   collections?: CollectionOption[];
   /** The server list hit its row cap, so older documents are not shown. */
   truncated?: boolean;
+  paging?: DocumentListState & {total:number;pageSize:number};
 }) {
+  const router=useRouter();
+  const [navigating,startNavigation]=React.useTransition();
+  const [composing,setComposing]=React.useState(false);
   const refreshSoon = useRefreshSoon();
   const { confirm, dialog } = useConfirm();
   // Busy state per row (single actions) and one bulk run at a time: acting on
@@ -337,8 +343,8 @@ export function DocumentsClient({
   const [deleting, setDeleting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<string | null>(null);
-  const [query, setQuery] = React.useState("");
-  const [filter, setFilter] = React.useState<SourceFilter>("all");
+  const [query, setQuery] = React.useState(paging?.query ?? "");
+  const [filter, setFilter] = React.useState<SourceFilter>((paging?.sourceType as SourceFilter) ?? "all");
   // Deleted here: hidden at once, without waiting for the server re-render.
   const [removed, setRemoved] = React.useState<ReadonlySet<string>>(NO_IDS);
   // Collection labels changed here, until the refreshed list agrees.
@@ -347,6 +353,14 @@ export function DocumentsClient({
   const [announcement, setAnnouncement] = React.useState("");
   const [picker, setPicker] = React.useState<"add" | "move" | null>(null);
   const searchRef = React.useRef<HTMLInputElement>(null);
+  const navigate=React.useCallback((next:DocumentListState)=>startNavigation(()=>router.replace(documentListHref(next),{scroll:false})),[router]);
+  React.useEffect(()=>{setQuery(paging?.query??"");setFilter((paging?.sourceType as SourceFilter)??"all");},[paging?.query,paging?.sourceType]);
+  React.useEffect(()=>{
+    if(!paging||composing||query.trim()===paging.query)return;
+    const timer=setTimeout(()=>navigate({page:1,query,sourceType:filter}),query.trim()?300:0);
+    return ()=>clearTimeout(timer);
+  },[query,filter,paging,composing,navigate]);
+  const changeFilter=(next:SourceFilter)=>{setFilter(next);if(paging)navigate({page:1,query,sourceType:next});};
 
   // Drop label overrides the refreshed server list now agrees with (or whose row is gone).
   React.useEffect(() => {
@@ -376,16 +390,17 @@ export function DocumentsClient({
   const deferredQuery = React.useDeferredValue(query);
 
   const searched = React.useMemo(() => {
+    if(paging)return rows;
     const q = deferredQuery.trim().toLowerCase();
     if (!q) return rows;
     return rows.filter((d) =>
       `${d.title ?? ""} ${d.collection ?? ""} ${d.category ?? ""} ${d.owner ?? ""}`.toLowerCase().includes(q)
     );
-  }, [rows, deferredQuery]);
+  }, [rows, deferredQuery,paging]);
 
   const filtered = React.useMemo(
-    () => (filter === "all" ? searched : searched.filter((d) => d.source_type === filter)),
-    [searched, filter]
+    () => (paging || filter === "all" ? searched : searched.filter((d) => d.source_type === filter)),
+    [searched, filter,paging]
   );
 
   const filterTabs = React.useMemo(
@@ -393,9 +408,9 @@ export function DocumentsClient({
       SOURCE_FILTERS.map((f) => ({
         id: f,
         label: f === "all" ? "All" : sourceTypeLabel(f),
-        count: f === "all" ? searched.length : searched.filter((d) => d.source_type === f).length,
+        count: paging?undefined:f === "all" ? searched.length : searched.filter((d) => d.source_type === f).length,
       })),
-    [searched]
+    [searched,paging]
   );
 
   // Selection covers the rows on screen; search / filter changes prune it.
@@ -556,7 +571,7 @@ export function DocumentsClient({
     });
   }
 
-  if (documents.length === 0) {
+  if (documents.length === 0 && !paging) {
     return (
       <EmptyState
         icon={FileText}
@@ -624,18 +639,30 @@ export function DocumentsClient({
         <SearchInput
           ref={searchRef}
           aria-label="Search documents"
-          placeholder="Search by title, collection, category, owner…"
+          placeholder={paging?"Search title, category or owner…":"Search by title, collection, category, owner…"}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
+          onClear={()=>{setQuery("");if(paging)navigate({page:1,query:"",sourceType:filter});}}
+          onCompositionStart={()=>setComposing(true)}
+          onCompositionEnd={()=>setComposing(false)}
+          onKeyDown={e=>{if(e.key==="Enter"&&!e.nativeEvent.isComposing&&paging)navigate({page:1,query,sourceType:filter});}}
           wrapperClassName="w-full sm:w-80"
         />
-        <FilterTabs label="Filter by type" value={filter} tabs={filterTabs} onChange={setFilter} />
+        <FilterTabs label="Filter by type" value={filter} tabs={filterTabs} onChange={changeFilter} />
+        {navigating&&<span role="status" className="text-xs text-muted-foreground">Loading documents…</span>}
       </div>
 
       <TableCard
         className="mt-3"
         footer={
-          <span>
+          paging ? <nav aria-label="Document pages" className="flex w-full flex-wrap items-center justify-between gap-3">
+            <span>{paging.total ? `${fmtInt((paging.page-1)*paging.pageSize+1)}–${fmtInt((paging.page-1)*paging.pageSize+rows.length)}` : "0"} of {fmtInt(paging.total)} documents</span>
+            <div className="flex items-center gap-2">
+              <Button variant="secondary" size="toolbar" disabled={navigating||paging.page<=1} onClick={()=>navigate({...paging,page:paging.page-1})}>Previous page</Button>
+              <span>Page {paging.page} of {Math.max(1,Math.ceil(paging.total/paging.pageSize))}</span>
+              <Button variant="secondary" size="toolbar" disabled={navigating||paging.page*paging.pageSize>=paging.total} onClick={()=>navigate({...paging,page:paging.page+1})}>Next page</Button>
+            </div>
+          </nav> : <span>
             {fmtInt(filtered.length)} of {fmtInt(rows.length)} documents
             {truncated &&
               ` · Showing the first ${fmtInt(documents.length)} — use search or filters to narrow the list.`}
@@ -756,6 +783,7 @@ export function DocumentsClient({
                       onClick={() => {
                         setQuery("");
                         setFilter("all");
+                        if(paging)navigate({page:1,query:"",sourceType:"all"});
                         searchRef.current?.focus();
                       }}
                     >

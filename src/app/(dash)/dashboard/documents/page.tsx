@@ -12,16 +12,12 @@ import { Alert } from "@/components/ui/Alert";
 import { buttonClass } from "@/components/ui/Button";
 import { DocumentsClient, type CollectionOption, type DocumentRow } from "./DocumentsClient";
 import type { Metadata } from "next";
+import { documentListState, documentListHref, documentSearchFilter, DOCUMENT_PAGE_SIZE } from "@/lib/document-list";
 
 export const metadata: Metadata = { title: "Documents" };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic"; // always reflect current documents
-
-// Documents scale with ingested records (a pull sync writes one document per
-// record), so bound the list. 1000 comfortably covers a single-org back office;
-// pagination is the follow-up if a tenant ever outgrows it.
-const LIST_LIMIT = 1000;
 
 const DOC_SELECT =
   "id, title, source_type, uri, created_at, updated_at, metadata, chunks(count), document_collections(collections(name))";
@@ -54,7 +50,7 @@ function meta(m: Record<string, unknown> | null, ...keys: string[]): string | nu
   return null;
 }
 
-export default async function DocumentsPage() {
+export default async function DocumentsPage({searchParams}: {searchParams:Promise<Record<string,string|string[]|undefined>>}) {
   // Org is resolved server-side from the session — never client input. A member
   // without documents:read (write/delete imply it) sees the no-access notice
   // instead of the list; super_admin/demo always pass.
@@ -62,18 +58,23 @@ export default async function DocumentsPage() {
   if (!session) redirect("/login");
   if (!allowed) return <NoAccessNotice />;
   const admin = session;
+  const state=documentListState(await searchParams);
 
   const db = supabaseAdmin();
   // Capture before the list snapshot: a concurrent insert cannot be missed by
   // the first browser check, even if it arrives while this page is rendering.
   const initialVersion = await documentRevision(db, admin.orgId).catch(() => null);
-  const list = (select: string) =>
-    db
+  const list = (select: string) => {
+    let q=db
       .from("documents")
-      .select(select)
+      .select(select,{count:"exact"})
       .eq("org_id", admin.orgId)
       .order("created_at", { ascending: false })
-      .limit(LIST_LIMIT);
+      .order("id", {ascending:true});
+    if(state.sourceType!=="all")q=q.eq("source_type",state.sourceType);
+    if(state.query)q=q.or(documentSearchFilter(state.query));
+    return q.range((state.page-1)*DOCUMENT_PAGE_SIZE,state.page*DOCUMENT_PAGE_SIZE-1);
+  };
 
   // The org's collections feed the bulk "Add to / Move to collection" picker.
   const [first, colRes] = await Promise.all([
@@ -81,7 +82,10 @@ export default async function DocumentsPage() {
     db.from("collections").select("id, name").eq("org_id", admin.orgId).order("name", { ascending: true }),
   ]);
   // Pre-migration 0017 (42703 undefined_column): list without object_id.
-  const { data, error } = first.error && isMissingRelation(first.error) ? await list(DOC_SELECT) : first;
+  const { data, error, count } = first.error && isMissingRelation(first.error) ? await list(DOC_SELECT) : first;
+  const total=count ?? 0;
+  const lastPage=Math.max(1,Math.ceil(total/DOCUMENT_PAGE_SIZE));
+  if(!error&&state.page>lastPage)redirect(documentListHref({...state,page:lastPage}));
   const collections: CollectionOption[] = ((colRes.data as { id: string; name: string | null }[] | null) ?? []).map(
     (c) => ({ id: c.id, name: c.name || "Untitled" })
   );
@@ -103,9 +107,6 @@ export default async function DocumentsPage() {
     object_id: d.object_id ?? null,
   }));
 
-  // The query is capped at LIST_LIMIT rows; say so instead of truncating silently.
-  const truncated = documents.length >= LIST_LIMIT;
-
   return (
     <div className="min-w-0">
       <PageHeader
@@ -124,14 +125,15 @@ export default async function DocumentsPage() {
           </>
         }
       />
-      <LiveDocumentUpdates initialVersion={initialVersion} />
+      {!error && <LiveDocumentUpdates initialVersion={initialVersion} />}
 
       {error ? (
         <Alert tone="danger" title="Couldn't load documents">
-          <span className="text-danger">{error.message}</span>
+          <p>The document list is temporarily unavailable. Your documents are preserved.</p>
+          <Link href={documentListHref(state)} className={buttonClass({variant:"secondary",size:"toolbar"})}>Retry loading documents</Link>
         </Alert>
       ) : (
-        <DocumentsClient documents={documents} collections={collections} truncated={truncated} />
+        <DocumentsClient documents={documents} collections={collections} paging={{...state,total,pageSize:DOCUMENT_PAGE_SIZE}} />
       )}
     </div>
   );
