@@ -25,7 +25,7 @@ const CRON_BUDGET_MS = 230_000;
 
 const SOURCE_COLUMNS =
   "id, org_id, name, slug, source_type, kind, endpoint_url, http_method, auth_type, " +
-  "auth_secret_ref, headers, query_params, records_path, record_id_field, cursor_field, cursor_param, cursor_value";
+  "auth_secret_ref, headers, query_params, records_path, record_id_field, cursor_field, cursor_param, cursor_value, cursor_record_id";
 
 /** Constant-time string compare (length check first — a length mismatch is not secret). */
 function safeEqual(a: string, b: string): boolean {
