@@ -31,14 +31,16 @@ export async function liveCallCounts(w:TimeWindow,signal:AbortSignal){
 }
 
 const appointment=z.object({id:z.string(),calendarId:z.string(),locationId:z.string(),startTime:z.string(),appointmentStatus:z.string(),deleted:z.boolean().optional()});
-export async function liveAppointmentCounts(w:TimeWindow,signal:AbortSignal){
+export async function liveAppointmentCounts(w:TimeWindow,signal:AbortSignal,progress?:(label:string)=>void){
+ progress?.('Loading the live calendar directory');
  const loc=location();
  const catalog=z.object({calendars:z.array(z.object({id:z.string(),locationId:z.string(),groupId:z.string().nullable().optional()}))}).parse(await request('/calendars/?'+new URLSearchParams({locationId:loc,showDrafted:'true'}),signal));
  if(catalog.calendars.some(c=>c.locationId!==loc))throw Error('Calendar location mismatch');
  const ids=[...new Set(catalog.calendars.map(c=>c.id))];if(ids.length>150)throw Error('Calendar coverage exceeds live report limit');
  const scopes=new Map<string,{groupId?:string;calendarId?:string;ids:Set<string>}>();
  for(const cal of catalog.calendars){const key=cal.groupId?'group:'+cal.groupId:'calendar:'+cal.id;const scope=scopes.get(key)??{...(cal.groupId?{groupId:cal.groupId}:{calendarId:cal.id}),ids:new Set<string>()};scope.ids.add(cal.id);scopes.set(key,scope);}
- const jobs=[...scopes.values()],events=new Map<string,z.infer<typeof appointment>>();let next=0,nextStart=Date.now();
+ const jobs=[...scopes.values()],events=new Map<string,z.infer<typeof appointment>>();let next=0,nextStart=Date.now(),completed=0;
+ progress?.(`Checking calendars: 0 of ${ids.length}`);
  const cancel=new AbortController(),readSignal=AbortSignal.any([signal,cancel.signal]);
  console.info('[live-appointments-coverage]',JSON.stringify({calendars:ids.length,requests:jobs.length}));
  try{await Promise.all(Array.from({length:Math.min(8,jobs.length)},async()=>{while(next<jobs.length){
@@ -47,6 +49,7 @@ export async function liveAppointmentCounts(w:TimeWindow,signal:AbortSignal){
  const q=new URLSearchParams({locationId:loc,...(scope.groupId?{groupId:scope.groupId}:{calendarId:scope.calendarId!}),startTime:String(Date.parse(w.start)),endTime:String(Date.parse(w.end)-1)});
  const d=z.object({events:z.array(appointment)}).parse(await request('/calendars/events?'+q,readSignal));
  for(const e of d.events){if(e.locationId!==loc||!scope.ids.has(e.calendarId))throw Error('Appointment scope mismatch');if(e.deleted)continue;const t=Date.parse(e.startTime);if(!Number.isFinite(t))throw Error('Appointment timestamp missing');if(t<Date.parse(w.start)||t>=Date.parse(w.end))continue;const prior=events.get(e.id);if(prior&&JSON.stringify(prior)!==JSON.stringify(e))throw Error('Appointment changed during live report');events.set(e.id,e);}
+ completed+=scope.ids.size;progress?.(`Checking calendars: ${completed} of ${ids.length}`);
  }}));}catch(error){cancel.abort();throw error;}
  const rows=[...events.values()];const count=(s:string)=>rows.filter(e=>e.appointmentStatus===s).length;
  return {total:rows.length,showed:count('showed'),noshow:count('noshow'),cancelled:count('cancelled')+count('canceled'),invalid:count('invalid'),calendars:ids.length};

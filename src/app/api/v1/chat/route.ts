@@ -274,21 +274,25 @@ export async function POST(req: Request) {
   const multipart = businessAllowed && multipartNeeds(query).handled && !/\b(why|improve|recommend|strategy|write|coach|compare|versus|vs)\b/i.test(query);
   const directFact = factReport && ['people','fines','bonuses','teams','performance','attendance','rules','payroll'].includes(factReport) && !/\b(why|improve|recommend|strategy|write|coach|compare|comparison|versus|vs)\b/i.test(query);
   if (businessAllowed && (comparison || hourly || multipart || directFact)) {
+    return createDataStreamResponse({headers:{...rateLimitHeaders(rl),'x-model':'none','x-provider':'none'},execute:async stream=>{
+    const progress=(label:string)=>stream.writeData({type:'status',stage:'business-report',label});
+    progress('Checking your access to company records');
     const directStarted=Date.now();let identityFinished=directStarted;
     const directSignal=AbortSignal.any([req.signal,AbortSignal.timeout(45000)]);
-    let text: string | null = null;
+    let text: string | null = null;let reportFailed=false;
     try {
       const token=req.headers.get('x-chatbot-user-token');
       if(comparison){
         const email=await requireSourcePermission(token,['dashboard.view','pipeline.view'],directSignal);
         const plan=directPlan??planPayrollReports('sales '+query,timeZone)!;
         if(hourly) text='For hourly Payroll/CRM comparisons, exact closing timestamps are not available for all Payroll sales. Ask for a dated sales reconciliation or a timestamped activity report.';
-        else text=await comparePayrollCrm(email,plan.from,plan.through,query,directSignal);
+        else {progress('Comparing Payroll with live CRM records');text=await comparePayrollCrm(email,plan.from,plan.through,query,directSignal);}
       }else if(hourly){
         const email=await requireSourcePermission(token,/\b(sales|closed|closings?|ht|lt)\b/i.test(query)?['reporting.view','dashboard.view']:'reporting.view',directSignal);
         identityFinished=Date.now();
         const w=reportingWindow(query,timeZone);
-        text=w?await hourlyReport(query,w,timeZone,email,directSignal):'Specify last 1 hour, last 30 minutes, or from 14:00 to 15:00 on 2026-11-17. ISO timestamps with explicit offsets are also supported. No monthly total was substituted.';
+        progress('Reading current company records');
+        text=w?await hourlyReport(query,w,timeZone,email,directSignal,progress):'Specify last 1 hour, last 30 minutes, or from 14:00 to 15:00 on 2026-11-17. ISO timestamps with explicit offsets are also supported. No monthly total was substituted.';
       }else if(multipart){
         const email=await requireSourceIdentity(token,directSignal);
         const plan=directPlan??planPayrollReports('sales '+query,timeZone)!;
@@ -300,14 +304,18 @@ export async function POST(req: Request) {
       }
     }catch(error){
       if(req.signal.aborted) throw error;
-      text='The authorized source report could not be completed in time or is unavailable. No zero total or CRM state was inferred. Please narrow the period or check your source access.';
+      text='The company report could not be completed. Your question is still here. Retry the report or ask for a narrower period. No partial or zero total has been substituted.';
+      reportFailed=true;
+      stream.writeData({type:'report_error',retryable:true,label:'Company report unavailable'});
       console.error('[business-report]',error instanceof Error?error.message:'Source unavailable');
     }
-    if(text){console.info('[business-report-timing]',JSON.stringify({kind:hourly?'hourly':comparison?'comparison':'facts',identityMs:identityFinished-directStarted,reportMs:Date.now()-identityFinished,totalMs:Date.now()-startedAt}));const answer=text;return createDataStreamResponse({headers:{...rateLimitHeaders(rl),'x-model':'none','x-provider':'none'},execute:stream=>{
+    if(text){console.info('[business-report-timing]',JSON.stringify({kind:hourly?'hourly':comparison?'comparison':'facts',identityMs:identityFinished-directStarted,reportMs:Date.now()-identityFinished,totalMs:Date.now()-startedAt}));const answer=text;
+      if(!reportFailed)progress('Report complete');
       stream.write(formatDataStreamPart('text',answer));
-      stream.writeData({type:'generation_receipt',model:'none',engine:'authorized direct business report',mode:'Business report',creative:false,words:answer.split(/\s+/).length,evidenceDocuments:1,evidenceChunks:0,layers:[],validCitations:0,invalidCitations:0,faithfulness:'Source-calculated report; limitations stated in answer',warnings:[]});
+      stream.writeData({type:'generation_receipt',model:'none',engine:'authorized direct business report',mode:'Business report',creative:false,words:answer.split(/\s+/).length,evidenceDocuments:reportFailed?0:1,evidenceChunks:0,layers:[],validCitations:0,invalidCitations:0,faithfulness:reportFailed?'Source report unavailable; no totals produced':'Source-calculated report; limitations stated in answer',warnings:reportFailed?['Source report unavailable']:[]});
       stream.write(formatDataStreamPart('finish_message',{finishReason:'stop',usage:{promptTokens:0,completionTokens:0}}));
-    }});}
+    }
+    }});
   }
 
   const settingsPromise = loadSettings(ctx.orgId);

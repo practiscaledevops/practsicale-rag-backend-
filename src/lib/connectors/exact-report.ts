@@ -16,11 +16,11 @@ export function reportingWindow(query:string,timeZone:string,now=new Date()): Wi
 }
 const safe=(v:unknown)=>String(v??'Not recorded').replace(/[|<>\r\n]/g,' ');
 const tab=(h:string[],rs:unknown[][])=>'| '+h.join(' | ')+' |\n| '+h.map(()=> '---').join(' | ')+' |\n'+rs.map(r=>'| '+r.map(safe).join(' | ')+' |').join('\n');
-export async function hourlyReport(query:string,w:Window,timeZone:string,email:string,signal:AbortSignal){
+export async function hourlyReport(query:string,w:Window,timeZone:string,email:string,signal:AbortSignal,progress?:(label:string)=>void){
  if(/\b(fines?|bonuses?|payroll cost|salary|attendance)\b/i.test(query))return 'These records do not establish an hourly amount or attendance ruling. Ask for the Payroll month or attendance day; no prorated value has been invented.';
  const rows:unknown[][]=[];
  const wantCalls=/\b(calls?|dials?|activity|missed)\b/i.test(query),wantAppointments=/\b(appointments?|meetings?|show[ -]?ups?|no[ -]?shows?|activity)\b/i.test(query);
- const [callData,appointmentData]=await Promise.all([wantCalls?liveCallCounts(w,signal):null,wantAppointments?liveAppointmentCounts(w,signal):null]);
+ const [callData,appointmentData]=await Promise.all([wantCalls?liveCallCounts(w,signal):null,wantAppointments?liveAppointmentCounts(w,signal,progress):null]);
  if(callData){
  const counts=callData;
  rows.push(['Live CRM call records',counts.total],['Outbound call records',counts.outbound],['Inbound call records',counts.inbound],['Inbound missed/no-answer/busy/failed',counts.missed]);
