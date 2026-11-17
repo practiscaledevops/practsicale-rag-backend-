@@ -275,7 +275,7 @@ export async function POST(req: Request) {
   const directFact = factReport && ['people','fines','bonuses','teams','performance','attendance','rules','payroll'].includes(factReport) && !/\b(why|improve|recommend|strategy|write|coach|compare|comparison|versus|vs)\b/i.test(query);
   if (businessAllowed && (comparison || hourly || multipart || directFact)) {
     const directStarted=Date.now();let identityFinished=directStarted;
-    const directSignal=AbortSignal.any([req.signal,AbortSignal.timeout(25000)]);
+    const directSignal=AbortSignal.any([req.signal,AbortSignal.timeout(45000)]);
     let text: string | null = null;
     try {
       const token=req.headers.get('x-chatbot-user-token');
