@@ -1,6 +1,12 @@
+import {payrollPersonHint} from './payroll-person';
 import { needsSynthesis } from '@/lib/response-guidance';
 /** Resolve narrow drill-down follow-ups from user turns only. Never use assistant prose as evidence. */
 function inheritScope(query:string,prior:string){
+ if(/\b(he|she|his|her)\b/i.test(query)){
+  const person=payrollPersonHint(prior);
+  if(person)query=query.replace(/\b(he|she)\b/gi,person).replace(/\b(his|her)\b/gi,person+"'s");
+ }
+
  // Resolve short advisory/edit follow-ups from user intent, never assistant claims.
  if(prior && needsSynthesis(query) && /\b(it|this|that|these|those|them|we|our)\b/i.test(query)
    && !/\bteam\s+[a-z]|\b(company.wide|all teams|today|yesterday|month|week|20\d{2})\b/i.test(query))

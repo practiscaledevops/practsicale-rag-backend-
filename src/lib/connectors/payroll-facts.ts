@@ -1,3 +1,4 @@
+import {payrollPersonHint,resolvePayrollPerson} from './payroll-person';
 import { z } from 'zod';
 
 const cell = (v: unknown) => String(v ?? 'Not recorded').replace(/[|\n\r]/g, ' ').replace(/[<>]/g, '');
@@ -22,7 +23,10 @@ export function renderPayrollFacts(query: string, source: {report:string;from:st
       return lead+'**Payroll show rate — '+source.from+' to '+source.through+'**\n\n'+table(['Scope','Reviewed show-ups','Elapsed meeting contacts','Show rate'],rows)+'\n\nUses Payroll’s show rate: reviewed show-ups divided by elapsed meeting contacts. Future-only bookings are excluded from the denominator. These are meeting outcomes, not phone-call answers.'+footer;
     }
     if(mentionedTeams.length&&d.sales.some(r=>r.team===undefined))return 'Payroll has not supplied team attribution for the individual closings. I cannot verify the requested team breakdown yet.'+footer;
-    const owners=[...new Set(d.sales.map(r=>r.owner))].filter(n=>query.toLowerCase().includes(n.toLowerCase()));
+    const person=resolvePayrollPerson(query,[...d.consultants.map(r=>r.label),...d.sales.map(r=>r.owner)]);
+    if(person.hint&&person.matches.length!==1)return (person.matches.length?'Which person do you mean: '+person.matches.map(cell).join(', ')+'?':'I could not match '+cell(person.hint)+' to the authorized Payroll people in this report.')+' No company-wide total was substituted.'+footer;
+    if(!person.matches.length&&/\b(he|she|his|her)\b/i.test(query))return 'Which person do you mean? No company-wide total was substituted.'+footer;
+    const owners=person.matches;
     const bothTickets=/\b(ht|high[ -]ticket)\b/i.test(query)&&/\b(lt|low[ -]ticket)\b/i.test(query);
     const ticket=bothTickets?null:/\b(ht|high[ -]ticket)\b/i.test(query)?'high_ticket':/\b(lt|low[ -]ticket)\b/i.test(query)?'low_ticket':null;
     const sales=d.sales.filter(r=>(!owners.length||owners.includes(r.owner))&&(!ticket||r.ticket===ticket)&&(!mentionedTeams.length||mentionedTeams.some(t=>t.label===r.team)));
@@ -50,6 +54,15 @@ export function renderPayrollFacts(query: string, source: {report:string;from:st
   if(source.report==='rules') {
     const d=z.object({active_criteria:z.object({version:z.number(),effective_from:z.string(),criteria_text:z.string()}).nullable(),operational_rules:z.array(z.object({rule_key:z.string(),enabled:z.boolean(),effective_from:z.string()}))}).parse(source.data);
     return '**Current Payroll rules**\n\n'+(d.active_criteria?'Version '+d.active_criteria.version+', effective '+d.active_criteria.effective_from+'\n\n'+d.active_criteria.criteria_text.replace(/[<>]/g,''):'No active criteria recorded.')+'\n\n'+table(['Operational rule','Enabled','Effective from'],d.operational_rules.map(r=>[r.rule_key,r.enabled?'Yes':'No',r.effective_from]))+'\n\nCurrent configuration does not prove how an old payslip was calculated. Person-specific overrides are not covered here.'+footer;
+  }
+  if(source.report==='payroll' && (payrollPersonHint(query)||/\b(earnings?|earned|commission)\b/i.test(query))) {
+    const d=z.object({bill:z.object({people:z.array(z.object({employee_id:z.string(),name:z.string(),role:z.string(),minor:z.number()})),run_status:z.string(),last_recalculated_at:z.string().nullable(),composition_reconciles:z.boolean()})}).parse(source.data);
+    const person=resolvePayrollPerson(query,d.bill.people.map(p=>p.name));
+    if(person.hint||person.matches.length){
+      if(person.matches.length!==1)return (person.matches.length?'Which person do you mean: '+person.matches.map(cell).join(', ')+'?':'No matching payslip was returned for '+cell(person.hint)+' in this authorized Payroll run. This does not establish zero earnings.')+footer;
+      const rows=d.bill.people.filter(p=>p.name===person.matches[0]);
+      return '**'+cell(person.matches[0])+' — calculated Payroll earnings: PKR '+(rows.reduce((n,p)=>n+p.minor,0)/100).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})+'**\n\nPayroll month: '+source.from.slice(0,7)+'. These are whole-month calculated payslip totals, not daily prorated earnings or confirmation of cash paid. Sales revenue is a separate measure. Run status: '+cell(d.bill.run_status)+'. Last recalculated: '+cell(d.bill.last_recalculated_at)+'.'+(!d.bill.composition_reconciles?' Payroll reports that its bill composition does not reconcile; this amount is the recorded payslip total.':'')+footer;
+    }
   }
   if(source.report==='payroll' && /\b(total|summary|cost)\b/i.test(query)) {
     const d=z.object({totals:z.object({payroll_minor:z.number(),payslips:z.number()}),bill:z.object({run_status:z.string(),last_recalculated_at:z.string().nullable(),composition_reconciles:z.boolean()})}).parse(source.data);

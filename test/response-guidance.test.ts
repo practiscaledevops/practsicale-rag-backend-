@@ -1,5 +1,5 @@
 import {it,expect} from 'vitest';
-import {needsSynthesis,payrollAggregateOnly,selectAdvisoryReport} from '@/lib/response-guidance';
+import {needsSynthesis,payrollAggregateOnly,selectAdvisoryReport,requestedAnswerTokenLimit} from '@/lib/response-guidance';
 import {businessFollowup} from '@/lib/connectors/business-followup';
 import {planPayrollReports} from '@/lib/connectors/payroll-live';
 it.each(['Analyze Team Mike show rate','Draft an email for our setters','Coach our consultants','Explain the top consultant ranking','Recommend a plan for HT closings','Rewrite this for LinkedIn','How can we improve this?','Give next steps for attendance','Compare Payroll and GHL and recommend actions','Analyze appointments in the last hour'])('routes synthesis: %s',q=>expect(needsSynthesis(q)).toBe(true));
@@ -22,3 +22,5 @@ it('selects a whole team aggregate without disguising omitted records as zero',(
  expect(out.data.teams).toEqual([input.data.teams[0]]);expect(JSON.stringify(out)).not.toContain('private');expect(JSON.stringify(out)).toContain('not supplied');expect(JSON.stringify(out)).toContain('not all scheduled bookings');
  expect(selectAdvisoryReport('Compare Team Mike and Team Fahad',input)).toBe(input);
 });
+
+it('budgets explicitly brief drafts without shrinking long or unspecified requests',()=>{expect(requestedAnswerTokenLimit('Keep it within 140 words',4096)).toBe(816);expect(requestedAnswerTokenLimit('Under 120 words',256)).toBe(256);expect(requestedAnswerTokenLimit('Write a full training',8000)).toBe(8000);});

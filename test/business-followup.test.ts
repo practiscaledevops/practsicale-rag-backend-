@@ -18,3 +18,12 @@ it('resolves Team Mike show-rate follow-up and uses the supplied Payroll rate',(
 it('does not manufacture a rate when the source rate is missing',()=>{expect(renderPayrollFacts('Team Mike show rate',source)).toContain('Not available');});
 it('normalizes the reported consultant typo without a model',()=>{expect(businessFollowup('who is the top 1 consulant among them the best one',[])).toContain('consultant');});
 it('carries the measure and period to another team without guessing totals',()=>{const q=businessFollowup('what about Team Mike?',[{role:'user',content:'how much Team Fahad has closed this month?'}]);expect(q).toContain('Team Mike has closed this month');expect(q).not.toContain('Fahad');});
+
+it('resolves the reported David earnings to sales follow-up without retaining the pay intent',()=>{
+ const q=businessFollowup('how much he closed this month?',[{role:'user',content:'how much david made earned this month'},{role:'assistant',content:'David invented surname'}]);
+ expect(q).toBe('how much david closed this month?');expect(planPayrollReports(q,'Asia/Karachi')?.reports).toEqual(['performance']);
+ const data={...source.data,sales:[{...source.data.sales[0],owner:'David M'},{...source.data.sales[1],owner:'Kate Melody'}]};
+ const a=renderPayrollFacts(q,{...source,data});expect(a).toContain('David M — 1 closings');expect(a).not.toContain('Mike client');expect(a).not.toContain('Company-wide');
+});
+it('asks for a person rather than replacing an unresolved pronoun with company totals',()=>{expect(renderPayrollFacts('how much he closed this month?',source)).toContain('Which person');});
+it('routes earned wording to Payroll without a model',()=>{expect(planPayrollReports('how much david made earned this month','Asia/Karachi')?.reports).toEqual(['payroll']);});

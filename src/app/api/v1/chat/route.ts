@@ -1,5 +1,5 @@
 import {withRequestBudget} from '@/lib/request-budget';
-import { needsSynthesis, RESPONSE_GUIDANCE, selectAdvisoryReport, payrollAggregateOnly } from '@/lib/response-guidance';
+import { needsSynthesis, RESPONSE_GUIDANCE, selectAdvisoryReport, payrollAggregateOnly, requestedAnswerTokenLimit } from '@/lib/response-guidance';
 import {businessFollowup} from '@/lib/connectors/business-followup';
 import { multipartNeeds, readMultipart } from '@/lib/connectors/payroll-multipart';
 import { reportingWindow, hourlyReport, comparePayrollCrm } from '@/lib/connectors/exact-report';
@@ -653,8 +653,8 @@ export async function POST(req: Request) {
       const wantsLong = deepAnalysis || out.intent.intentKind === "build";
       const shortAnswer = effectiveMode === "general" && !wantsLong && !hasAttachments &&
         /\b(?:in|use|answer in) (?:one|1) sentence\b/i.test(query);
-      const maxTokens = shortAnswer ? Math.min(256, settings.generation.maxTokens)
-        : wantsLong ? Math.max(settings.generation.maxTokens, 8000) : settings.generation.maxTokens;
+      const maxTokens = requestedAnswerTokenLimit(lastUser?.content ?? query, shortAnswer ? Math.min(256, settings.generation.maxTokens)
+        : wantsLong ? Math.max(settings.generation.maxTokens, 8000) : settings.generation.maxTokens);
       const context = out.contextBlock + liveSection;
       const performanceSection = performanceBlock
         ? `\n\nPERFORMANCE MEMORY (structured results — treat as verified business data, cite by naming the metric and period):\n${performanceBlock}`

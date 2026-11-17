@@ -14,7 +14,7 @@ export function planPayrollReports(query: string, timeZone: string): { reports: 
   if (/\b(people|employees?|headcount|roster|positions?)\b/i.test(query)) reports.add('people');
   if (/\bteams?\b/i.test(query)) reports.add('teams');
   if (/\b(attendance|absent|lateness)\b/i.test(query)) reports.add('attendance');
-  if (/\b(payroll cost|salaries|salary|payslips?|payroll report)\b/i.test(query)) reports.add('payroll');
+  if (/\b(payroll cost|salaries|salary|payslips?|payroll report|earnings?|earned|earns|commission)\b/i.test(query)) reports.add('payroll');
   if (!headcount && /\b(setters?|appointments?|show[ -]?ups?|no[ -]?shows?|dials?)\b/i.test(query)) reports.add('activity');
   if (!headcount && /\b(sales|closings?|closed|consultants?|closers?)\b/i.test(query) && !/\b(call|transcript|scorecard)\b/i.test(query)) reports.add('closings');
   if (!headcount && /\b(show[ -]?ups?|no[ -]?shows?|appointments?|setters?|consultants?|closers?|niches?|taxonomy|show[ -]?rate|best team|team performance|ht|lt|high ticket|low ticket)\b/i.test(query) && !/\b(call|transcript|scorecard|dials?)\b/i.test(query)) {
