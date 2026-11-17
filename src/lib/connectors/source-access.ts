@@ -3,7 +3,8 @@ import { z } from "zod";
 const payroll = "https://zxifguiyvzrafrqskeyq.supabase.co";
 /** Validates the actual chatbot session, then checks the source account each time.
  * Never accepts email, role or permissions supplied in the chat body. */
-export async function requireSourcePermission(token: string | null, permission: "dashboard.view" | "pipeline.view" | "employees.view" | "teams.view" | "reporting.view" | "fines_bonuses.view" | "pay_rules.view" | "attendance.view", signal: AbortSignal) {
+type Permission = "dashboard.view" | "pipeline.view" | "employees.view" | "teams.view" | "reporting.view" | "fines_bonuses.view" | "pay_rules.view" | "attendance.view";
+export async function requireSourcePermission(token: string | null, permission: Permission | Permission[], signal: AbortSignal) {
   const url = process.env.CHATBOT_AUTH_URL;
   const anon = process.env.CHATBOT_AUTH_PUBLISHABLE_KEY;
   const key = process.env.PAYROLL_REPORTS_SERVER_KEY;
@@ -34,7 +35,7 @@ export async function requireSourcePermission(token: string | null, permission: 
   if (account.role_id) {
     const roles = z.array(z.object({ permissions: z.array(z.string()) })).length(1)
       .parse(await read(`${payroll}/rest/v1/admin_roles?select=permissions&id=eq.${account.role_id}`, sourceHeaders));
-    if (roles[0].permissions.includes("*") || roles[0].permissions.includes(permission)) return sourceEmail.trim().toLowerCase();
+    if (roles[0].permissions.includes("*") || (Array.isArray(permission) ? permission : [permission]).every(p => roles[0].permissions.includes(p))) return sourceEmail.trim().toLowerCase();
   } else if (account.role === "admin") {
     return sourceEmail.trim().toLowerCase();
   }

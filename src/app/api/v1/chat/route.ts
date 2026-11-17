@@ -1,3 +1,4 @@
+import { reportingWindow, hourlyReport, comparePayrollCrm } from '@/lib/connectors/exact-report';
 import { renderPayrollFacts } from '@/lib/connectors/payroll-facts';
 import { planPayrollReports, readLivePayroll, sourcePermissions, payrollTotalsFromLive } from '@/lib/connectors/payroll-live';
 import { readGhlOpportunity } from "@/lib/connectors/ghl-opportunity";
@@ -261,6 +262,43 @@ export async function POST(req: Request) {
   } else if (requestedSel === "deep") {
     effectiveTier = "max";
     deepAnalysis = true;
+  }
+
+  // Exact business reports bypass prompt/model setup and all paid retrieval.
+  const businessAllowed = payrollAccess(ctx.orgId, ctx.key.id) && gates.callReview && callReviewInScope(scope) && knowledgeScope.retrieval.callReview !== "off";
+  const comparison = /\b(payroll)\b/i.test(query) && /\b(ghl|crm)\b/i.test(query) && /\b(compare|comparison|versus|vs|conflict|difference|reconcile|match)\b/i.test(query);
+  const hourly = /\b(calls?|dials?|activity|sales|closed|closings?|appointments?|meetings?|show[ -]?ups?|no[ -]?shows?|fines?|bonuses?|attendance|payroll)\b/i.test(query) && /\b(hours?|minutes?)\b|\b\d{1,2}:\d{2}\b/i.test(query);
+  const directPlan = businessAllowed ? planPayrollReports(query,timeZone) : null;
+  const factReport = directPlan?.reports.length === 1 && !directPlan.unsupported ? directPlan.reports[0] : null;
+  const directFact = factReport && ['people','fines','bonuses','teams','performance','attendance','rules','payroll'].includes(factReport) && !/\b(why|improve|recommend|strategy|write|coach|compare|comparison|versus|vs)\b/i.test(query);
+  if (businessAllowed && (comparison || hourly || directFact)) {
+    const directSignal=AbortSignal.any([req.signal,AbortSignal.timeout(25000)]);
+    let text: string | null = null;
+    try {
+      const token=req.headers.get('x-chatbot-user-token');
+      if(comparison){
+        const email=await requireSourcePermission(token,['dashboard.view','pipeline.view'],directSignal);
+        const plan=directPlan??planPayrollReports('sales '+query,timeZone)!;
+        if(hourly) text='For hourly Payroll/CRM comparisons, exact closing timestamps are not available for all Payroll sales. Ask for a dated sales reconciliation or a timestamped activity report.';
+        else text=await comparePayrollCrm(email,plan.from,plan.through,query,directSignal);
+      }else if(hourly){
+        const email=await requireSourcePermission(token,/\b(sales|closed|closings?|ht|lt)\b/i.test(query)?['reporting.view','dashboard.view']:'reporting.view',directSignal);
+        const w=reportingWindow(query,timeZone);
+        text=w?await hourlyReport(query,w,timeZone,email,directSignal):'Specify last 1 hour, last 30 minutes, or from 14:00 to 15:00 on 2026-11-17. ISO timestamps with explicit offsets are also supported. No monthly total was substituted.';
+      }else if(factReport&&directPlan){
+        const email=await requireSourcePermission(token,sourcePermissions[factReport],directSignal);
+        text=renderPayrollFacts(query,await readLivePayroll(factReport,email,directPlan.from,directPlan.through,directSignal));
+      }
+    }catch(error){
+      if(req.signal.aborted) throw error;
+      text='The authorized source report could not be completed in time or is unavailable. No zero total or CRM state was inferred. Please narrow the period or check your source access.';
+      console.error('[business-report]',error instanceof Error?error.message:'Source unavailable');
+    }
+    if(text){const answer=text;return createDataStreamResponse({headers:{...rateLimitHeaders(rl),'x-model':'none','x-provider':'none'},execute:stream=>{
+      stream.write(formatDataStreamPart('text',answer));
+      stream.writeData({type:'generation_receipt',model:'none',engine:'authorized direct business report',mode:'Business report',creative:false,words:answer.split(/\s+/).length,evidenceDocuments:1,evidenceChunks:0,layers:[],validCitations:0,invalidCitations:0,faithfulness:'Source-calculated report; limitations stated in answer',warnings:[]});
+      stream.write(formatDataStreamPart('finish_message',{finishReason:'stop',usage:{promptTokens:0,completionTokens:0}}));
+    }});}
   }
 
   const settingsPromise = loadSettings(ctx.orgId);
