@@ -1,5 +1,5 @@
 import {it,expect} from 'vitest';
-import {needsSynthesis,payrollAggregateOnly} from '@/lib/response-guidance';
+import {needsSynthesis,payrollAggregateOnly,selectAdvisoryReport} from '@/lib/response-guidance';
 import {businessFollowup} from '@/lib/connectors/business-followup';
 import {planPayrollReports} from '@/lib/connectors/payroll-live';
 it.each(['Analyze Team Mike show rate','Draft an email for our setters','Coach our consultants','Explain the top consultant ranking','Recommend a plan for HT closings','Rewrite this for LinkedIn','How can we improve this?','Give next steps for attendance','Compare Payroll and GHL and recommend actions','Analyze appointments in the last hour'])('routes synthesis: %s',q=>expect(needsSynthesis(q)).toBe(true));
@@ -15,3 +15,10 @@ it('does not treat an earlier advisory request as the current task',()=>expect(n
 
 it.each(['Analyze Team Mike show rate','Coach our setters using Payroll','Draft an internal email about Team Mike appointments'])('does not expand all transcripts for %s',q=>expect(payrollAggregateOnly(q)).toBe(true));
 it.each(['Analyze Team Mike calls','Coach our setters using these transcripts','Review scorecards and Payroll'])('retains explicit call depth for %s',q=>expect(payrollAggregateOnly(q)).toBe(false));
+
+it('selects a whole team aggregate without disguising omitted records as zero',()=>{
+ const input={report:'performance',data:{teams:[{label:'Team Mike',showed:70,happened:415},{label:'Team Fahad',showed:55}],sales:[{client:'private'}]}};
+ const out=selectAdvisoryReport('Coach Team Mike on show rate',input);
+ expect(out.data.teams).toEqual([input.data.teams[0]]);expect(JSON.stringify(out)).not.toContain('private');expect(JSON.stringify(out)).toContain('not supplied');
+ expect(selectAdvisoryReport('Compare Team Mike and Team Fahad',input)).toBe(input);
+});

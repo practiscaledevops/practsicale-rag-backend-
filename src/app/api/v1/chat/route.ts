@@ -1,5 +1,5 @@
 import {withRequestBudget} from '@/lib/request-budget';
-import { needsSynthesis, RESPONSE_GUIDANCE } from '@/lib/response-guidance';
+import { needsSynthesis, RESPONSE_GUIDANCE, selectAdvisoryReport } from '@/lib/response-guidance';
 import {businessFollowup} from '@/lib/connectors/business-followup';
 import { multipartNeeds, readMultipart } from '@/lib/connectors/payroll-multipart';
 import { reportingWindow, hourlyReport, comparePayrollCrm } from '@/lib/connectors/exact-report';
@@ -508,7 +508,7 @@ export async function POST(req: Request) {
       const liveReportsPromise = livePlan && !livePlan.unsupported ? Promise.all(livePlan.reports.map(async report => {
         try {
           const email = await requireSourcePermission(req.headers.get('x-chatbot-user-token'), sourcePermissions[report], requestSignal);
-          const result = await readLivePayroll(report, email, livePlan.from, livePlan.through, requestSignal);
+          const result = selectAdvisoryReport(query, await readLivePayroll(report, email, livePlan.from, livePlan.through, requestSignal));
           const serialized = JSON.stringify(result);
           if (serialized.length > Math.floor(90000 / livePlan.reports.length)) return { report, available: false, reason: 'Report too large for an answer; narrow the question. No partial sample is a company total.' };
           return { report, available: true, result };
@@ -838,6 +838,7 @@ export async function POST(req: Request) {
         validCitations: citationCheck.valid.length, invalidCitations: citationCheck.fabricated.length,
         faithfulness: verificationLabel, seed: creative ? seed : null,
         verificationUsage: factualVerdict?.usage ?? null,
+        verificationIssues: factualVerdict?.unsupported?.slice(0,3) ?? [],
         warnings: [...creativeContext.warnings, ...(creative && overlap.repeated ? ["Substantial wording overlap remains; limited source material may constrain variation."] : [])],
       });
       dataStream.write(

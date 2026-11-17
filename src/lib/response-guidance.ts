@@ -17,3 +17,13 @@ export function payrollAggregateOnly(query: string): boolean {
  return /\b(payroll|teams?|setters?|show[ -]?rate|appointments?|attendance|fines?)\b/i.test(query)
    && !/\b(calls?|transcripts?|scorecards?|recordings?|objections?|quotes?)\b/i.test(query);
 }
+
+/** Keep the complete requested team aggregate; do not send unrelated client rows as advice context. */
+export function selectAdvisoryReport<T extends {report:string;data?:unknown}>(query:string,source:T):T {
+ if(source.report!=='performance'||!needsSynthesis(query)||!source.data||typeof source.data!=='object')return source;
+ const d=source.data as Record<string,unknown>;
+ if(!Array.isArray(d.teams))return source;
+ const matches=d.teams.filter((t:any)=>typeof t?.label==='string'&&query.toLowerCase().includes(t.label.toLowerCase()));
+ if(matches.length!==1||/\b(each|clients?|prospects?|all teams|compare|comparison|versus|vs)\b/i.test(query))return source;
+ return {...source,data:{teams:matches,company_outcome_warning:(d.summary as any)?.absent_shows??null,evidence_selection:'Complete aggregate for the named team only. Other teams, individual bookings and sales rows are not supplied; no cause or individual outcome can be inferred.'}};
+}
