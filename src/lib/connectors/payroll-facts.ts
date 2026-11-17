@@ -11,7 +11,8 @@ export function renderPayrollFacts(query: string, source: {report:string;from:st
     const d=z.object({summary:z.object({booked:z.number(),showed:z.number(),no_show:z.number(),closings:z.number(),usd_minor:z.number(),absent_shows:z.string().nullable()}),setters:z.array(group),teams:z.array(group),consultants:z.array(group),niches:z.array(group),undated_entries:z.number(),sales:z.array(z.object({client:z.string().nullable(),owner:z.string(),ticket:z.enum(['high_ticket','low_ticket']),usd_minor:z.number(),recorded_date:z.string().nullable(),niche:z.string().nullable()}))}).parse(source.data);
     if(d.summary.absent_shows) return 'Payroll cannot verify show-up outcomes for this period: '+cell(d.summary.absent_shows)+footer;
     const owners=[...new Set(d.sales.map(r=>r.owner))].filter(n=>query.toLowerCase().includes(n.toLowerCase()));
-    const ticket=/\b(ht|high[ -]ticket)\b/i.test(query)?'high_ticket':/\b(lt|low[ -]ticket)\b/i.test(query)?'low_ticket':null;
+    const bothTickets=/\b(ht|high[ -]ticket)\b/i.test(query)&&/\b(lt|low[ -]ticket)\b/i.test(query);
+    const ticket=bothTickets?null:/\b(ht|high[ -]ticket)\b/i.test(query)?'high_ticket':/\b(lt|low[ -]ticket)\b/i.test(query)?'low_ticket':null;
     const sales=d.sales.filter(r=>(!owners.length||owners.includes(r.owner))&&(!ticket||r.ticket===ticket));
     if(ticket||owners.length||/\b(names|clients|taxonomy)\b/i.test(query)) {
       const title=(owners.length?owners.join(', '):'Company-wide')+(ticket?' · '+ticket.replace('_',' '):'');

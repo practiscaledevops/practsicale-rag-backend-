@@ -1,3 +1,4 @@
+import { multipartNeeds, readMultipart } from '@/lib/connectors/payroll-multipart';
 import { reportingWindow, hourlyReport, comparePayrollCrm } from '@/lib/connectors/exact-report';
 import { renderPayrollFacts } from '@/lib/connectors/payroll-facts';
 import { planPayrollReports, readLivePayroll, sourcePermissions, payrollTotalsFromLive } from '@/lib/connectors/payroll-live';
@@ -270,8 +271,9 @@ export async function POST(req: Request) {
   const hourly = /\b(calls?|dials?|activity|sales|closed|closings?|appointments?|meetings?|show[ -]?ups?|no[ -]?shows?|fines?|bonuses?|attendance|payroll)\b/i.test(query) && /\b(hours?|minutes?)\b|\b\d{1,2}:\d{2}\b/i.test(query);
   const directPlan = businessAllowed ? planPayrollReports(query,timeZone) : null;
   const factReport = directPlan?.reports.length === 1 && !directPlan.unsupported ? directPlan.reports[0] : null;
+  const multipart = businessAllowed && multipartNeeds(query).handled && !/\b(why|improve|recommend|strategy|write|coach|compare|versus|vs)\b/i.test(query);
   const directFact = factReport && ['people','fines','bonuses','teams','performance','attendance','rules','payroll'].includes(factReport) && !/\b(why|improve|recommend|strategy|write|coach|compare|comparison|versus|vs)\b/i.test(query);
-  if (businessAllowed && (comparison || hourly || directFact)) {
+  if (businessAllowed && (comparison || hourly || multipart || directFact)) {
     const directSignal=AbortSignal.any([req.signal,AbortSignal.timeout(25000)]);
     let text: string | null = null;
     try {
@@ -285,6 +287,10 @@ export async function POST(req: Request) {
         const email=await requireSourcePermission(token,/\b(sales|closed|closings?|ht|lt)\b/i.test(query)?['reporting.view','dashboard.view']:'reporting.view',directSignal);
         const w=reportingWindow(query,timeZone);
         text=w?await hourlyReport(query,w,timeZone,email,directSignal):'Specify last 1 hour, last 30 minutes, or from 14:00 to 15:00 on 2026-11-17. ISO timestamps with explicit offsets are also supported. No monthly total was substituted.';
+      }else if(multipart){
+        const email=await requireSourceIdentity(token,directSignal);
+        const plan=directPlan??planPayrollReports('sales '+query,timeZone)!;
+        text=await readMultipart(query,plan.from,plan.through,email,directSignal);
       }else if(factReport&&directPlan){
         // Payroll gateway checks the live role and report permission itself.
         const email=await requireSourceIdentity(token,directSignal);
