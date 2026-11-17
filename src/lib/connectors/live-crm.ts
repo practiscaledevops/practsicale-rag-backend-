@@ -1,8 +1,10 @@
+import {setTimeout as delay} from 'node:timers/promises';
 import {z} from 'zod';
 export type TimeWindow={start:string;end:string};
-async function request(path:string,signal:AbortSignal,body?:unknown){
+async function request(path:string,signal:AbortSignal,body?:unknown,retried=false):Promise<unknown>{
  const token=process.env.BRAIN_GHL_READ_TOKEN;if(!token)throw Error('Live CRM is not configured');
  const r=await fetch('https://services.leadconnectorhq.com'+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,Version:path.startsWith('/calendars/')?'2021-07-28':'v3',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),cache:'no-store',redirect:'error',signal:AbortSignal.any([signal,AbortSignal.timeout(8000)])});
+ if(r.status===429&&!retried){const seconds=Number(r.headers.get('retry-after')??1);if(Number.isFinite(seconds)&&seconds>=0&&seconds<=3){await delay(Math.max(500,seconds*1000),undefined,{signal});return request(path,signal,body,true);}}
  if(!r.ok)throw Error('Live CRM '+path.split('?')[0]+' unavailable ('+r.status+')');return r.json();
 }
 function location(){const id=process.env.BRAIN_GHL_LOCATION_ID;if(!id)throw Error('CRM location unavailable');return id;}
@@ -31,16 +33,21 @@ export async function liveCallCounts(w:TimeWindow,signal:AbortSignal){
 const appointment=z.object({id:z.string(),calendarId:z.string(),locationId:z.string(),startTime:z.string(),appointmentStatus:z.string(),deleted:z.boolean().optional()});
 export async function liveAppointmentCounts(w:TimeWindow,signal:AbortSignal){
  const loc=location();
- const catalog=z.object({calendars:z.array(z.object({id:z.string(),locationId:z.string()}))}).parse(await request('/calendars/?'+new URLSearchParams({locationId:loc,showDrafted:'true'}),signal));
+ const catalog=z.object({calendars:z.array(z.object({id:z.string(),locationId:z.string(),groupId:z.string().nullable().optional()}))}).parse(await request('/calendars/?'+new URLSearchParams({locationId:loc,showDrafted:'true'}),signal));
  if(catalog.calendars.some(c=>c.locationId!==loc))throw Error('Calendar location mismatch');
  const ids=[...new Set(catalog.calendars.map(c=>c.id))];if(ids.length>150)throw Error('Calendar coverage exceeds live report limit');
- const events=new Map<string,z.infer<typeof appointment>>();let next=0;
- await Promise.all(Array.from({length:Math.min(8,ids.length)},async()=>{while(next<ids.length){
- const calendarId=ids[next++];
- const q=new URLSearchParams({locationId:loc,calendarId,startTime:String(Date.parse(w.start)),endTime:String(Date.parse(w.end)-1)});
- const d=z.object({events:z.array(appointment)}).parse(await request('/calendars/events?'+q,signal));
- for(const e of d.events){if(e.locationId!==loc||e.calendarId!==calendarId)throw Error('Appointment scope mismatch');if(e.deleted)continue;const t=Date.parse(e.startTime);if(!Number.isFinite(t))throw Error('Appointment timestamp missing');if(t<Date.parse(w.start)||t>=Date.parse(w.end))continue;const prior=events.get(e.id);if(prior&&JSON.stringify(prior)!==JSON.stringify(e))throw Error('Appointment changed during live report');events.set(e.id,e);}
- }}));
+ const scopes=new Map<string,{groupId?:string;calendarId?:string;ids:Set<string>}>();
+ for(const cal of catalog.calendars){const key=cal.groupId?'group:'+cal.groupId:'calendar:'+cal.id;const scope=scopes.get(key)??{...(cal.groupId?{groupId:cal.groupId}:{calendarId:cal.id}),ids:new Set<string>()};scope.ids.add(cal.id);scopes.set(key,scope);}
+ const jobs=[...scopes.values()],events=new Map<string,z.infer<typeof appointment>>();let next=0,nextStart=Date.now();
+ const cancel=new AbortController(),readSignal=AbortSignal.any([signal,cancel.signal]);
+ console.info('[live-appointments-coverage]',JSON.stringify({calendars:ids.length,requests:jobs.length}));
+ try{await Promise.all(Array.from({length:Math.min(4,jobs.length)},async()=>{while(next<jobs.length){
+ const scope=jobs[next++];const startAt=nextStart;nextStart=Math.max(Date.now(),nextStart)+150;
+ await delay(Math.max(0,startAt-Date.now()),undefined,{signal:readSignal});
+ const q=new URLSearchParams({locationId:loc,...(scope.groupId?{groupId:scope.groupId}:{calendarId:scope.calendarId!}),startTime:String(Date.parse(w.start)),endTime:String(Date.parse(w.end)-1)});
+ const d=z.object({events:z.array(appointment)}).parse(await request('/calendars/events?'+q,readSignal));
+ for(const e of d.events){if(e.locationId!==loc||!scope.ids.has(e.calendarId))throw Error('Appointment scope mismatch');if(e.deleted)continue;const t=Date.parse(e.startTime);if(!Number.isFinite(t))throw Error('Appointment timestamp missing');if(t<Date.parse(w.start)||t>=Date.parse(w.end))continue;const prior=events.get(e.id);if(prior&&JSON.stringify(prior)!==JSON.stringify(e))throw Error('Appointment changed during live report');events.set(e.id,e);}
+ }}));}catch(error){cancel.abort();throw error;}
  const rows=[...events.values()];const count=(s:string)=>rows.filter(e=>e.appointmentStatus===s).length;
  return {total:rows.length,showed:count('showed'),noshow:count('noshow'),cancelled:count('cancelled')+count('canceled'),invalid:count('invalid'),calendars:ids.length};
 }
