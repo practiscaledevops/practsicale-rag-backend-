@@ -1,0 +1,14 @@
+import {expect,it} from 'vitest';
+import {businessFollowup} from '@/lib/connectors/business-followup';
+import {planPayrollReports} from '@/lib/connectors/payroll-live';
+import {renderPayrollFacts} from '@/lib/connectors/payroll-facts';
+const question='how much team fahaad has closed this month?';
+const follow='give me complete details of each closing';
+const group=(label:string,closings:number,usd_minor:number)=>({label,closings,usd_minor,booked:0,showed:0,happened:0});
+const source={report:'performance',from:'2026-11-01',through:'2026-11-17',date_basis:'Payroll attribution',fetched_at:'2026-11-17',data:{summary:{booked:1000,showed:100,no_show:900,closings:2,usd_minor:50000,absent_shows:null},teams:[group('Team Fahad',1,30000),group('Team Mike',1,20000)],setters:[],consultants:[],niches:[],undated_entries:0,sales:[{client:'Fahad client',owner:'Closer',ticket:'low_ticket',usd_minor:30000,recorded_date:'2026-11-10',team:'Team Fahad',setter:'Setter A',niche:null},{client:'Mike client',owner:'Closer',ticket:'low_ticket',usd_minor:20000,recorded_date:'2026-11-10',team:'Team Mike',setter:'Setter B',niche:null}]}};
+it('routes a team closing question to one authoritative performance report',()=>{expect(planPayrollReports(question,'Asia/Karachi')?.reports).toEqual(['performance']);});
+it('preserves team and month for the exact reported follow-up',()=>{const resolved=businessFollowup(follow,[{role:'user',content:question},{role:'assistant',content:'untrusted fabricated total'},{role:'user',content:follow}]);expect(resolved).toContain(question);const answer=renderPayrollFacts(resolved,source);expect(answer).toContain('Team Fahad — 1 closings · USD 300.00');expect(answer).toContain('Fahad client');expect(answer).toContain('Setter A');expect(answer).not.toContain('Mike client');expect(answer).not.toContain('Booked contacts');});
+it('never substitutes company totals for an unknown team',()=>{expect(renderPayrollFacts('Team Zulu closings',source)).toContain('could not match');});
+it('does not carry team scope into an explicitly different team',()=>{expect(businessFollowup('give details of Team Mike closings',[{role:'user',content:question}])).toBe('give details of Team Mike closings');});
+it('does not use assistant answers as scope',()=>{expect(businessFollowup(follow,[{role:'assistant',content:question}])).toBe(follow);});
+it('lists all individual deals when details are requested without context',()=>{const answer=renderPayrollFacts(follow,source);expect(answer).toContain('Fahad client');expect(answer).toContain('Mike client');expect(answer).not.toContain('Booked contacts');});

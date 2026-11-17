@@ -1,3 +1,4 @@
+import {businessFollowup} from '@/lib/connectors/business-followup';
 import { multipartNeeds, readMultipart } from '@/lib/connectors/payroll-multipart';
 import { reportingWindow, hourlyReport, comparePayrollCrm } from '@/lib/connectors/exact-report';
 import { renderPayrollFacts } from '@/lib/connectors/payroll-facts';
@@ -245,7 +246,7 @@ export async function POST(req: Request) {
   const hasAttachments = attachmentBlock.length > 0;
   const history = messages;
   const lastUser = [...messages].reverse().find((m) => m.role === "user") ?? [...turns].reverse().find((m) => m.role === "user");
-  const query: string = lastUser?.content ?? "";
+  const query: string = businessFollowup(lastUser?.content ?? "", messages);
   // What the orchestrator sees: the recent window plus the summary as a leading
   // pseudo-turn, so call-review follow-ups ("audit them") keep the filter the
   // conversation had before it was compacted. Its classifier / rewriter read

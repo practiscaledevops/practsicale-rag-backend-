@@ -21,6 +21,7 @@ export function planPayrollReports(query: string, timeZone: string): { reports: 
     reports.delete('closings');reports.delete('activity');reports.delete('teams');reports.add('performance');
   }
   if (reports.delete('closings')) reports.add('performance');
+  if(reports.has('performance')) reports.delete('teams');
   if (!reports.size) return null;
   const today = todayIn(timeZone);
   const filter = parseCallReviewFilter(query, { referenceDate: today, timeZone });

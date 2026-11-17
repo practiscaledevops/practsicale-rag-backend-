@@ -8,20 +8,25 @@ export function renderPayrollFacts(query: string, source: {report:string;from:st
   const footer = '\n\nSource: [Sales Payroll](https://payroll.practicescalingsystems.com/admin). '+source.date_basis+'. Checked '+source.fetched_at+'.';
   if(source.report==='performance') {
     const group=z.object({label:z.string(),booked:z.number(),showed:z.number(),happened:z.number(),closings:z.number(),usd_minor:z.number()});
-    const d=z.object({summary:z.object({booked:z.number(),showed:z.number(),no_show:z.number(),closings:z.number(),usd_minor:z.number(),absent_shows:z.string().nullable()}),setters:z.array(group),teams:z.array(group),consultants:z.array(group),niches:z.array(group),undated_entries:z.number(),sales:z.array(z.object({client:z.string().nullable(),owner:z.string(),ticket:z.enum(['high_ticket','low_ticket']),usd_minor:z.number(),recorded_date:z.string().nullable(),niche:z.string().nullable()}))}).parse(source.data);
+    const d=z.object({summary:z.object({booked:z.number(),showed:z.number(),no_show:z.number(),closings:z.number(),usd_minor:z.number(),absent_shows:z.string().nullable()}),setters:z.array(group),teams:z.array(group),consultants:z.array(group),niches:z.array(group),undated_entries:z.number(),sales:z.array(z.object({client:z.string().nullable(),owner:z.string(),ticket:z.enum(['high_ticket','low_ticket']),usd_minor:z.number(),recorded_date:z.string().nullable(),niche:z.string().nullable(),team:z.string().nullable().optional(),setter:z.string().nullable().optional()}))}).parse(source.data);
     if(d.summary.absent_shows) return 'Payroll cannot verify show-up outcomes for this period: '+cell(d.summary.absent_shows)+footer;
+    const normalize=(v:string)=>v.toLowerCase().replace(/([a-z])\1+/g,'$1').replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
+    const mentionedTeams=d.teams.filter(t=>normalize(query).includes(normalize(t.label)));
+    const namedTeam=/\bteam\s+(?!performance\b|closings?\b|sales\b|totals?\b|members?\b|leaders?\b|has\b|have\b|this\b|report\b)([a-z]+)/i.exec(query);
+    if(namedTeam&&!mentionedTeams.length)return 'I could not match the requested team to Payroll. Available teams: '+d.teams.map(t=>cell(t.label)).join(', ')+'. No company-wide total was substituted.'+footer;
+    if(mentionedTeams.length&&d.sales.some(r=>r.team===undefined))return 'Payroll has not supplied team attribution for the individual closings. I cannot verify the requested team breakdown yet.'+footer;
     const owners=[...new Set(d.sales.map(r=>r.owner))].filter(n=>query.toLowerCase().includes(n.toLowerCase()));
     const bothTickets=/\b(ht|high[ -]ticket)\b/i.test(query)&&/\b(lt|low[ -]ticket)\b/i.test(query);
     const ticket=bothTickets?null:/\b(ht|high[ -]ticket)\b/i.test(query)?'high_ticket':/\b(lt|low[ -]ticket)\b/i.test(query)?'low_ticket':null;
-    const sales=d.sales.filter(r=>(!owners.length||owners.includes(r.owner))&&(!ticket||r.ticket===ticket));
-    if(ticket||owners.length||/\b(names|clients|taxonomy)\b/i.test(query)) {
-      const title=(owners.length?owners.join(', '):'Company-wide')+(ticket?' · '+ticket.replace('_',' '):'');
+    const sales=d.sales.filter(r=>(!owners.length||owners.includes(r.owner))&&(!ticket||r.ticket===ticket)&&(!mentionedTeams.length||mentionedTeams.some(t=>t.label===r.team)));
+    if(ticket||owners.length||mentionedTeams.length||/\b(names|clients|taxonomy|closing|closings|closed|sales)\b/i.test(query)) {
+      const title=(mentionedTeams.length?mentionedTeams.map(t=>t.label).join(', '):owners.length?owners.join(', '):'Company-wide')+(ticket?' · '+ticket.replace('_',' '):'');
       if(/\b(taxonomy|niche)\b/i.test(query)) {
         const groups=new Map<string,{owner:string;niche:string;count:number;minor:number}>();
         for(const r of sales){const key=r.owner+'\u0000'+(r.niche??'Not attributed');const g=groups.get(key)??{owner:r.owner,niche:r.niche??'Not attributed',count:0,minor:0};g.count++;g.minor+=r.usd_minor;groups.set(key,g);}
         return '**Consultant/closer sales by niche — '+source.from+' to '+source.through+'**\n\n'+table(['Consultant/closer','Niche','Closings','Closed USD'],[...groups.values()].sort((a,b)=>b.minor-a.minor).map(g=>[g.owner,g.niche,g.count,(g.minor/100).toFixed(2)]))+'\n\nRanked by closed USD; this does not establish coaching quality. Niche comes from the attributed booking and can be missing.'+footer;
       }
-      return '**'+cell(title)+' — '+sales.length+' closings · USD '+(sales.reduce((n,r)=>n+r.usd_minor,0)/100).toFixed(2)+'**\n\n'+table(['Client','Closed by','Ticket','USD','Recorded date'],sales.map(r=>[r.client,r.owner,r.ticket,(r.usd_minor/100).toFixed(2),r.recorded_date??'Not recorded']))+'\n\nOne row per closing, not per unique client. Undated admin entries belong to the Payroll month; no exact closing date is inferred.'+footer;
+      return '**'+cell(title)+' — '+sales.length+' closings · USD '+(sales.reduce((n,r)=>n+r.usd_minor,0)/100).toFixed(2)+'**\n\n'+table(['Client','Closed by','Ticket','USD','Recorded date','Setter','Attributed team'],sales.map(r=>[r.client,r.owner,r.ticket,(r.usd_minor/100).toFixed(2),r.recorded_date??'Not recorded',r.setter??'Not attributed',r.team??'Not attributed']))+'\n\nOne row per closing, not per unique client. Undated admin entries belong to the Payroll month; no exact closing date is inferred.'+footer;
     }
     const groupName=/\bteams?\b/i.test(query)?'teams':/\bniches?\b/i.test(query)?'niches':/\b(consultants?|closers?)\b/i.test(query)?'consultants':/\bsetters?\b/i.test(query)?'setters':null;
     let text='**Payroll performance — '+source.from+' to '+source.through+'**\n\n'+table(['Metric','Total'],[['Booked contacts',d.summary.booked],['Reviewed show-ups',d.summary.showed],['Reviewed/filed no-shows',d.summary.no_show],['Closings',d.summary.closings],['Closed value (USD)',(d.summary.usd_minor/100).toFixed(2)]]);
