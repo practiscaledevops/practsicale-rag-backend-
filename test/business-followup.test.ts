@@ -12,3 +12,5 @@ it('never substitutes company totals for an unknown team',()=>{expect(renderPayr
 it('does not carry team scope into an explicitly different team',()=>{expect(businessFollowup('give details of Team Mike closings',[{role:'user',content:question}])).toBe('give details of Team Mike closings');});
 it('does not use assistant answers as scope',()=>{expect(businessFollowup(follow,[{role:'assistant',content:question}])).toBe(follow);});
 it('lists all individual deals when details are requested without context',()=>{const answer=renderPayrollFacts(follow,source);expect(answer).toContain('Fahad client');expect(answer).toContain('Mike client');expect(answer).not.toContain('Booked contacts');});
+it('retains scope across repeated detail follow-ups',()=>{expect(businessFollowup('show details of those deals',[{role:'user',content:question},{role:'user',content:follow}])).toContain(question);});
+it('marks source-assumed ticket classifications explicitly',()=>{const data={...source.data,sales:source.data.sales.map(r=>({...r,ticket_assumed:true}))};expect(renderPayrollFacts('Team Fahad closings',{...source,data})).toContain('assumed by Payroll');});
