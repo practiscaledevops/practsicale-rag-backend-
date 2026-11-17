@@ -5,7 +5,7 @@ let crmCooldownUntil=0;
 async function request(path:string,signal:AbortSignal,body?:unknown,retried=false):Promise<unknown>{
  if(crmCooldownUntil>Date.now())await delay(crmCooldownUntil-Date.now(),undefined,{signal});
  const token=process.env.BRAIN_GHL_READ_TOKEN;if(!token)throw Error('Live CRM is not configured');
- const r=await fetch('https://services.leadconnectorhq.com'+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,Version:(path.startsWith('/calendars/')||path.startsWith('/users?'))?'2021-07-28':'v3',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),cache:'no-store',redirect:'error',signal:AbortSignal.any([signal,AbortSignal.timeout(path.startsWith('/calendars/')?15000:8000)])});
+ const r=await fetch('https://services.leadconnectorhq.com'+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,Version:path.startsWith('/calendars/')?'2021-07-28':'v3',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),cache:'no-store',redirect:'error',signal:AbortSignal.any([signal,AbortSignal.timeout(path.startsWith('/calendars/')?15000:8000)])});
  if(r.status===429&&!retried){const raw=r.headers.get('retry-after');const seconds=raw===null?10:/^\d+(?:\.\d+)?$/.test(raw)?Number(raw):Math.max(0,(Date.parse(raw)-Date.now())/1000);if(Number.isFinite(seconds)&&seconds>=0&&seconds<=15){crmCooldownUntil=Math.max(crmCooldownUntil,Date.now()+Math.max(1000,seconds*1000));return request(path,signal,body,true);}}
  if(!r.ok)throw Error('Live CRM '+path.split('?')[0]+' unavailable ('+r.status+')');return r.json();
 }
@@ -76,8 +76,17 @@ export async function liveAppointmentCounts(w:TimeWindow,signal:AbortSignal,prog
 /** Location-scoped directory: only IDs/names are retained, never emails or phone numbers. */
 export async function liveCrmUsers(signal:AbortSignal){
  const loc=location();
+ const account=z.object({location:z.object({id:z.string(),companyId:z.string().min(1)})}).parse(await request('/locations/'+encodeURIComponent(loc),signal));
+ if(account.location.id!==loc)throw Error('CRM location scope mismatch');
  const user=z.object({id:z.string().min(1),name:z.string().optional(),firstName:z.string().optional(),lastName:z.string().optional(),roles:z.object({locationIds:z.array(z.string())}).optional()});
- const result=z.object({users:z.array(user)}).parse(await request('/users?'+new URLSearchParams({locationId:loc}),signal));
- if(result.users.some(u=>u.roles&&!u.roles.locationIds.includes(loc))||new Set(result.users.map(u=>u.id)).size!==result.users.length)throw Error('CRM user scope mismatch');
- return result.users.map(u=>({id:u.id,name:(u.name??[u.firstName,u.lastName].filter(Boolean).join(' ')).trim()}));
+ const all:{id:string;name:string}[]=[],seen=new Set<string>();let expected:number|undefined;
+ for(let page=0;page<100;page++){
+  const q=new URLSearchParams({locationId:loc,companyId:account.location.companyId,skip:String(all.length),limit:'100'});
+  const result=z.object({users:z.array(user),count:z.number().int().nonnegative()}).parse(await request('/users/search?'+q,signal));
+  if(expected!==undefined&&result.count!==expected)throw Error('CRM directory changed during pagination');expected=result.count;
+  for(const u of result.users){if((u.roles&&!u.roles.locationIds.includes(loc))||seen.has(u.id))throw Error('CRM user scope or pagination mismatch');seen.add(u.id);all.push({id:u.id,name:(u.name??[u.firstName,u.lastName].filter(Boolean).join(' ')).trim()});}
+  if(all.length===expected)return all;
+  if(!result.users.length||all.length>expected)throw Error('Incomplete CRM user directory');
+ }
+ throw Error('CRM user directory exceeds safe limit');
 }

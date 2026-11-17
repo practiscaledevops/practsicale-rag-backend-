@@ -30,5 +30,12 @@ it('backs off for the burst window instead of immediately repeating a rate-limit
  expect((await liveCallCounts(w,signal)).total).toBe(0);expect(f).toHaveBeenCalledTimes(2);expect(vi.mocked(pause).mock.calls.some(c=>Number(c[0])>=9000)).toBe(true);
 });
 
-it('reads a location-scoped directory without retaining personal contact information',async()=>{const f=vi.fn().mockResolvedValue(Response.json({users:[{id:'a',firstName:'Adrian',lastName:'Cole',email:'private',roles:{locationIds:['loc']}}]}));vi.stubGlobal('fetch',f);expect(await liveCrmUsers(signal)).toEqual([{id:'a',name:'Adrian Cole'}]);expect(f.mock.calls[0][1].method).toBe('GET');expect(f.mock.calls[0][1].headers.Version).toBe('2021-07-28');});
-it('rejects an out-of-location directory',async()=>{vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({users:[{id:'a',name:'Adrian',roles:{locationIds:['other']}}]})));await expect(liveCrmUsers(signal)).rejects.toThrow('scope');});
+
+it('reads the current paginated directory and retains no personal contact details',async()=>{
+ const f=vi.fn().mockResolvedValueOnce(Response.json({location:{id:'loc',companyId:'company'}})).mockResolvedValueOnce(Response.json({users:[{id:'a',firstName:'Adrian',lastName:'Cole',email:'private',roles:{locationIds:['loc']}}],count:2})).mockResolvedValueOnce(Response.json({users:[{id:'b',name:'Kate Melody',roles:{locationIds:['loc']}}],count:2}));vi.stubGlobal('fetch',f);
+ expect(await liveCrmUsers(signal)).toEqual([{id:'a',name:'Adrian Cole'},{id:'b',name:'Kate Melody'}]);expect(f.mock.calls[1][0]).toContain('/users/search?');expect(f.mock.calls[1][0]).toContain('companyId=company');expect(f.mock.calls[2][0]).toContain('skip=1');expect(f.mock.calls[1][1].headers.Version).toBe('v3');expect(f.mock.calls.every(c=>c[1].method==='GET')).toBe(true);
+});
+it.each(['wrong-location','incomplete','duplicate','changed-count'])('rejects invalid directory: %s',async mode=>{
+ const u={id:'a',name:'Adrian',roles:{locationIds:[mode==='wrong-location'?'other':'loc']}};
+ const f=vi.fn().mockResolvedValueOnce(Response.json({location:{id:'loc',companyId:'company'}})).mockResolvedValueOnce(Response.json({users:[u],count:2})).mockResolvedValueOnce(Response.json({users:mode==='duplicate'?[u]:[],count:mode==='changed-count'?3:2}));vi.stubGlobal('fetch',f);await expect(liveCrmUsers(signal)).rejects.toThrow();
+});
