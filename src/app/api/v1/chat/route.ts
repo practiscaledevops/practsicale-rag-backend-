@@ -1,3 +1,4 @@
+import { payrollAccess, readPayrollClosings, renderPayrollClosings } from "@/lib/connectors/payroll-report";
 // POST /api/v1/chat — grounded, cited, streamed chat over the key's permitted data.
 //
 // Auth:  Authorization: Bearer psk_...
@@ -292,6 +293,34 @@ export async function POST(req: Request) {
       // A row-based report does not need semantic retrieval, transcript expansion
       // or an LLM to rewrite dates and arithmetic. Keep the same access gates.
       if (wantsStructuredCallReport(query, retrievalHistory)) {
+        // An explicitly provisioned sales reporting key can read exact Payroll aggregates.
+        // Keep this out of generic retrieval and out of model prompts.
+        if (payrollAccess(ctx.orgId, ctx.key.id)) {
+          const payrollFilter = resolveReviewFilterWithHistory(query, [], {
+            referenceDate: todayIn("UTC"), knownConsultants: [], timeZone: "UTC",
+          });
+          if (payrollFilter.closingCountOnly) {
+            let text = "Sales Payroll totals are temporarily unavailable.";
+            let success = false;
+            if (gates.callReview && callReviewInScope(scope) && knowledgeScope.retrieval.callReview !== "off" &&
+                payrollFilter.dateFrom && payrollFilter.dateTo) {
+              try {
+                const row = await readPayrollClosings(payrollFilter.dateFrom, payrollFilter.dateTo, requestSignal);
+                text = renderPayrollClosings(row, payrollFilter.dateFrom, payrollFilter.dateTo);
+                success = true;
+              } catch {
+                requestSignal.throwIfAborted();
+              }
+            }
+            dataStream.write(formatDataStreamPart("text", text));
+            dataStream.writeData({ type: "generation_receipt", model: "none", engine: "structured database report",
+              mode: "sales report", creative: false, words: text.split(/\s+/).length, evidenceDocuments: 0,
+              evidenceChunks: 0, layers: [], validCitations: 0, invalidCitations: 0,
+              faithfulness: success ? "Sales Payroll database totals" : "Payroll lookup unavailable", warnings: [] });
+            dataStream.write(formatDataStreamPart("finish_message", { finishReason: "stop", usage: { promptTokens: 0, completionTokens: 0 } }));
+            return;
+          }
+        }
         let report: Awaited<ReturnType<typeof fetchCallsByFilter>> | null = null;
         let filter = resolveReviewFilterWithHistory(query, retrievalHistory, { referenceDate: todayIn(timeZone), knownConsultants: [], timeZone });
         if (gates.callReview && callReviewInScope(scope) && knowledgeScope.retrieval.callReview !== "off") {
