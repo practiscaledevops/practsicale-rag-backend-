@@ -42,3 +42,9 @@ it("fails closed on malformed alias configuration", async () => {
 
 it('checks every requested source permission',async()=>{setup({permissions:['dashboard.view']});await expect(requireSourcePermission('session',['dashboard.view','pipeline.view'],signal)).rejects.toThrow();});
 it('gateway identity checks active verified user without caching grants',async()=>{const f=setup();await expect(requireSourceIdentity('session',signal)).resolves.toBe('person@example.com');expect(f).toHaveBeenCalledTimes(2);});
+
+it('overlaps independent permission reads but never grants access before active-profile validation',async()=>{
+ setup();let release!:(r:Response)=>void;const f=vi.fn().mockResolvedValueOnce(Response.json({id,email:'person@example.com',email_confirmed_at:'2026-01-01'})).mockImplementationOnce(()=>new Promise<Response>(r=>{release=r})).mockResolvedValueOnce(Response.json([{role:'admin',role_id:null,active:true,admin_roles:null}]));vi.stubGlobal('fetch',f);
+ let settled=false;const result=requireSourcePermission('session','dashboard.view',signal).finally(()=>{settled=true});const rejected=expect(result).rejects.toThrow('denied');
+ await vi.waitFor(()=>expect(f).toHaveBeenCalledTimes(3));expect(settled).toBe(false);release(Response.json([{is_active:false}]));await rejected;
+});
