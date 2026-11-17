@@ -1,6 +1,6 @@
 import {expect,it} from 'vitest';
 import {multipartNeeds,renderMultipart} from '@/lib/connectors/payroll-multipart';
-const source=(data:unknown)=>({data,fetched_at:'2026-11-17T15:00:00Z'});
+const source=<T>(data:T)=>({data,fetched_at:'2026-11-17T15:00:00Z'});
 const people=source({people:Array.from({length:12},(_,i)=>({id:'s'+i,name:'Setter '+i,role:'setter',status:'active'})).concat([{id:'c',name:'Consultant',role:'consultant',status:'active'}])});
 const perf=source({setters:Array.from({length:12},(_,i)=>({key:'s'+i,label:'Setter '+i,booked:20,showed:i,closings:0,usd_minor:0})),consultants:[{key:'c',label:'Consultant',booked:0,showed:0,closings:2,usd_minor:200000}],summary:{absent_shows:null},undated_entries:0,sales:[{ticket:'high_ticket',usd_minor:100000},{ticket:'low_ticket',usd_minor:50000}]});
 const teams=source({teams:[{name:'Team A',leader:{name:'Leader A'},members:Array.from({length:12},(_,i)=>({employeeId:'s'+i}))}]});
