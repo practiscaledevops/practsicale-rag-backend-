@@ -2,8 +2,8 @@ import {z} from 'zod';
 export type TimeWindow={start:string;end:string};
 async function request(path:string,signal:AbortSignal,body?:unknown){
  const token=process.env.BRAIN_GHL_READ_TOKEN;if(!token)throw Error('Live CRM is not configured');
- const r=await fetch('https://services.leadconnectorhq.com'+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,Version:'v3',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),cache:'no-store',redirect:'error',signal:AbortSignal.any([signal,AbortSignal.timeout(8000)])});
- if(!r.ok)throw Error('Live CRM request unavailable ('+r.status+')');return r.json();
+ const r=await fetch('https://services.leadconnectorhq.com'+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,Version:path.startsWith('/calendars/')?'2021-07-28':'v3',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),cache:'no-store',redirect:'error',signal:AbortSignal.any([signal,AbortSignal.timeout(8000)])});
+ if(!r.ok)throw Error('Live CRM '+path.split('?')[0]+' unavailable ('+r.status+')');return r.json();
 }
 function location(){const id=process.env.BRAIN_GHL_LOCATION_ID;if(!id)throw Error('CRM location unavailable');return id;}
 const opportunity=z.object({id:z.string(),locationId:z.string(),name:z.string().optional(),status:z.string(),contactId:z.string().nullable().optional(),contact:z.object({id:z.string(),name:z.string().optional()}).nullable().optional(),monetaryValue:z.number().nullable().optional(),lastStatusChangeAt:z.string().nullable().optional()});
@@ -31,7 +31,7 @@ export async function liveCallCounts(w:TimeWindow,signal:AbortSignal){
 const appointment=z.object({id:z.string(),calendarId:z.string(),locationId:z.string(),startTime:z.string(),appointmentStatus:z.string(),deleted:z.boolean().optional()});
 export async function liveAppointmentCounts(w:TimeWindow,signal:AbortSignal){
  const loc=location();
- const catalog=z.object({calendars:z.array(z.object({id:z.string(),locationId:z.string()}))}).parse(await request('/calendars?'+new URLSearchParams({locationId:loc,showDrafted:'true'}),signal));
+ const catalog=z.object({calendars:z.array(z.object({id:z.string(),locationId:z.string()}))}).parse(await request('/calendars/?'+new URLSearchParams({locationId:loc,showDrafted:'true'}),signal));
  if(catalog.calendars.some(c=>c.locationId!==loc))throw Error('Calendar location mismatch');
  const ids=[...new Set(catalog.calendars.map(c=>c.id))];if(ids.length>150)throw Error('Calendar coverage exceeds live report limit');
  const events=new Map<string,z.infer<typeof appointment>>();let next=0;
