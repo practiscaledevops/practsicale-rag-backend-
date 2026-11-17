@@ -7,13 +7,18 @@ export function renderPayrollFacts(query: string, source: {report:string;from:st
   if (advisory.test(query) && !(source.report === 'performance' && !/\b(why|improve|recommend|strategy|write|coach|compare|comparison|versus|vs)\b/i.test(query))) return null;
   const footer = '\n\nSource: [Sales Payroll](https://payroll.practicescalingsystems.com/admin). '+source.date_basis+'. Checked '+source.fetched_at+'.';
   if(source.report==='performance') {
-    const group=z.object({label:z.string(),booked:z.number(),showed:z.number(),happened:z.number(),closings:z.number(),usd_minor:z.number()});
-    const d=z.object({summary:z.object({booked:z.number(),showed:z.number(),no_show:z.number(),closings:z.number(),usd_minor:z.number(),absent_shows:z.string().nullable()}),setters:z.array(group),teams:z.array(group),consultants:z.array(group),niches:z.array(group),undated_entries:z.number(),sales:z.array(z.object({client:z.string().nullable(),owner:z.string(),ticket:z.enum(['high_ticket','low_ticket']),usd_minor:z.number(),recorded_date:z.string().nullable(),niche:z.string().nullable(),team:z.string().nullable().optional(),setter:z.string().nullable().optional(),ticket_assumed:z.boolean().optional(),origin:z.string().optional()}))}).parse(source.data);
+    const group=z.object({label:z.string(),booked:z.number(),showed:z.number(),happened:z.number(),show_rate:z.number().nullable().optional(),closings:z.number(),usd_minor:z.number()});
+    const d=z.object({summary:z.object({booked:z.number(),showed:z.number(),happened:z.number().optional(),show_rate:z.number().nullable().optional(),no_show:z.number(),closings:z.number(),usd_minor:z.number(),absent_shows:z.string().nullable()}),setters:z.array(group),teams:z.array(group),consultants:z.array(group),niches:z.array(group),undated_entries:z.number(),sales:z.array(z.object({client:z.string().nullable(),owner:z.string(),ticket:z.enum(['high_ticket','low_ticket']),usd_minor:z.number(),recorded_date:z.string().nullable(),niche:z.string().nullable(),team:z.string().nullable().optional(),setter:z.string().nullable().optional(),ticket_assumed:z.boolean().optional(),origin:z.string().optional()}))}).parse(source.data);
     if(d.summary.absent_shows) return 'Payroll cannot verify show-up outcomes for this period: '+cell(d.summary.absent_shows)+footer;
     const normalize=(v:string)=>v.toLowerCase().replace(/([a-z])\1+/g,'$1').replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
     const mentionedTeams=d.teams.filter(t=>normalize(query).includes(normalize(t.label)));
     const namedTeam=/\bteam\s+(?!performance\b|closings?\b|sales\b|totals?\b|members?\b|leaders?\b|has\b|have\b|this\b|report\b)([a-z]+)/i.exec(query);
     if(namedTeam&&!mentionedTeams.length)return 'I could not match the requested team to Payroll. Available teams: '+d.teams.map(t=>cell(t.label)).join(', ')+'. No company-wide total was substituted.'+footer;
+    const intent=query.split('Follow-up requested:').at(-1)??query;
+    if(/\b(show[ -]?rate)\b/i.test(intent)){
+      const rows=mentionedTeams.length?mentionedTeams.map(g=>[g.label,g.showed,g.happened,g.show_rate==null?'Not available':(g.show_rate*100).toFixed(1)+'%']):[['Company-wide',d.summary.showed,d.summary.happened??'Not supplied',d.summary.show_rate==null?'Not available':(d.summary.show_rate*100).toFixed(1)+'%']];
+      return '**Payroll show rate — '+source.from+' to '+source.through+'**\n\n'+table(['Scope','Reviewed show-ups','Elapsed meeting contacts','Show rate'],rows)+'\n\nUses Payroll’s show rate: reviewed show-ups divided by elapsed meeting contacts. Future-only bookings are excluded from the denominator. These are meeting outcomes, not phone-call answers.'+footer;
+    }
     if(mentionedTeams.length&&d.sales.some(r=>r.team===undefined))return 'Payroll has not supplied team attribution for the individual closings. I cannot verify the requested team breakdown yet.'+footer;
     const owners=[...new Set(d.sales.map(r=>r.owner))].filter(n=>query.toLowerCase().includes(n.toLowerCase()));
     const bothTickets=/\b(ht|high[ -]ticket)\b/i.test(query)&&/\b(lt|low[ -]ticket)\b/i.test(query);
