@@ -1,5 +1,11 @@
+import { needsSynthesis } from '@/lib/response-guidance';
 /** Resolve narrow drill-down follow-ups from user turns only. Never use assistant prose as evidence. */
 function inheritScope(query:string,prior:string){
+ // Resolve short advisory/edit follow-ups from user intent, never assistant claims.
+ if(prior && needsSynthesis(query) && /\b(it|this|that|these|those|them|we|our)\b/i.test(query)
+   && !/\bteam\s+[a-z]|\b(company.wide|all teams|today|yesterday|month|week|20\d{2})\b/i.test(query))
+   return prior+'\nFollow-up requested: '+query;
+
  const otherTeam=/^(?:(?:and|what about|how about|also|now|for)\s+)?(team\s+[a-z]+(?:\s+[a-z]+)?)[?.! ]*$/i.exec(query.trim());
  if(otherTeam&&/\b(closed|closings?|sales|show[ -]?rate)\b/i.test(prior)&&/\bteam\s+[a-z]+/i.test(prior)){
   // Keep the requested measure and dates; replace only the previously named team.

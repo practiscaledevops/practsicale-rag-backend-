@@ -5,6 +5,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // scores are in their effective scope. The key lookup, DB, orchestrator,
 // learning detector and model are mocked (no network); the route runs for real.
 const m = vi.hoisted(() => ({
+  bridge: false,
+  payroll: vi.fn(),
   resolveContext: vi.fn(),
   orchestrate: vi.fn(),
   insert: vi.fn(),
@@ -37,6 +39,9 @@ vi.mock("@/lib/settings", async (orig) => {
   return { ...real, loadSettings: vi.fn(async () => ({ settings, updatedAt: null })) };
 });
 
+vi.mock('@/lib/connectors/payroll-report',()=>({payrollAccess:()=>m.bridge}));
+vi.mock('@/lib/connectors/source-access',()=>({requireSourcePermission:async()=> 'verified@example.com'}));
+vi.mock('@/lib/connectors/payroll-live',async orig=>({...await orig<typeof import('@/lib/connectors/payroll-live')>(),readLivePayroll:m.payroll}));
 import { POST as chat } from "@/app/api/v1/chat/route";
 
 const ALL_CAPS = ["chat.knowledge", "chat.source_scope", "chat.call_review", "knowledge.performance", "knowledge.conflicts", "learning.write"];
@@ -123,6 +128,7 @@ async function send(source_types: string[], body: Record<string, unknown>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  m.bridge=false;
   m.insert.mockResolvedValue({ error: null });
   m.orchestrate.mockImplementation(async (o: { scope: { sourceTypes: string[] } }) => retrieval(o.scope.sourceTypes));
   m.detect.mockResolvedValue({
@@ -277,3 +283,24 @@ describe("POST /api/v1/chat — message timestamps", () => {
 });
 
 vi.mock("@/lib/ratelimit", async (original) => ({ ...(await original<typeof import("@/lib/ratelimit")>()), checkRateLimit: async () => ({ok:true,limit:120,remaining:119,retryAfter:60}) }));
+
+
+describe('company-grounded synthesis without paid providers',()=>{
+ it.each(['Analyze Team Mike show rate this month','Draft a coaching email for Team Mike setters','Recommend next steps for our consultants'])('keeps %s on the synthesis path with current authorized facts',async question=>{
+  vi.stubEnv('PAYROLL_BRIDGE_KEY','mock-only');m.bridge=true;
+  m.payroll.mockResolvedValue({report:'performance',from:'2026-11-01',through:'2026-11-18',date_basis:'reviewed outcomes',fetched_at:'2026-11-18T00:00:00Z',data:{teams:[{label:'Team Mike',showed:70,happened:413,show_rate:70/413}]}});
+  try {
+   const {text}=await send([], {capabilities:ALL_CAPS,messages:[{role:'user',content:question}]});
+   expect(m.payroll).toHaveBeenCalled();expect(m.streamText).toHaveBeenCalled();
+   expect(systemPrompt()).toContain('CURRENT PAYROLL REPORTS');expect(systemPrompt()).toContain('413');
+   expect(systemPrompt()).toContain('propose a concrete action');expect(systemPrompt()).toContain('deliver the requested finished piece first');
+   expect(text).toContain('Keep the cadence');
+  }finally{vi.unstubAllEnvs();m.bridge=false;}
+ });
+ it('preserves the brief and company scope across a coaching follow-up',async()=>{
+  await send([], {capabilities:ALL_CAPS,messages:[{role:'user',content:'Team Mike show rate in November 2026'},{role:'assistant',content:'An earlier answer is not current evidence.'},{role:'user',content:'How can we improve this?'}]});
+  expect(m.orchestrate.mock.calls[0][0].query).toContain('Team Mike');
+  expect(m.orchestrate.mock.calls[0][0].query).toContain('How can we improve this?');
+  expect(systemPrompt()).toContain('not verified company evidence');
+ });
+});
