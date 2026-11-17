@@ -13,5 +13,8 @@
       "path": "/api/cron/appointments",
       "schedule": "*/5 * * * *"
     }
+  ],
+  "regions": [
+    "sin1"
   ]
 }
