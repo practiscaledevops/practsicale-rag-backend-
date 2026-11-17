@@ -478,8 +478,9 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   // 1. Understand the request.
   const prompts = await getActivePrompts(orgId, ["intent_classify", "query_rewrite"]);
   emit({ stage: "planning", label: "Understanding the request" });
+  const explicitAggregate = !!normalizeMode(opts.requestedMode) && opts.requestedMode!=="auto" && payrollAggregateOnly(query);
   const intent =
-    features.autoWorkMode || !normalizeMode(opts.requestedMode)
+    !explicitAggregate && (features.autoWorkMode || !normalizeMode(opts.requestedMode))
       ? await classifyIntent({ query, history, systemPrompt: prompts.intent_classify, tier: intelligence.intentTier })
       : heuristicIntent(query);
   let { mode, auto } = resolveEffectiveMode(opts.requestedMode, intent.workMode);
@@ -572,7 +573,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   // 2. Search queries: intent's (already discriminative) or the rewrite stage.
   let queries = intent.searchQueries.length ? intent.searchQueries : [query];
   const priorTurns = history.filter((m) => m.role === "user" || m.role === "assistant").length;
-  if (!intent.searchQueries.length && features.queryRewrite && (priorTurns > 1 || query.trim().split(/\s+/).length > 6)) {
+  if (!explicitAggregate && !intent.searchQueries.length && features.queryRewrite && (priorTurns > 1 || query.trim().split(/\s+/).length > 6)) {
     emit({ stage: "rewriting", label: "Refining the question" });
     queries = await rewriteQueries(query, history, prompts.query_rewrite, "fast");
   }
