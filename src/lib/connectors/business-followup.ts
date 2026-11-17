@@ -13,6 +13,8 @@ function inheritScope(query:string,prior:string){
 
 export function businessFollowup(query:string,turns:{role:string;content:string}[]){
  const users=turns.filter(t=>t.role==='user');if(users.at(-1)?.content===query)users.pop();
- let previous='';for(const turn of users.slice(-40))previous=inheritScope(turn.content,previous).slice(-16000);
+ const normalize=(s:string)=>s.replace(/\bconsulants?\b/gi,m=>m.toLowerCase().endsWith('s')?'consultants':'consultant');
+ query=normalize(query);
+ let previous='';for(const turn of users.slice(-40))previous=inheritScope(normalize(turn.content),previous).slice(-16000);
  return inheritScope(query,previous);
 }

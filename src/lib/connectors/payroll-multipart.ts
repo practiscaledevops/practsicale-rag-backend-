@@ -5,9 +5,10 @@ const table=(h:string[],r:unknown[][])=>'| '+h.join(' | ')+' |\n| '+h.map(()=> '
 export function multipartNeeds(query:string){
  const setters=/\bsetters?\b/i.test(query)&&/\b(top|best|rank|ranking|leaders?)\b/i.test(query);
  const high=/\b(ht|high[ -]ticket)\b/i.test(query),low=/\b(lt|low[ -]ticket)\b/i.test(query);
- const consultant=/\bconsultants?\b/i.test(query)&&/\b(top|best|highest|earner|earning|earners)\b/i.test(query);
+ const closingLeaders=/\b(top|most|highest)\b/i.test(query)&&/\bclosings?\b/i.test(query)&&! /\b(setters?|teams?)\b/i.test(query);
+ const consultant=closingLeaders||/\bconsultants?\b/i.test(query)&&/\b(top|best|highest|earner|earning|earners)\b/i.test(query);
  const earnings=consultant&&/\b(earners?|earnings?|paid|salary|pay)\b/i.test(query);
- return {setters,high,low,consultant,earnings,handled:[setters,high,low,consultant].filter(Boolean).length>=2||setters||earnings};
+ return {setters,high,low,consultant,earnings,closingLeaders,handled:[setters,high,low,consultant].filter(Boolean).length>=2||setters||earnings||consultant};
 }
 type Source={data?:unknown;fetched_at:string};
 export function renderMultipart(query:string,from:string,through:string,sources:Partial<Record<'performance'|'people'|'teams'|'payroll',Source>>){
@@ -35,12 +36,21 @@ export function renderMultipart(query:string,from:string,through:string,sources:
  if(needs.high&&needs.low)rows.push(['Combined',perf.data.sales.length,money(perf.data.sales.reduce((n,s)=>n+s.usd_minor,0))]);
  blocks.push(table(['Category','Closings','Closed value (USD)'],rows));blocks.push(perf.data.undated_entries+' admin entries lack exact closing dates; month-assigned entries are not precise daily/hourly closings. Deal counts are not necessarily unique client counts.');
  }}
- if(needs.consultant){blocks.push('### '+(needs.earnings?'Top-earning consultant':'Top consultant by closed revenue'));
+ if(needs.consultant){blocks.push('### '+(needs.earnings?'Top-earning consultant':needs.closingLeaders?'Top closer by closing count':'Top consultant by closed revenue'));
  if(needs.earnings){
  const pay=z.object({bill:z.object({people:z.array(z.object({employee_id:z.string(),name:z.string(),role:z.string(),minor:z.number()})),run_status:z.string(),last_recalculated_at:z.string().nullable(),composition_reconciles:z.boolean()})}).safeParse(sources.payroll?.data);
  if(!pay.success)blocks.push('Consultant earnings could not be verified from the authorized Payroll run. Sales revenue is not personal earnings, so no revenue winner is substituted.');
  else {const rows=pay.data.bill.people.filter(p=>p.role==='consultant').sort((a,b)=>b.minor-a.minor);const top=rows.filter(p=>p.minor===rows[0]?.minor);blocks.push(top.length?table(['Consultant','Payroll earnings (PKR)'],top.map(p=>[p.name,money(p.minor)])):'No consultant payslips are recorded in this run.');blocks.push('These are whole-month calculated payslip totals, not cash-payment confirmation or a daily prorated amount. Run status: '+safe(pay.data.bill.run_status)+'. Last recalculated: '+safe(pay.data.bill.last_recalculated_at)+'.');if(!pay.data.bill.composition_reconciles)blocks.push('Payroll flags a mismatch between its bill composition and total. This ranking reflects recorded payslips and is not a fully reconciled payout confirmation.');}
- }else if(perf.success&&people.success){const ids=new Set(people.data.people.filter(p=>p.role==='consultant').map(p=>p.id));const rows=perf.data.consultants.filter(p=>ids.has(p.key)).sort((a,b)=>b.usd_minor-a.usd_minor);blocks.push(table(['Consultant','Closed value (USD)','Closings'],rows.filter(p=>p.usd_minor===rows[0]?.usd_minor).map(p=>[p.label,money(p.usd_minor),p.closings])));blocks.push('Ranked by closed sales value, not salary, commission or coaching quality.');}else blocks.push('The consultant revenue ranking could not be verified.');
+ }else if(perf.success&&people.success){
+ const ids=new Set(people.data.people.filter(p=>p.role==='consultant'&&p.status==='active').map(p=>p.id));
+ const rows=perf.data.consultants.filter(p=>needs.closingLeaders||ids.has(p.key));
+ const ranked=[...rows].sort((a,b)=>needs.closingLeaders?b.closings-a.closings||b.usd_minor-a.usd_minor:b.usd_minor-a.usd_minor||b.closings-a.closings);
+ const n=Math.min(100,Math.max(1,Number(query.match(/\btop\s+(\d+)\b/i)?.[1]??1)));
+ const top=n===1?ranked.filter(p=>needs.closingLeaders?p.closings===ranked[0]?.closings:p.usd_minor===ranked[0]?.usd_minor):ranked.slice(0,n);
+ blocks.push(top.length?table([needs.closingLeaders?'Consultant/closer':'Consultant','Closed value (USD)','Closings'],top.map(p=>[p.label,money(p.usd_minor),p.closings])):'No eligible recorded closings were found for this period.');
+ blocks.push('Ranking basis: '+(needs.closingLeaders?'number of recorded closings':'closed sales value among current active consultants')+'. Sales value is not salary, commission or overall coaching quality.');
+ if(!needs.closingLeaders&&rows.length){const count=Math.max(...rows.map(r=>r.closings));blocks.push('By closing count: '+rows.filter(r=>r.closings===count).map(r=>safe(r.label)+' — '+r.closings+' closings, USD '+money(r.usd_minor)).join('; ')+'.');}
+ }else blocks.push('The consultant ranking could not be verified from the authorized reports.');
  }
  return '**Payroll report — '+from+' to '+through+'**\n\n'+blocks.join('\n\n')+'\n\nSource: [Sales Payroll](https://payroll.practicescalingsystems.com/admin). Each section uses its own current authorized report. Checked '+(Object.values(sources).map(s=>s?.fetched_at).filter(Boolean).sort().at(-1)??'unavailable')+'.';
 }
