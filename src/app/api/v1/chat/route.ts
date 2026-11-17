@@ -808,7 +808,7 @@ export async function POST(req: Request) {
             fp ??= await getActivePrompt(ctx.orgId, "faithfulness");
             return checkFaithfulness(context + performanceSection + (hasAttachments ? attachmentBlock : ""), text, fp, verifierModel,
               AbortSignal.timeout(Math.max(1000, Math.min(shortAnswer ? 12_000 : 45_000, deadline - Date.now() - 5000))),
-              { question: query, trustedPolicy: `${groundingPrompt}\n\n${modeBlock}` });
+              { question: lastUser?.content ?? query, trustedPolicy: `${groundingPrompt}\n\n${modeBlock}\n\n${RESPONSE_GUIDANCE}` });
           },
           canRepair: () => Date.now() < deadline - 80_000,
           repair: async (text, unsupported, fabricated) => {
