@@ -18,3 +18,5 @@ it('finishes a failed source request with recoverable state and permits a clean 
 });
 
 vi.mock('@/lib/ratelimit',()=>({checkRateLimit:async()=>({ok:true}),rateLimitHeaders:()=>({})}));
+
+it('never finishes a null report as an empty loading response',async()=>{m.access.mockResolvedValue('verified@example.com');m.hour.mockResolvedValueOnce(null);const body=await(await POST(request())).text();expect(body).toContain('Report scope needs clarification');expect(body).toContain('No company-wide or zero total');expect(body).toContain('finishReason');});

@@ -31,7 +31,10 @@ function inheritScope(query:string,prior:string){
 
 export function businessFollowup(query:string,turns:{role:string;content:string}[]){
  const users=turns.filter(t=>t.role==='user');if(users.at(-1)?.content===query)users.pop();
- const normalize=(s:string)=>s.replace(/\bconsulants?\b/gi,m=>m.toLowerCase().endsWith('s')?'consultants':'consultant');
+ const normalize=(s:string)=>{
+   const words:Record<string,string>={hw:'how',mch:'much',earnd:'earned',eraned:'earned',earnned:'earned',clsoed:'closed',clsoings:'closings',closngs:'closings',salry:'salary',commision:'commission',mnth:'month',montth:'month',dis:'this',consulant:'consultant',consulants:'consultants'};
+   return s.replace(/\b[a-z]+\b/gi,w=>words[w.toLowerCase()]??w).replace(/\bhowmuch\b/gi,'how much');
+ };
  query=normalize(query);
  let previous='';for(const turn of users.slice(-40))previous=inheritScope(normalize(turn.content),previous).slice(-16000);
  return inheritScope(query,previous);

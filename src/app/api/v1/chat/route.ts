@@ -313,6 +313,10 @@ export async function POST(req: Request) {
       stream.writeData({type:'report_error',retryable:true,label:'Company report unavailable'});
       console.error('[business-report]',error instanceof Error?error.message:'Source unavailable');
     }
+    if(!text){
+      text=factReport==='payroll'?'Whose Payroll earnings would you like, and for which month? I have not substituted company totals.':'I could not resolve the requested report scope. Please name the person or team and the measure you want. No company-wide or zero total has been substituted.';
+      reportFailed=true;stream.writeData({type:'report_error',retryable:true,label:'Report scope needs clarification'});
+    }
     if(text){console.info('[business-report-timing]',JSON.stringify({kind:hourly?'hourly':comparison?'comparison':'facts',identityMs:identityFinished-directStarted,reportMs:Date.now()-identityFinished,totalMs:Date.now()-startedAt}));const answer=text;
       if(!reportFailed)progress('Report complete');
       stream.write(formatDataStreamPart('text',answer));

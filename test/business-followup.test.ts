@@ -27,3 +27,6 @@ it('resolves the reported David earnings to sales follow-up without retaining th
 });
 it('asks for a person rather than replacing an unresolved pronoun with company totals',()=>{expect(renderPayrollFacts('how much he closed this month?',source)).toContain('Which person');});
 it('routes earned wording to Payroll without a model',()=>{expect(planPayrollReports('how much david made earned this month','Asia/Karachi')?.reports).toEqual(['payroll']);});
+
+it.each(['hw mch david earnd dis mnth','howmuch david eraned this montth'])('normalizes rough earnings wording without altering the name: %s',raw=>{const q=businessFollowup(raw,[]);expect(q).toContain('david');expect(planPayrollReports(q,'Asia/Karachi')?.reports).toEqual(['payroll']);});
+it('normalizes rough pronoun follow-ups before resolving their subject',()=>{expect(businessFollowup('hw mch he clsoed dis mnth',[{role:'user',content:'hw mch david earnd dis mnth'}])).toBe('how much david closed this month');});
