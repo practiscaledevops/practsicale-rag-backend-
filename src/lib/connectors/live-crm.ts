@@ -1,10 +1,12 @@
 import {setTimeout as delay} from 'node:timers/promises';
 import {z} from 'zod';
 export type TimeWindow={start:string;end:string};
+let crmCooldownUntil=0;
 async function request(path:string,signal:AbortSignal,body?:unknown,retried=false):Promise<unknown>{
+ if(crmCooldownUntil>Date.now())await delay(crmCooldownUntil-Date.now(),undefined,{signal});
  const token=process.env.BRAIN_GHL_READ_TOKEN;if(!token)throw Error('Live CRM is not configured');
  const r=await fetch('https://services.leadconnectorhq.com'+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,Version:path.startsWith('/calendars/')?'2021-07-28':'v3',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),cache:'no-store',redirect:'error',signal:AbortSignal.any([signal,AbortSignal.timeout(path.startsWith('/calendars/')?15000:8000)])});
- if(r.status===429&&!retried){const seconds=Number(r.headers.get('retry-after')??1);if(Number.isFinite(seconds)&&seconds>=0&&seconds<=3){await delay(Math.max(500,seconds*1000),undefined,{signal});return request(path,signal,body,true);}}
+ if(r.status===429&&!retried){const raw=r.headers.get('retry-after');const seconds=raw===null?10:/^\d+(?:\.\d+)?$/.test(raw)?Number(raw):Math.max(0,(Date.parse(raw)-Date.now())/1000);if(Number.isFinite(seconds)&&seconds>=0&&seconds<=15){crmCooldownUntil=Math.max(crmCooldownUntil,Date.now()+Math.max(1000,seconds*1000));return request(path,signal,body,true);}}
  if(!r.ok)throw Error('Live CRM '+path.split('?')[0]+' unavailable ('+r.status+')');return r.json();
 }
 function location(){const id=process.env.BRAIN_GHL_LOCATION_ID;if(!id)throw Error('CRM location unavailable');return id;}
