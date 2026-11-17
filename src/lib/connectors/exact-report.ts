@@ -41,7 +41,7 @@ export async function hourlyReport(query:string,w:Window,timeZone:string,email:s
  note+=' Form submission time is not the actual closing time. Admin entries have day/month precision and are excluded from hourly totals; '+[...d.dated,...d.undated].filter(r=>r.origin!=='form').length+' such entries exist in the touched Payroll scope. This is not a complete hourly closing total.';
  }
  if(!rows.length)return 'Specify calls, appointments or sales for the time window. No result was inferred.';
- return '**Timestamped activity — '+safe(localDateTime(w.start,timeZone))+' to '+safe(localDateTime(w.end,timeZone))+' · '+safe(timeZone)+'**\n\n'+tab(['Metric','Count/value'],rows)+'\n\nWindow is start-inclusive, end-exclusive: '+w.start+' to '+w.end+'.\n\n'+note+'\n\nSource: [Sales Payroll](https://payroll.practicescalingsystems.com/admin), checked '+new Date().toISOString()+'.';
+ return '**Timestamped activity — '+safe(localDateTime(w.start,timeZone))+' to '+safe(localDateTime(w.end,timeZone))+' · '+safe(timeZone)+'**\n\n'+tab(['Metric','Count/value'],rows)+'\n\nWindow is start-inclusive, end-exclusive: '+w.start+' to '+w.end+'.\n\n'+note+'\n\nSource: live GHL for calls; [Sales Payroll](https://payroll.practicescalingsystems.com/admin) for any appointment/form counts. Checked '+new Date().toISOString()+'.';
 }
 const opp=z.object({id:z.string(),locationId:z.string(),status:z.string(),monetaryValue:z.number().nullable().optional(),contactId:z.string().nullable().optional(),contact:z.object({id:z.string()}).nullable().optional()});
 export async function contactOpportunities(contactId:string,signal:AbortSignal){

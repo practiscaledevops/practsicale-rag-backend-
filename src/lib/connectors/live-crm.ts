@@ -16,13 +16,13 @@ export async function liveWonOpportunities(signal:AbortSignal){
   if(d.opportunities.length<500)return all;
  }throw Error('CRM scan exceeded its safe limit; comparison is incomplete');
 }
-const call=z.object({id:z.string(),locationId:z.string(),dateAdded:z.string(),direction:z.enum(['inbound','outbound']),messageType:z.string(),meta:z.object({callStatus:z.string().optional()}).optional()});
+const call=z.object({id:z.string(),locationId:z.string(),dateAdded:z.string(),direction:z.enum(['inbound','outbound']),messageType:z.string(),status:z.string().optional(),meta:z.object({callStatus:z.string().optional(),call:z.object({status:z.string().optional()}).optional()}).optional()});
 export async function liveCallCounts(w:TimeWindow,signal:AbortSignal){
  const loc=location(),seen=new Set<string>(),cursors=new Set<string>();let cursor:string|undefined;let total=0,outbound=0,inbound=0,missed=0;
  for(let page=0;page<30;page++){
   const q=new URLSearchParams({locationId:loc,channel:'Call',limit:'1000',sortBy:'createdAt',sortOrder:'asc',startDate:w.start,endDate:w.end,...(cursor?{cursor}:{})});
   const d=z.object({messages:z.array(call),nextCursor:z.string().nullable().optional(),total:z.number()}).parse(await request('/conversations/messages/export?'+q,signal));
-  for(const m of d.messages){if(m.locationId!==loc||!['TYPE_CALL','TYPE_CAMPAIGN_CALL'].includes(m.messageType))throw Error('CRM returned unexpected call scope');if(seen.has(m.id))throw Error('CRM pagination repeated calls');seen.add(m.id);const t=Date.parse(m.dateAdded);if(!Number.isFinite(t))throw Error('CRM call timestamp unavailable');if(t<Date.parse(w.start)||t>=Date.parse(w.end))continue;total++;if(m.direction==='outbound')outbound++;else {inbound++;if(['no-answer','busy','failed','missed'].includes(m.meta?.callStatus??''))missed++;}}
+  for(const m of d.messages){if(m.locationId!==loc||!['TYPE_CALL','TYPE_CAMPAIGN_CALL'].includes(m.messageType))throw Error('CRM returned unexpected call scope');if(seen.has(m.id))throw Error('CRM pagination repeated calls');seen.add(m.id);const t=Date.parse(m.dateAdded);if(!Number.isFinite(t))throw Error('CRM call timestamp unavailable');if(t<Date.parse(w.start)||t>=Date.parse(w.end))continue;total++;if(m.direction==='outbound')outbound++;else {inbound++;if(['no-answer','busy','failed','missed'].includes(m.meta?.call?.status??m.meta?.callStatus??m.status??''))missed++;}}
   if(!d.nextCursor){if(seen.size!==d.total)throw Error('CRM export count changed or pagination incomplete');return {total,outbound,inbound,missed};}
   if(cursors.has(d.nextCursor))throw Error('CRM cursor repeated');cursors.add(d.nextCursor);cursor=d.nextCursor;
  }throw Error('Live call window is too large; narrow the time range');

@@ -329,6 +329,7 @@ export async function POST(req: Request) {
       if (providerError?.statusCode === 429 && (code === "credit_balance_exhausted" || code === "insufficient_quota")) {
         return "The configured model provider has run out of API credits. Ask your administrator to restore credits for this provider.";
       }
+      if (error instanceof Error && error.message === 'MODEL_CREDITS_UNAVAILABLE') return 'The configured AI provider account has no credits available. An administrator needs to update its billing or API connection. Company reports can still run directly from source records.';
       if (error instanceof Error && error.message === 'RETRIEVAL_DEADLINE') return 'The knowledge lookup took too long. No answer was inferred from incomplete records. Please retry with a narrower question.';
       return "The assistant hit an error while generating the answer. Please try again.";
     },

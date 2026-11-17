@@ -40,3 +40,11 @@ describe("request cancellation reaches every model helper", () => {
     expect((await result).name).toBe("AbortError"); expect(observed.aborted).toBe(true);
   });
 });
+
+it('stops the request on exhausted credits even when a helper swallows its failure',async()=>{
+ const doGenerate=vi.fn().mockRejectedValue(Object.assign(new Error('You have no credits remaining'),{statusCode:429,isRetryable:true}));
+ const model=boundModel({specificationVersion:'v1',provider:'fixture',modelId:'fixture',doGenerate} as any);
+ const signal=new AbortController().signal;
+ const work=withModelRequest(signal,async()=>{try{await model.doGenerate({} as any);}catch{};await new Promise(r=>setTimeout(r,20));await model.doGenerate({} as any);});
+ await expect(work).rejects.toThrow('MODEL_CREDITS_UNAVAILABLE');await new Promise(r=>setTimeout(r,30));expect(doGenerate).toHaveBeenCalledTimes(1);
+});

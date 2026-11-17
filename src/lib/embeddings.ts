@@ -1,6 +1,6 @@
 import { reserveUsage } from "@/lib/provider-usage";
 import OpenAI from "openai";
-import { modelSignal } from "@/lib/model-runtime";
+import { modelSignal, providerFailure } from "@/lib/model-runtime";
 import { isDemo } from "@/lib/demo/mode";
 import { getProviderKey } from "@/lib/secrets";
 
@@ -152,7 +152,7 @@ async function meteredEmbed(client: OpenAI, input: string | string[]) {
   const bytes = Array.isArray(input) ? input.reduce((n, s) => n + Buffer.byteLength(s), 0) : Buffer.byteLength(input);
   const settle = await reserveUsage("openai", MODEL, bytes, 0);
   signal.throwIfAborted();
-  const result = await client.embeddings.create({ model: MODEL, input, dimensions: DIM }, { signal });
+  const result = await client.embeddings.create({ model: MODEL, input, dimensions: DIM }, { signal }).catch(providerFailure);
   await settle(result.usage?.prompt_tokens, 0);
   return result;
 }
