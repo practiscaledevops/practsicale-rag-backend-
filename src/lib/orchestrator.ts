@@ -1,3 +1,4 @@
+import { payrollAggregateOnly } from '@/lib/response-guidance';
 import { isSearchTimeout } from "@/lib/retrieval";
 // The Retrieval Orchestrator — how the Brain FINDS knowledge for a request.
 //
@@ -544,7 +545,8 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   // The knowledge scope decides whether the path may run: "gated" = the probe
   // above, "forced" (Consultant calls) = skip the probe and let the roster-aware
   // resolve decide, "off" (Playbooks / Learnings) = never.
-  const reviewAllowed = gates.callReview && (plan.callReview === "forced" || (plan.callReview === "gated" && reviewGate));
+  const aggregateOnly = plan.callReview !== "forced" && payrollAggregateOnly(query);
+  const reviewAllowed = !aggregateOnly && gates.callReview && (plan.callReview === "forced" || (plan.callReview === "gated" && reviewGate));
   const reviewPromise: Promise<{ filter: CallReviewFilter; chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number; complete?: boolean } | null> =
     reviewAllowed && transcriptsInScope
       ? (async () => {
@@ -773,7 +775,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   // Finding a useful excerpt in a call does not mean the user requested a
   // full call audit. Unconditional expansion used to send ~200k input tokens
   // even for a short service question, drowning the relevant policy evidence.
-  const needsTranscriptDepth = gates.callReview && reviewGate &&
+  const needsTranscriptDepth = !aggregateOnly && gates.callReview && reviewGate &&
     (!!review || reviewThread || /\b(calls?|transcripts?|consultants?)\b/i.test(query));
   if (needsTranscriptDepth && !isCreativeRequest(query) && semantic.some((c) => c.source_type === "transcript")) {
     emit({ stage: "expanding", label: "Reading the full call transcript" });
