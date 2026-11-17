@@ -30,3 +30,5 @@ it('routes earned wording to Payroll without a model',()=>{expect(planPayrollRep
 
 it.each(['hw mch david earnd dis mnth','howmuch david eraned this montth'])('normalizes rough earnings wording without altering the name: %s',raw=>{const q=businessFollowup(raw,[]);expect(q).toContain('david');expect(planPayrollReports(q,'Asia/Karachi')?.reports).toEqual(['payroll']);});
 it('normalizes rough pronoun follow-ups before resolving their subject',()=>{expect(businessFollowup('hw mch he clsoed dis mnth',[{role:'user',content:'hw mch david earnd dis mnth'}])).toBe('how much david closed this month');});
+
+it('keeps the earnings request when the user resolves an ambiguous name',()=>{const turns=[{role:'user',content:'how much david made earned this month'}];const q=businessFollowup('David M',turns);expect(q).toBe('how much David M made earned this month');expect(businessFollowup('how much he closed this month?',[...turns,{role:'user',content:'David M'}])).toBe('how much David M closed this month?');});

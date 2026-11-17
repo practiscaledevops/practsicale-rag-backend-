@@ -2,6 +2,11 @@ import {payrollPersonHint} from './payroll-person';
 import { needsSynthesis } from '@/lib/response-guidance';
 /** Resolve narrow drill-down follow-ups from user turns only. Never use assistant prose as evidence. */
 function inheritScope(query:string,prior:string){
+ const priorPerson=payrollPersonHint(prior);
+ if(priorPerson&&/^[a-z]+(?:[ .'-]+[a-z]+){0,2}[.]?$/i.test(query.trim())&&!/\b(yes|no|okay|ok|thanks|today|yesterday|month|week|all|everyone|show|tell|how|what|why|and|please)\b/i.test(query)){
+   return prior.replace(priorPerson,query.trim());
+ }
+
  if(/\b(he|she|his|her)\b/i.test(query)){
   const person=payrollPersonHint(prior);
   if(person)query=query.replace(/\b(he|she)\b/gi,person).replace(/\b(his|her)\b/gi,person+"'s");
