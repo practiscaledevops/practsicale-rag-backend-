@@ -18,3 +18,5 @@ it('rejects mismatched or partial source reports',async()=>{
  vi.stubEnv('PAYROLL_BRIDGE_KEY','test'); vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({ report:'people',from:'2026-11-01',through:'2026-11-17',date_basis:'now',fetched_at:'now',source:'Sales Payroll',complete:true,warnings:[],data:[] })));
  await expect(readLivePayroll('rules','a@b.com','2026-11-01','2026-11-17',new AbortController().signal)).rejects.toThrow('scope');
 });
+
+it('uses current roster for setter headcount, not activity or closing participation',()=>{ expect(planPayrollReports('How many setters are there currently in Practiscale','Asia/Karachi')?.reports).toEqual(['people']); });

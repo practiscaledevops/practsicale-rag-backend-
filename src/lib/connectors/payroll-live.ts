@@ -6,6 +6,8 @@ export const sourcePermissions = { people: 'employees.view', teams: 'teams.view'
 export type PayrollReport = keyof typeof sourcePermissions;
 export function planPayrollReports(query: string, timeZone: string): { reports: PayrollReport[]; from: string; through: string; unsupported?: string } | null {
   const reports = new Set<PayrollReport>();
+  const headcount = /\b(how many|number of|count|list|names|who)\b/i.test(query) && /\b(setters?|consultants?|closers?|employees?|people|staff)\b/i.test(query) && !/\b(closed|closings|sales|appointments|show[ -]?ups?|calls|dials)\b/i.test(query);
+  if (headcount) reports.add('people');
   if (/\b(fines?|deductions?|penalt(?:y|ies))\b/i.test(query)) reports.add('fines');
   if (/\b(bonuses|bonus)\b/i.test(query)) reports.add('bonuses');
   if (/\b(pay rules?|payroll rules?|commission rules?|current rules?|pay policy)\b/i.test(query)) reports.add('rules');
@@ -13,8 +15,8 @@ export function planPayrollReports(query: string, timeZone: string): { reports: 
   if (/\bteams?\b/i.test(query)) reports.add('teams');
   if (/\b(attendance|absent|lateness)\b/i.test(query)) reports.add('attendance');
   if (/\b(payroll cost|salaries|salary|payslips?|payroll report)\b/i.test(query)) reports.add('payroll');
-  if (/\b(setters?|appointments?|show[ -]?ups?|no[ -]?shows?|dials?)\b/i.test(query)) reports.add('activity');
-  if (/\b(sales|closings?|closed|consultants?|closers?)\b/i.test(query) && !/\b(call|transcript|scorecard)\b/i.test(query)) reports.add('closings');
+  if (!headcount && /\b(setters?|appointments?|show[ -]?ups?|no[ -]?shows?|dials?)\b/i.test(query)) reports.add('activity');
+  if (!headcount && /\b(sales|closings?|closed|consultants?|closers?)\b/i.test(query) && !/\b(call|transcript|scorecard)\b/i.test(query)) reports.add('closings');
   if (!reports.size) return null;
   const today = todayIn(timeZone);
   const filter = parseCallReviewFilter(query, { referenceDate: today, timeZone });
