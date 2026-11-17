@@ -47,9 +47,10 @@ export function renderMultipart(query:string,from:string,through:string,sources:
  const ranked=[...rows].sort((a,b)=>needs.closingLeaders?b.closings-a.closings||b.usd_minor-a.usd_minor:b.usd_minor-a.usd_minor||b.closings-a.closings);
  const n=Math.min(100,Math.max(1,Number(query.match(/\btop\s+(\d+)\b/i)?.[1]??1)));
  const top=n===1?ranked.filter(p=>needs.closingLeaders?p.closings===ranked[0]?.closings:p.usd_minor===ranked[0]?.usd_minor):ranked.slice(0,n);
+ if(top.length){const lead=top.map(p=>safe(p.label)).join(' and ');blocks.push('**'+lead+(top.length>1?' jointly lead':' leads')+' '+(needs.closingLeaders?'by number of closings':'by closed sales value')+' for this period: '+(needs.closingLeaders?top[0].closings+' closings':'USD '+money(top[0].usd_minor))+'.**');}
  blocks.push(top.length?table([needs.closingLeaders?'Consultant/closer':'Consultant','Closed value (USD)','Closings'],top.map(p=>[p.label,money(p.usd_minor),p.closings])):'No eligible recorded closings were found for this period.');
  blocks.push('Ranking basis: '+(needs.closingLeaders?'number of recorded closings':'closed sales value among current active consultants')+'. Sales value is not salary, commission or overall coaching quality.');
- if(!needs.closingLeaders&&rows.length){const count=Math.max(...rows.map(r=>r.closings));blocks.push('By closing count: '+rows.filter(r=>r.closings===count).map(r=>safe(r.label)+' — '+r.closings+' closings, USD '+money(r.usd_minor)).join('; ')+'.');}
+ if(!needs.closingLeaders&&rows.length){const count=Math.max(...rows.map(r=>r.closings));blocks.push('For comparison, the closing-count leader is '+rows.filter(r=>r.closings===count).map(r=>safe(r.label)+' — '+r.closings+' closings, USD '+money(r.usd_minor)).join('; ')+'.');}
  }else blocks.push('The consultant ranking could not be verified from the authorized reports.');
  }
  return '**Payroll report — '+from+' to '+through+'**\n\n'+blocks.join('\n\n')+'\n\nSource: [Sales Payroll](https://payroll.practicescalingsystems.com/admin). Each section uses its own current authorized report. Checked '+(Object.values(sources).map(s=>s?.fetched_at).filter(Boolean).sort().at(-1)??'unavailable')+'.';

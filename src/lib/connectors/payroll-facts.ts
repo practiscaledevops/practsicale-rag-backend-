@@ -17,7 +17,9 @@ export function renderPayrollFacts(query: string, source: {report:string;from:st
     const intent=query.split('Follow-up requested:').at(-1)??query;
     if(/\b(show[ -]?rate)\b/i.test(intent)){
       const rows=mentionedTeams.length?mentionedTeams.map(g=>[g.label,g.showed,g.happened,g.show_rate==null?'Not available':(g.show_rate*100).toFixed(1)+'%']):[['Company-wide',d.summary.showed,d.summary.happened??'Not supplied',d.summary.show_rate==null?'Not available':(d.summary.show_rate*100).toFixed(1)+'%']];
-      return '**Payroll show rate — '+source.from+' to '+source.through+'**\n\n'+table(['Scope','Reviewed show-ups','Elapsed meeting contacts','Show rate'],rows)+'\n\nUses Payroll’s show rate: reviewed show-ups divided by elapsed meeting contacts. Future-only bookings are excluded from the denominator. These are meeting outcomes, not phone-call answers.'+footer;
+      const scope=mentionedTeams.length===1?mentionedTeams[0]:!mentionedTeams.length?{label:'Company-wide',show_rate:d.summary.show_rate,showed:d.summary.showed,happened:d.summary.happened}:null;
+      const lead=scope&&scope.show_rate!=null?'**'+cell(scope.label)+' show rate is '+(scope.show_rate*100).toFixed(1)+'%: '+scope.showed+' reviewed show-ups out of '+scope.happened+' elapsed meeting contacts.**\n\n':'';
+      return lead+'**Payroll show rate — '+source.from+' to '+source.through+'**\n\n'+table(['Scope','Reviewed show-ups','Elapsed meeting contacts','Show rate'],rows)+'\n\nUses Payroll’s show rate: reviewed show-ups divided by elapsed meeting contacts. Future-only bookings are excluded from the denominator. These are meeting outcomes, not phone-call answers.'+footer;
     }
     if(mentionedTeams.length&&d.sales.some(r=>r.team===undefined))return 'Payroll has not supplied team attribution for the individual closings. I cannot verify the requested team breakdown yet.'+footer;
     const owners=[...new Set(d.sales.map(r=>r.owner))].filter(n=>query.toLowerCase().includes(n.toLowerCase()));

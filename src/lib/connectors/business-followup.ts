@@ -1,5 +1,11 @@
 /** Resolve narrow drill-down follow-ups from user turns only. Never use assistant prose as evidence. */
 function inheritScope(query:string,prior:string){
+ const otherTeam=/^(?:(?:and|what about|how about|also|now|for)\s+)?(team\s+[a-z]+(?:\s+[a-z]+)?)[?.! ]*$/i.exec(query.trim());
+ if(otherTeam&&/\b(closed|closings?|sales|show[ -]?rate)\b/i.test(prior)&&/\bteam\s+[a-z]+/i.test(prior)){
+  // Keep the requested measure and dates; replace only the previously named team.
+  return prior.replace(/\bteam\s+[a-z]+(?:\s+(?!has\b|have\b|closed\b|this\b|last\b|in\b|for\b|show\b|closings?\b)[a-z]+)?/gi,otherTeam[1]);
+ }
+
  const metricFollowup=/\b(show[ -]?rate)\b/i.test(query);
  if(!metricFollowup&&(!/\b(details?|breakdown|each|those|these|them)\b/i.test(query)||! /\b(closings?|sales|deals?|those|these|them)\b/i.test(query)))return query;
  // An explicit scope is a new request, not a reason to reuse another team's scope.
