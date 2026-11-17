@@ -33,7 +33,7 @@ export async function liveCallCounts(w:TimeWindow,signal:AbortSignal){
 }
 
 const appointment=z.object({id:z.string(),calendarId:z.string(),locationId:z.string(),startTime:z.string(),appointmentStatus:z.string(),deleted:z.boolean().optional()});
-export async function liveAppointmentCounts(w:TimeWindow,signal:AbortSignal,progress?:(label:string)=>void){
+export async function liveAppointmentRows(w:TimeWindow,signal:AbortSignal,progress?:(label:string)=>void){
  progress?.('Loading the live calendar directory');
  const loc=location();
  const catalog=z.object({calendars:z.array(z.object({id:z.string(),locationId:z.string(),groupId:z.string().nullable().optional()}))}).parse(await request('/calendars/?'+new URLSearchParams({locationId:loc,showDrafted:'true'}),signal));
@@ -53,8 +53,8 @@ export async function liveAppointmentCounts(w:TimeWindow,signal:AbortSignal,prog
  for(const e of d.events){if(e.locationId!==loc||!scope.ids.has(e.calendarId))throw Error('Appointment scope mismatch');if(e.deleted)continue;const t=Date.parse(e.startTime);if(!Number.isFinite(t))throw Error('Appointment timestamp missing');if(t<Date.parse(w.start)||t>=Date.parse(w.end))continue;const prior=events.get(e.id);if(prior&&JSON.stringify(prior)!==JSON.stringify(e))throw Error('Appointment changed during live report');events.set(e.id,e);}
  completed+=scope.ids.size;progress?.(`Checking calendars: ${completed} of ${ids.length}`);
  }}));}catch(error){cancel.abort();throw error;}
- const rows=[...events.values()];const count=(s:string)=>rows.filter(e=>e.appointmentStatus===s).length;
- return {total:rows.length,showed:count('showed'),noshow:count('noshow'),cancelled:count('cancelled')+count('canceled'),invalid:count('invalid'),calendars:ids.length};
+ if(events.size>50000)throw Error('Appointment snapshot exceeds safe row limit');
+ return {rows:[...events.values()],calendars:ids.length};
 }
 
 export async function liveContactOpportunities(ids:string[],signal:AbortSignal){
@@ -66,4 +66,9 @@ export async function liveContactOpportunities(ids:string[],signal:AbortSignal){
  for(const o of d.opportunities){if(o.locationId!==loc||!allowed.has(o.contactId??o.contact?.id??'')||seen.has(o.id))throw Error('CRM contact scope or pagination mismatch');seen.add(o.id);all.push(o);}
  if(d.opportunities.length<500)return all;
  }throw Error('Contact comparison exceeded safe limit');
+}
+
+export async function liveAppointmentCounts(w:TimeWindow,signal:AbortSignal,progress?:(label:string)=>void){
+ const {rows,calendars}=await liveAppointmentRows(w,signal,progress);const count=(s:string)=>rows.filter(e=>e.appointmentStatus===s).length;
+ return {total:rows.length,showed:count('showed'),noshow:count('noshow'),cancelled:count('cancelled')+count('canceled'),invalid:count('invalid'),calendars};
 }

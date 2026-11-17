@@ -1,0 +1,15 @@
+import {beforeEach,expect,it,vi} from 'vitest';
+const m=vi.hoisted(()=>({rpc:vi.fn(),scan:vi.fn(),update:vi.fn()}));
+vi.mock('@/lib/supabase',()=>({supabaseAdmin:()=>({rpc:m.rpc,from:()=>({update:m.update})})}));
+vi.mock('@/lib/connectors/live-crm',()=>({liveAppointmentRows:m.scan}));
+import {appointmentSnapshotCounts,syncAppointmentSnapshot,rollingAppointmentWindow} from '@/lib/connectors/appointment-snapshot';
+const w={start:'2026-11-01T00:00:00.000Z',end:'2026-12-01T00:00:00.000Z'};
+const signal=new AbortController().signal;
+const result=(data:unknown)=>({abortSignal:()=>Promise.resolve({data,error:null})});
+beforeEach(()=>{vi.clearAllMocks();process.env.BRAIN_GHL_LOCATION_ID='test';m.update.mockImplementation(()=>{const chain={eq:()=>chain,abortSignal:()=>Promise.resolve({error:null})};return chain;});});
+it('publishes only after a complete scan',async()=>{m.rpc.mockReturnValue(result(true));m.scan.mockResolvedValue({rows:[],calendars:140});expect(await syncAppointmentSnapshot(w,signal)).toBe(true);expect(m.rpc.mock.calls[1][0]).toBe('publish_appointment_snapshot');expect(m.rpc.mock.calls[1][1]).toMatchObject({rows_json:[],calendar_count:140});});
+it('preserves the prior snapshot when any source read fails',async()=>{m.rpc.mockReturnValue(result(true));m.scan.mockRejectedValue(Error('calendar unavailable'));await expect(syncAppointmentSnapshot(w,signal)).rejects.toThrow('calendar unavailable');expect(m.rpc).toHaveBeenCalledTimes(1);expect(m.update.mock.calls[0][0]).not.toHaveProperty('events');});
+it('does not duplicate an active refresh',async()=>{m.rpc.mockReturnValue(result(false));expect(await syncAppointmentSnapshot(w,signal)).toBe(false);expect(m.scan).not.toHaveBeenCalled();});
+it('reads a complete zero without contacting GHL',async()=>{m.rpc.mockReturnValue(result({total:0,showed:0,noshow:0,cancelled:0,invalid:0,calendars:140,verifiedAt:w.start,scanStartedAt:w.start,lastFailureAt:null}));expect((await appointmentSnapshotCounts(w,signal)).total).toBe(0);expect(m.scan).not.toHaveBeenCalled();});
+it('does not present missing coverage as zero',async()=>{m.rpc.mockReturnValue(result(null));await expect(appointmentSnapshotCounts(w,signal)).rejects.toThrow('No complete appointment snapshot');});
+it('covers the previous and current calendar month across years',()=>{expect(rollingAppointmentWindow(new Date('2027-01-05'))).toEqual({start:'2026-12-01T00:00:00.000Z',end:'2027-02-01T00:00:00.000Z'});});

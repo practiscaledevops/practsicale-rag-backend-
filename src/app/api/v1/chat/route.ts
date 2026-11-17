@@ -278,7 +278,7 @@ export async function POST(req: Request) {
     const progress=(label:string)=>stream.writeData({type:'status',stage:'business-report',label});
     progress('Checking your access to company records');
     const directStarted=Date.now();let identityFinished=directStarted;
-    const directSignal=AbortSignal.any([req.signal,AbortSignal.timeout(45000)]);
+    const directSignal=AbortSignal.any([req.signal,AbortSignal.timeout(body.refreshSource===true?240000:45000)]);
     let text: string | null = null;let reportFailed=false;
     try {
       const token=req.headers.get('x-chatbot-user-token');
@@ -292,7 +292,7 @@ export async function POST(req: Request) {
         identityFinished=Date.now();
         const w=reportingWindow(query,timeZone);
         progress('Reading current company records');
-        text=w?await hourlyReport(query,w,timeZone,email,directSignal,progress):'Specify last 1 hour, last 30 minutes, or from 14:00 to 15:00 on 2026-11-17. ISO timestamps with explicit offsets are also supported. No monthly total was substituted.';
+        text=w?await hourlyReport(query,w,timeZone,email,directSignal,progress,body.refreshSource===true):'Specify last 1 hour, last 30 minutes, or from 14:00 to 15:00 on 2026-11-17. ISO timestamps with explicit offsets are also supported. No monthly total was substituted.';
       }else if(multipart){
         const email=await requireSourceIdentity(token,directSignal);
         const plan=directPlan??planPayrollReports('sales '+query,timeZone)!;
@@ -976,6 +976,7 @@ const ChatBodySchema = z
     // The user's IANA time zone. Deliberately unvalidated here: callerTimeZone
     // ignores an invalid value (business-zone default) instead of a 400.
     timeZone: z.unknown().optional(),
+    refreshSource: z.boolean().optional(),
   })
   .passthrough();
 

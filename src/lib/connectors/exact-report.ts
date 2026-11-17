@@ -1,3 +1,4 @@
+import {appointmentSnapshotCounts} from './appointment-snapshot';
 import {liveCallCounts,liveWonOpportunities,liveAppointmentCounts,liveContactOpportunities} from './live-crm';
 import { z } from 'zod';
 import { localDateTime, zonedDayBoundsUTC, todayIn } from '@/lib/timezone';
@@ -16,19 +17,20 @@ export function reportingWindow(query:string,timeZone:string,now=new Date()): Wi
 }
 const safe=(v:unknown)=>String(v??'Not recorded').replace(/[|<>\r\n]/g,' ');
 const tab=(h:string[],rs:unknown[][])=>'| '+h.join(' | ')+' |\n| '+h.map(()=> '---').join(' | ')+' |\n'+rs.map(r=>'| '+r.map(safe).join(' | ')+' |').join('\n');
-export async function hourlyReport(query:string,w:Window,timeZone:string,email:string,signal:AbortSignal,progress?:(label:string)=>void){
+export async function hourlyReport(query:string,w:Window,timeZone:string,email:string,signal:AbortSignal,progress?:(label:string)=>void,refresh=false){
  if(/\b(fines?|bonuses?|payroll cost|salary|attendance)\b/i.test(query))return 'These records do not establish an hourly amount or attendance ruling. Ask for the Payroll month or attendance day; no prorated value has been invented.';
  const rows:unknown[][]=[];
  const wantCalls=/\b(calls?|dials?|activity|missed)\b/i.test(query),wantAppointments=/\b(appointments?|meetings?|show[ -]?ups?|no[ -]?shows?|activity)\b/i.test(query);
- const [callData,appointmentData]=await Promise.all([wantCalls?liveCallCounts(w,signal):null,wantAppointments?liveAppointmentCounts(w,signal,progress):null]);
+ const [callData,appointmentData]=await Promise.all([wantCalls?liveCallCounts(w,signal):null,wantAppointments?appointmentSnapshotCounts(w,signal,refresh,progress):null]);
  if(callData){
  const counts=callData;
  rows.push(['Live CRM call records',counts.total],['Outbound call records',counts.outbound],['Inbound call records',counts.inbound],['Inbound missed/no-answer/busy/failed',counts.missed]);
  }
  if(appointmentData){
- rows.push(['Live CRM appointments starting in window',appointmentData.total],['CRM showed status (not Payroll-reviewed)',appointmentData.showed],['CRM noshow status (not Payroll-reviewed)',appointmentData.noshow],['CRM cancelled appointments',appointmentData.cancelled],['CRM invalid appointments',appointmentData.invalid],['Calendars checked',appointmentData.calendars]);
+ rows.push(['Appointments starting in window (complete snapshot)',appointmentData.total],['CRM showed status (not Payroll-reviewed)',appointmentData.showed],['CRM noshow status (not Payroll-reviewed)',appointmentData.noshow],['CRM cancelled appointments',appointmentData.cancelled],['CRM invalid appointments',appointmentData.invalid],['Calendars checked',appointmentData.calendars]);
  }
- let note='Calls and appointments are read directly from GHL. Call windows use message creation timestamps; appointment windows use scheduled start timestamps. Deleted appointments are excluded; cancelled and invalid appointments are included and identified separately. Raw CRM attendance statuses are not Payroll-reviewed show-up rulings. GHL processing delays may still apply.';
+ let note='Calls are read directly from GHL. Appointments use the latest complete stored scan. Call windows use message creation timestamps; appointment windows use scheduled start timestamps. Deleted appointments are excluded; cancelled and invalid appointments are included and identified separately. Raw CRM attendance statuses are not Payroll-reviewed show-up rulings. GHL processing delays may still apply.';
+ if(appointmentData){const age=Math.max(0,Math.floor((Date.now()-Date.parse(appointmentData.verifiedAt))/60000));note+=' Appointment snapshot verified: '+appointmentData.verifiedAt+'. Scan started: '+appointmentData.scanStartedAt+'. Snapshot age: '+age+' minute(s). Background coverage: current and previous month, refreshed every five minutes. Changes after the scan may not be included. Choose Refresh from GHL for a new complete scan.';if(age>10||appointmentData.lastFailureAt)note+=' SYNC DELAYED: showing the last complete snapshot, not freshly checked records.';}
  if(/\b(sales|closed|closings?|ht|lt)\b/i.test(query)){
  const source=await readLivePayroll('closings',email,w.start.slice(0,10),w.end.slice(0,10),signal);
  const schema=z.object({origin:z.string(),closed_at:z.string(),usd_minor:z.number(),ticket:z.string()});const d=z.object({dated:z.array(schema),undated:z.array(schema)}).parse(source.data);
@@ -37,7 +39,7 @@ export async function hourlyReport(query:string,w:Window,timeZone:string,email:s
  note+=' Form submission time is not the actual closing time. Admin entries have day/month precision and are excluded from hourly totals; '+[...d.dated,...d.undated].filter(r=>r.origin!=='form').length+' such entries exist in the touched Payroll scope. This is not a complete hourly closing total.';
  }
  if(!rows.length)return 'Specify calls, appointments or sales for the time window. No result was inferred.';
- return '**Timestamped activity — '+safe(localDateTime(w.start,timeZone))+' to '+safe(localDateTime(w.end,timeZone))+' · '+safe(timeZone)+'**\n\n'+tab(['Metric','Count/value'],rows)+'\n\nWindow is start-inclusive, end-exclusive: '+w.start+' to '+w.end+'.\n\n'+note+'\n\nSource: live GHL for calls and appointments; [Sales Payroll](https://payroll.practicescalingsystems.com/admin) for any form sales. Checked '+new Date().toISOString()+'.';
+ return '**Timestamped activity — '+safe(localDateTime(w.start,timeZone))+' to '+safe(localDateTime(w.end,timeZone))+' · '+safe(timeZone)+'**\n\n'+tab(['Metric','Count/value'],rows)+'\n\nWindow is start-inclusive, end-exclusive: '+w.start+' to '+w.end+'.\n\n'+note+'\n\nSource: live GHL for calls; complete GHL appointment snapshot; [Sales Payroll](https://payroll.practicescalingsystems.com/admin) for any form sales. Checked '+new Date().toISOString()+'.';
 }
 const opp=z.object({id:z.string(),locationId:z.string(),status:z.string(),monetaryValue:z.number().nullable().optional(),contactId:z.string().nullable().optional(),contact:z.object({id:z.string()}).nullable().optional()});
 export async function contactOpportunities(contactId:string,signal:AbortSignal){
