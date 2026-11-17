@@ -25,7 +25,7 @@ export async function readPayrollClosings(from: string, through: string, signal:
     method: "POST",
     redirect: "error",
     cache: "no-store",
-    headers: { apikey: key, "Content-Type": "application/json" },
+    headers: { apikey: key, ...(key.startsWith("eyJ") ? { Authorization: `Bearer ${key}` } : {}), "Content-Type": "application/json" },
     body: JSON.stringify({ p_month: from, p_through: through }),
     signal: deadline,
   });
@@ -35,9 +35,11 @@ export async function readPayrollClosings(from: string, through: string, signal:
 
 const usd = (value: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value / 100);
 
-export function renderPayrollClosings(row: z.infer<typeof totals>, from: string, through: string) {
+export function renderPayrollClosings(row: z.infer<typeof totals>, from: string, through: string, ticket?: "high_ticket" | "low_ticket") {
+  const count = ticket === "high_ticket" ? row.high_ticket : ticket === "low_ticket" ? row.low_ticket : row.closings;
+  const amount = ticket === "high_ticket" ? row.high_usd_minor : ticket === "low_ticket" ? row.low_usd_minor : row.usd_minor;
   return [
-    "**" + usd(row.usd_minor) + " USD closed across " + row.closings + " deals**.",
+    "**" + usd(amount) + " USD closed across " + count + (ticket ? " " + ticket.replace("_", " ") : "") + " deals**.",
     "- High ticket: " + row.high_ticket + " deals · " + usd(row.high_usd_minor) + " USD",
     "- Low ticket: " + row.low_ticket + " deals · " + usd(row.low_usd_minor) + " USD",
     "",

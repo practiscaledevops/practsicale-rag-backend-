@@ -1,0 +1,42 @@
+import { afterEach, expect, it, vi } from "vitest";
+import { requireSourcePermission } from "@/lib/connectors/source-access";
+afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
+const signal = new AbortController().signal;
+const id = "00000000-0000-4000-8000-000000000001";
+function setup(overrides: { confirmed?: boolean; active?: boolean; sourceActive?: boolean; permissions?: string[] } = {}) {
+  vi.stubEnv("CHATBOT_AUTH_URL", "https://fixture.supabase.co");
+  vi.stubEnv("CHATBOT_AUTH_PUBLISHABLE_KEY", "public-fixture");
+  vi.stubEnv("PAYROLL_REPORTS_SERVER_KEY", "fixture");
+  const f = vi.fn().mockResolvedValueOnce(Response.json({ id, email: "person@example.com", email_confirmed_at: overrides.confirmed === false ? null : "2026-01-01" }))
+    .mockResolvedValueOnce(Response.json([{ is_active: overrides.active ?? true }]))
+    .mockResolvedValueOnce(Response.json([{ role: "admin", role_id: id, active: overrides.sourceActive ?? true }]))
+    .mockResolvedValueOnce(Response.json([{ permissions: overrides.permissions ?? ["dashboard.view"] }]));
+  vi.stubGlobal("fetch", f); return f;
+}
+it("does not contact any source without a user token", async () => {
+  const f = setup(); await expect(requireSourcePermission(null, "dashboard.view", signal)).rejects.toThrow(); expect(f).not.toHaveBeenCalled();
+});
+it("checks verified identity and live permissions before granting reporting", async () => {
+  const f=setup(); await expect(requireSourcePermission("session", "dashboard.view", signal)).resolves.toBeUndefined();
+  expect(f.mock.calls[0][0]).toBe("https://fixture.supabase.co/auth/v1/user");
+  expect(f.mock.calls[2][0]).toContain("person%40example.com");
+});
+it.each([{ confirmed:false }, { active:false }, { sourceActive:false }, { permissions:[] }])("fails closed for inactive, unverified or unprivileged users: %j", async input => {
+  setup(input); await expect(requireSourcePermission("session", "dashboard.view", signal)).rejects.toThrow();
+});
+it("sales access does not grant pipeline access", async () => {
+  setup(); await expect(requireSourcePermission("session", "pipeline.view", signal)).rejects.toThrow();
+});
+it("source administrator can access pipeline", async () => {
+  setup({permissions:["*"]}); await expect(requireSourcePermission("session", "pipeline.view", signal)).resolves.toBeUndefined();
+});
+
+it("uses only an operator-configured alias bound to the verified user ID", async () => {
+  const f=setup(); vi.stubEnv("SOURCE_ACCOUNT_ALIASES", JSON.stringify({[id]:"source@example.com"}));
+  await requireSourcePermission("session", "dashboard.view", signal);
+  expect(f.mock.calls[2][0]).toContain("source%40example.com");
+});
+it("fails closed on malformed alias configuration", async () => {
+  setup(); vi.stubEnv("SOURCE_ACCOUNT_ALIASES", "not-json");
+  await expect(requireSourcePermission("session", "dashboard.view", signal)).rejects.toThrow();
+});

@@ -1,3 +1,5 @@
+import { readGhlOpportunity } from "@/lib/connectors/ghl-opportunity";
+import { requireSourcePermission } from "@/lib/connectors/source-access";
 import { payrollAccess, readPayrollClosings, renderPayrollClosings } from "@/lib/connectors/payroll-report";
 // POST /api/v1/chat — grounded, cited, streamed chat over the key's permitted data.
 //
@@ -290,23 +292,47 @@ export async function POST(req: Request) {
         dataStream.writeData({ type: "route", requested: requestedSel, tier: effectiveTier ?? "recommended", model: modelId });
       }
 
+      // An explicit CRM record lookup stays model-free and checks source access.
+      const crmMatch = query.match(/\b(?:ghl|crm)\s+opportunity\s+([A-Za-z0-9_-]{15,100})\b/i);
+      if (crmMatch && payrollAccess(ctx.orgId, ctx.key.id)) {
+        let text = "Live CRM lookup is unavailable for this record or your account. No CRM state has been inferred.";
+        try {
+          if (!gates.callReview || !callReviewInScope(scope) || knowledgeScope.retrieval.callReview === "off") throw new Error("Scope denied");
+          await requireSourcePermission(req.headers.get("x-chatbot-user-token"), "pipeline.view", requestSignal);
+          const record = await readGhlOpportunity(crmMatch[1], requestSignal);
+          text = "**Current CRM status: " + record.status + "**\n\nOpportunity: " + record.id +
+            "\nPipeline: " + record.pipelineId + "\nStage: " + record.pipelineStageId +
+            "\n\nSource: GoHighLevel, checked at " + new Date().toISOString() +
+            ". CRM status is separate from Payroll-recognized sales.";
+        } catch { requestSignal.throwIfAborted(); }
+        dataStream.write(formatDataStreamPart("text", text));
+        dataStream.writeData({ type: "generation_receipt", model: "none", engine: "live CRM lookup", mode: "CRM lookup",
+          creative: false, words: text.split(/\s+/).length, evidenceDocuments: 0, evidenceChunks: 0, layers: [],
+          validCitations: 0, invalidCitations: 0, faithfulness: "Deterministic CRM lookup", warnings: [] });
+        dataStream.write(formatDataStreamPart("finish_message", { finishReason: "stop", usage: { promptTokens: 0, completionTokens: 0 } }));
+        return;
+      }
+
       // A row-based report does not need semantic retrieval, transcript expansion
       // or an LLM to rewrite dates and arithmetic. Keep the same access gates.
       if (wantsStructuredCallReport(query, retrievalHistory)) {
         // An explicitly provisioned sales reporting key can read exact Payroll aggregates.
         // Keep this out of generic retrieval and out of model prompts.
         if (payrollAccess(ctx.orgId, ctx.key.id)) {
-          const payrollFilter = resolveReviewFilterWithHistory(query, [], {
+          const payrollFilter = resolveReviewFilterWithHistory(query, retrievalHistory, {
             referenceDate: todayIn("UTC"), knownConsultants: [], timeZone: "UTC",
           });
           if (payrollFilter.closingCountOnly) {
-            let text = "Sales Payroll totals are temporarily unavailable.";
+            let text = "Sales Payroll totals are unavailable for this request or your account. This does not mean zero sales. The connected report supports company-wide monthly totals; verify your Payroll access or ask for a monthly total.";
             let success = false;
             if (gates.callReview && callReviewInScope(scope) && knowledgeScope.retrieval.callReview !== "off" &&
-                payrollFilter.dateFrom && payrollFilter.dateTo) {
+                payrollFilter.dateFrom && payrollFilter.dateTo &&
+                payrollFilter.dateFrom.endsWith("-01") && payrollFilter.dateFrom.slice(0, 7) === payrollFilter.dateTo.slice(0, 7) &&
+                !payrollFilter.consultants?.length && !payrollFilter.practiceType && !payrollFilter.originalOutcome) {
               try {
+                await requireSourcePermission(req.headers.get("x-chatbot-user-token"), "dashboard.view", requestSignal);
                 const row = await readPayrollClosings(payrollFilter.dateFrom, payrollFilter.dateTo, requestSignal);
-                text = renderPayrollClosings(row, payrollFilter.dateFrom, payrollFilter.dateTo);
+                text = renderPayrollClosings(row, payrollFilter.dateFrom, payrollFilter.dateTo, payrollFilter.ticketCategory);
                 success = true;
               } catch {
                 requestSignal.throwIfAborted();
