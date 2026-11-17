@@ -17,7 +17,7 @@ it("does not contact any source without a user token", async () => {
   const f = setup(); await expect(requireSourcePermission(null, "dashboard.view", signal)).rejects.toThrow(); expect(f).not.toHaveBeenCalled();
 });
 it("checks verified identity and live permissions before granting reporting", async () => {
-  const f=setup(); await expect(requireSourcePermission("session", "dashboard.view", signal)).resolves.toBeUndefined();
+  const f=setup(); await expect(requireSourcePermission("session", "dashboard.view", signal)).resolves.toBe("person@example.com");
   expect(f.mock.calls[0][0]).toBe("https://fixture.supabase.co/auth/v1/user");
   expect(f.mock.calls[2][0]).toContain("person%40example.com");
 });
@@ -28,7 +28,7 @@ it("sales access does not grant pipeline access", async () => {
   setup(); await expect(requireSourcePermission("session", "pipeline.view", signal)).rejects.toThrow();
 });
 it("source administrator can access pipeline", async () => {
-  setup({permissions:["*"]}); await expect(requireSourcePermission("session", "pipeline.view", signal)).resolves.toBeUndefined();
+  setup({permissions:["*"]}); await expect(requireSourcePermission("session", "pipeline.view", signal)).resolves.toBe("person@example.com");
 });
 
 it("uses only an operator-configured alias bound to the verified user ID", async () => {
