@@ -334,7 +334,8 @@ export async function POST(req: Request) {
   ]);
   const modelId = resolvedModel.modelId;
   const provider = modelId.startsWith("claude") ? "anthropic" : "openai";
-  const verifierModel = provider === "anthropic" ? modelId : "recommended";
+  // Keep verification on the selected model: do not silently upgrade economical OpenAI replies to an expensive tier.
+  const verifierModel = modelId;
 
   const abort = new AbortController();
   const requestSignal = AbortSignal.any([req.signal, abort.signal, AbortSignal.timeout(Math.max(1, startedAt + GENERATION_DEADLINE_MS - Date.now()))]);
