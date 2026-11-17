@@ -1,3 +1,4 @@
+import {liveCallCounts,liveWonOpportunities} from './live-crm';
 import { z } from 'zod';
 import { localDateTime, zonedDayBoundsUTC, todayIn } from '@/lib/timezone';
 import { readLivePayroll } from './payroll-live';
@@ -23,15 +24,15 @@ async function countRows(table:string,column:string,w:Window,signal:AbortSignal,
 }
 export async function hourlyReport(query:string,w:Window,timeZone:string,email:string,signal:AbortSignal){
  if(/\b(fines?|bonuses?|payroll cost|salary|attendance)\b/i.test(query))return 'These records do not establish an hourly amount or attendance ruling. Ask for the Payroll month or attendance day; no prorated value has been invented.';
- const rows:unknown[][]=[];
+ const rows:unknown[][]=[];let liveCalls=false;
  if(/\b(calls?|dials?|activity|missed)\b/i.test(query)){
- const [all,outbound,inbound,missed]=await Promise.all([countRows('ghl_calls','called_at',w,signal),countRows('ghl_calls','called_at',w,signal,{direction:'eq.outbound'}),countRows('ghl_calls','called_at',w,signal,{direction:'eq.inbound'}),countRows('ghl_calls','called_at',w,signal,{direction:'eq.inbound',status:'in.(no-answer,busy,failed,missed)'})]);
- rows.push(['Synced call records',all],['Outbound call records',outbound],['Inbound call records',inbound],['Inbound missed/no-answer/busy/failed',missed]);
+ const counts=await liveCallCounts(w,signal);liveCalls=true;
+ rows.push(['Live CRM call records',counts.total],['Outbound call records',counts.outbound],['Inbound call records',counts.inbound],['Inbound missed/no-answer/busy/failed',counts.missed]);
  }
  if(/\b(appointments?|meetings?|show[ -]?ups?|no[ -]?shows?|activity)\b/i.test(query)){
  const [n,show,no]=await Promise.all([countRows('ghl_appointments','start_time',w,signal,{deleted_at:'is.null'}),countRows('ghl_appointments','start_time',w,signal,{deleted_at:'is.null',appt_status:'eq.showed'}),countRows('ghl_appointments','start_time',w,signal,{deleted_at:'is.null',appt_status:'eq.noshow'})]);rows.push(['CRM appointments scheduled in window',n],['Raw CRM showed status (not Payroll-reviewed)',show],['Raw CRM noshow status (not Payroll-reviewed)',no]);
  }
- let note='Synced CRM records in Payroll, not a live CRM refresh. Missing or delayed synchronization can make this incomplete; zero stored rows does not prove zero real activity.';
+ let note=liveCalls?'Calls were read directly from GHL with complete pagination, using message creation timestamps. GHL processing delays may still apply. Any appointment counts are synced CRM records in Payroll, not a live appointment refresh.':'Synced CRM records in Payroll, not a live CRM refresh. Missing or delayed synchronization can make this incomplete; zero stored rows does not prove zero real activity.';
  if(/\b(sales|closed|closings?|ht|lt)\b/i.test(query)){
  const source=await readLivePayroll('closings',email,w.start.slice(0,10),w.end.slice(0,10),signal);
  const schema=z.object({origin:z.string(),closed_at:z.string(),usd_minor:z.number(),ticket:z.string()});const d=z.object({dated:z.array(schema),undated:z.array(schema)}).parse(source.data);
@@ -54,12 +55,24 @@ export async function contactOpportunities(contactId:string,signal:AbortSignal){
 }
 export async function comparePayrollCrm(email:string,from:string,through:string,query:string,signal:AbortSignal){
  const source=await readLivePayroll('closings',email,from,through,signal);
+ const reverseTask=liveWonOpportunities(signal).then(rows=>({rows,error:false})).catch(()=>({rows:[],error:true}));
  const sale=z.object({contact_id:z.string(),contact_name:z.string().nullable(),usd_minor:z.number(),ticket:z.string(),date_recorded:z.boolean(),closed_at:z.string()});const d=z.object({dated:z.array(sale),undated:z.array(sale)}).parse(source.data);
  const monthly=from.endsWith('-01')&&from.slice(0,7)===through.slice(0,7);
- const sales=[...d.dated,...(monthly?d.undated:[])].filter(r=>(!/\bht\b|high[ -]ticket/i.test(query)||r.ticket==='high_ticket')&&(!/\blt\b|low[ -]ticket/i.test(query)||r.ticket==='low_ticket'));
+ const allSales=[...d.dated,...(monthly?d.undated:[])];
+ const bothTickets=/\bht\b|high[ -]ticket/i.test(query)&&/\blt\b|low[ -]ticket/i.test(query);
+ const sales=allSales.filter(r=>(bothTickets||!/\bht\b|high[ -]ticket/i.test(query)||r.ticket==='high_ticket')&&(bothTickets||!/\blt\b|low[ -]ticket/i.test(query)||r.ticket==='low_ticket'));
  const contacts=[...new Set(sales.map(s=>s.contact_id))];if(contacts.length>100)return 'This comparison exceeds 100 Payroll contacts. Narrow the dates; no partial comparison was presented.';
  const result=new Map<string,Awaited<ReturnType<typeof contactOpportunities>>|null>();let next=0;
  await Promise.all(Array.from({length:Math.min(6,contacts.length)},async()=>{while(next<contacts.length){const id=contacts[next++];try{result.set(id,await contactOpportunities(id,signal));}catch{signal.throwIfAborted();result.set(id,null);}}}));
  const rows=sales.map(s=>{const crm=result.get(s.contact_id);const missing=s.contact_id.startsWith('entry:');return [s.contact_name??s.contact_id,s.ticket,(s.usd_minor/100).toFixed(2),missing?'No linked CRM contact ID':crm===null?'Unavailable':crm?.length?crm.map(o=>o.id+': '+o.status+' / value '+(o.monetaryValue??'not recorded')).join('; '):'No matching opportunity',missing?'Cannot match without CRM ID':crm===null?'Not verified':!crm?.length?'No CRM match':crm.length!==1?'Multiple opportunities — attribution unresolved':crm[0].status!=='won'?'Payroll sale; CRM '+crm[0].status:'Payroll sale; CRM won'];});
- return '**Payroll vs live CRM — '+from+' to '+through+'**\n\nPayroll: '+sales.length+' recognized sales, USD '+(sales.reduce((n,r)=>n+r.usd_minor,0)/100).toFixed(2)+'.\n\n'+tab(['Payroll client','Ticket','Payroll USD','Live CRM opportunities/status/value','Comparison'],rows)+'\n\nMatched by CRM contact ID, not name. CRM values are displayed as recorded, without assuming currency or summing duplicate opportunities. Payroll recognizes forms/admin entries; CRM is current pipeline state, not proof of when a sale closed. Differences need review, not automatic correction. This reconciles the selected Payroll sales, not every CRM-only opportunity. '+(monthly?d.undated.length+' undated admin entries are assigned to the Payroll month.':'Undated admin entries excluded from daily scope.')+'\n\nSource: [Sales Payroll](https://payroll.practicescalingsystems.com/admin) and live GHL CRM. Checked '+new Date().toISOString()+'.';
+ const reverse=await reverseTask;
+ const start=Date.parse(from+'T00:00:00Z'),end=Date.parse(through+'T00:00:00Z')+86400000;
+ const payrollIds=new Set(allSales.map(s=>s.contact_id));
+ const candidates=reverse.rows.filter(o=>{const t=Date.parse(o.lastStatusChangeAt??'');return !Number.isFinite(t)||(t>=start&&t<end);});
+ const unmatched=candidates.filter(o=>!payrollIds.has(o.contactId??o.contact?.id??''));
+ const reverseText=reverse.error?'Reverse CRM scan unavailable. The Payroll-to-CRM rows below remain independently checked; this is not a complete reconciliation.':
+ 'Reverse scan: '+reverse.rows.length+' currently won CRM opportunities scanned across all pipelines. '+unmatched.length+' have no contact-ID match in the full Payroll period roster (including both ticket categories).\n\n'+
+ (unmatched.length?tab(['CRM opportunity','Contact','Recorded value','Last status change','Review'],unmatched.map(o=>[o.id,o.contactId??o.contact?.id??'No contact ID',o.monetaryValue??'Not recorded',o.lastStatusChangeAt??'Not recorded',!Number.isFinite(Date.parse(o.lastStatusChangeAt??''))?'Date unknown; period unverified':'No Payroll-period contact match'])):'No unmatched candidates found under this definition.')+
+ '\n\nCRM date basis: current won state and last status-change timestamp, UTC dates. Undated won opportunities are included as unresolved candidates. This is not a complete historical win-event ledger: reopened/lost deals are outside this scan. A shared contact ID does not prove the individual deal matches. CRM ticket classification is not inferred from price; reverse candidates include all tickets.';
+ return '**Payroll vs live CRM — '+from+' to '+through+'**\n\nPayroll: '+sales.length+' recognized sales, USD '+(sales.reduce((n,r)=>n+r.usd_minor,0)/100).toFixed(2)+'.\n\n'+tab(['Payroll client','Ticket','Payroll USD','Live CRM opportunities/status/value','Comparison'],rows)+'\n\nMatched by CRM contact ID, not name. CRM values are displayed as recorded, without assuming currency or summing duplicate opportunities. Payroll recognizes forms/admin entries; CRM is current pipeline state, not proof of when a sale closed. Differences need review, not automatic correction. '+reverseText+' '+(monthly?d.undated.length+' undated admin entries are assigned to the Payroll month.':'Undated admin entries excluded from daily scope.')+'\n\nSource: [Sales Payroll](https://payroll.practicescalingsystems.com/admin) and live GHL CRM. Checked '+new Date().toISOString()+'.';
 }
