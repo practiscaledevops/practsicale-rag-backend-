@@ -6,7 +6,7 @@ export const sourcePermissions = { performance: 'reporting.view', people: 'emplo
 export type PayrollReport = keyof typeof sourcePermissions;
 export function planPayrollReports(query: string, timeZone: string): { reports: PayrollReport[]; from: string; through: string; unsupported?: string } | null {
   const reports = new Set<PayrollReport>();
-  const headcount = !/\b(top|best|highest|ranking|rank|leading)\b/i.test(query) && /\b(how many|number of|count|list|names|who|current|active)\b/i.test(query) && /\b(setters?|consultants?|closers?|employees?|people|staff)\b/i.test(query) && !/\b(closed|closings|sales|appointments|show[ -]?ups?|calls|dials)\b/i.test(query);
+  const headcount = !/\b(top|best|highest|ranking|rank|leading)\b/i.test(query) && /\b(how many|number of|count|list|names|who|current|active)\b/i.test(query) && /\b(setters?|consultants?|closers?|employees?|people|staff)\b/i.test(query) && !/\b(closed|closings|sales|appointments|show[ -]?rate|show[ -]?ups?|calls|dials)\b/i.test(query);
   if (headcount) reports.add('people');
   if (/\b(fines?|deductions?|penalt(?:y|ies))\b/i.test(query)) reports.add('fines');
   if (/\b(bonuses|bonus)\b/i.test(query)) reports.add('bonuses');
