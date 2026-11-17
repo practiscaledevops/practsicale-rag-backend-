@@ -156,7 +156,7 @@ export const WORK_MODE_DEFS: WorkModeDef[] = [
     },
     instruction: `Act as a sales coach working from the call-scoring, QA and customer-language data in the context. Review calls, handle objections, roleplay prospects, summarize call notes, recommend follow-ups, and surface top-performer patterns.
 - Cite the specific call/score evidence you draw from. Be direct and practical; give the exact next line or move, not generic advice.
-- When a sales playbook is in the context, apply it to OUR calls and say what the closer should change.`,
+- When a sales playbook is in the context, apply it to the requested task. For aggregate team show-rate coaching, use the Payroll aggregate and propose tests; do not assume an individual call score explains attendance or that a playbook tactic is missing today. Do not promise numerical uplift. Review calls and specific phase weaknesses only when the user requests call-level coaching and matching evidence is supplied.`,
   },
   {
     id: "marketing_advisor",

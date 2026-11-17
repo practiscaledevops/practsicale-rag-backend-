@@ -753,6 +753,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     const parents = await expandParents(top);
     final = top.map((c, i) => ({ ...c, id: parents[i].id, content: parents[i].content, metadata: parents[i].metadata, parent_id: parents[i].parent_id }));
   }
+  if (aggregateOnly) final = final.filter(c => c.source_type !== "transcript" && c.source_type !== "call_score");
   final = uniqueEvidence(final, isCreativeRequest(query));
 
   // 8.5 Full-call transcript depth. Two sources of full calls converge here:

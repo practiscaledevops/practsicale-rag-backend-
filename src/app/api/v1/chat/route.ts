@@ -1,5 +1,5 @@
 import {withRequestBudget} from '@/lib/request-budget';
-import { needsSynthesis, RESPONSE_GUIDANCE, selectAdvisoryReport } from '@/lib/response-guidance';
+import { needsSynthesis, RESPONSE_GUIDANCE, selectAdvisoryReport, payrollAggregateOnly } from '@/lib/response-guidance';
 import {businessFollowup} from '@/lib/connectors/business-followup';
 import { multipartNeeds, readMultipart } from '@/lib/connectors/payroll-multipart';
 import { reportingWindow, hourlyReport, comparePayrollCrm } from '@/lib/connectors/exact-report';
@@ -627,8 +627,8 @@ export async function POST(req: Request) {
       // Disagreements among the retrieved sources, and the structured numbers the
       // answer reasons from — so the client can show both, not only the prose.
       // Each only when the caller may see it (capabilities / call-score scope).
-      const performanceBlock = performanceOk ? out.performanceBlock : "";
-      const performanceMetrics = performanceOk ? out.performanceMetrics : [];
+      const performanceBlock = performanceOk && !payrollAggregateOnly(query) ? out.performanceBlock : "";
+      const performanceMetrics = performanceOk && !payrollAggregateOnly(query) ? out.performanceMetrics : [];
       if (gates.conflicts && out.conflicts.length) dataStream.writeData({ type: "conflicts", pairs: out.conflicts });
       if (performanceMetrics.length) dataStream.writeData({ type: "performance", metrics: metricEventRows(performanceMetrics) });
 

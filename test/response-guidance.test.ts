@@ -19,6 +19,6 @@ it.each(['Analyze Team Mike calls','Coach our setters using these transcripts','
 it('selects a whole team aggregate without disguising omitted records as zero',()=>{
  const input={report:'performance',data:{teams:[{label:'Team Mike',showed:70,happened:415},{label:'Team Fahad',showed:55}],sales:[{client:'private'}]}};
  const out=selectAdvisoryReport('Coach Team Mike on show rate',input);
- expect(out.data.teams).toEqual([input.data.teams[0]]);expect(JSON.stringify(out)).not.toContain('private');expect(JSON.stringify(out)).toContain('not supplied');
+ expect(out.data.teams).toEqual([input.data.teams[0]]);expect(JSON.stringify(out)).not.toContain('private');expect(JSON.stringify(out)).toContain('not supplied');expect(JSON.stringify(out)).toContain('not all scheduled bookings');
  expect(selectAdvisoryReport('Compare Team Mike and Team Fahad',input)).toBe(input);
 });
