@@ -9,8 +9,7 @@ function setup(overrides: { confirmed?: boolean; active?: boolean; sourceActive?
   vi.stubEnv("PAYROLL_REPORTS_SERVER_KEY", "fixture");
   const f = vi.fn().mockResolvedValueOnce(Response.json({ id, email: "person@example.com", email_confirmed_at: overrides.confirmed === false ? null : "2026-01-01" }))
     .mockResolvedValueOnce(Response.json([{ is_active: overrides.active ?? true }]))
-    .mockResolvedValueOnce(Response.json([{ role: "admin", role_id: id, active: overrides.sourceActive ?? true }]))
-    .mockResolvedValueOnce(Response.json([{ permissions: overrides.permissions ?? ["dashboard.view"] }]));
+    .mockResolvedValueOnce(Response.json([{ role: "admin", role_id: id, active: overrides.sourceActive ?? true,admin_roles:{permissions:overrides.permissions??["dashboard.view"]} }]));
   vi.stubGlobal("fetch", f); return f;
 }
 it("does not contact any source without a user token", async () => {

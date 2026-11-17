@@ -274,6 +274,7 @@ export async function POST(req: Request) {
   const multipart = businessAllowed && multipartNeeds(query).handled && !/\b(why|improve|recommend|strategy|write|coach|compare|versus|vs)\b/i.test(query);
   const directFact = factReport && ['people','fines','bonuses','teams','performance','attendance','rules','payroll'].includes(factReport) && !/\b(why|improve|recommend|strategy|write|coach|compare|comparison|versus|vs)\b/i.test(query);
   if (businessAllowed && (comparison || hourly || multipart || directFact)) {
+    const directStarted=Date.now();let identityFinished=directStarted;
     const directSignal=AbortSignal.any([req.signal,AbortSignal.timeout(25000)]);
     let text: string | null = null;
     try {
@@ -285,6 +286,7 @@ export async function POST(req: Request) {
         else text=await comparePayrollCrm(email,plan.from,plan.through,query,directSignal);
       }else if(hourly){
         const email=await requireSourcePermission(token,/\b(sales|closed|closings?|ht|lt)\b/i.test(query)?['reporting.view','dashboard.view']:'reporting.view',directSignal);
+        identityFinished=Date.now();
         const w=reportingWindow(query,timeZone);
         text=w?await hourlyReport(query,w,timeZone,email,directSignal):'Specify last 1 hour, last 30 minutes, or from 14:00 to 15:00 on 2026-11-17. ISO timestamps with explicit offsets are also supported. No monthly total was substituted.';
       }else if(multipart){
@@ -301,7 +303,7 @@ export async function POST(req: Request) {
       text='The authorized source report could not be completed in time or is unavailable. No zero total or CRM state was inferred. Please narrow the period or check your source access.';
       console.error('[business-report]',error instanceof Error?error.message:'Source unavailable');
     }
-    if(text){const answer=text;return createDataStreamResponse({headers:{...rateLimitHeaders(rl),'x-model':'none','x-provider':'none'},execute:stream=>{
+    if(text){console.info('[business-report-timing]',JSON.stringify({kind:hourly?'hourly':comparison?'comparison':'facts',identityMs:identityFinished-directStarted,reportMs:Date.now()-identityFinished,totalMs:Date.now()-startedAt}));const answer=text;return createDataStreamResponse({headers:{...rateLimitHeaders(rl),'x-model':'none','x-provider':'none'},execute:stream=>{
       stream.write(formatDataStreamPart('text',answer));
       stream.writeData({type:'generation_receipt',model:'none',engine:'authorized direct business report',mode:'Business report',creative:false,words:answer.split(/\s+/).length,evidenceDocuments:1,evidenceChunks:0,layers:[],validCitations:0,invalidCitations:0,faithfulness:'Source-calculated report; limitations stated in answer',warnings:[]});
       stream.write(formatDataStreamPart('finish_message',{finishReason:'stop',usage:{promptTokens:0,completionTokens:0}}));

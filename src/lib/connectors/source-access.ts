@@ -25,11 +25,11 @@ export async function requireSourcePermission(token:string|null,permission:Permi
  const deadline=AbortSignal.any([signal,AbortSignal.timeout(8000)]);
  const sourceEmail=await requireSourceIdentity(token,deadline);
  const headers={apikey:key,...(key.startsWith('eyJ')?{Authorization:'Bearer '+key}:{})};
- const query=new URLSearchParams({select:'role,role_id,active',email:'eq.'+sourceEmail,limit:'2'});
- const accounts=z.array(z.object({role:z.string().nullable(),role_id:z.string().uuid().nullable(),active:z.boolean()})).length(1).parse(await read(payroll+'/rest/v1/admin_users?'+query,headers,deadline));
+ const query=new URLSearchParams({select:'role,role_id,active,admin_roles!admin_users_role_id_fkey(permissions)',email:'eq.'+sourceEmail,limit:'2'});
+ const accounts=z.array(z.object({role:z.string().nullable(),role_id:z.string().uuid().nullable(),active:z.boolean(),admin_roles:z.object({permissions:z.array(z.string())}).nullable()})).length(1).parse(await read(payroll+'/rest/v1/admin_users?'+query,headers,deadline));
  const account=accounts[0];if(!account.active)throw Error('Source access denied');
  if(account.role_id){
- const roles=z.array(z.object({permissions:z.array(z.string())})).length(1).parse(await read(payroll+'/rest/v1/admin_roles?select=permissions&id=eq.'+account.role_id,headers,deadline));
+ const roles=z.array(z.object({permissions:z.array(z.string())})).length(1).parse(account.admin_roles?[account.admin_roles]:[]);
  if(roles[0].permissions.includes('*')||(Array.isArray(permission)?permission:[permission]).every(p=>roles[0].permissions.includes(p)))return sourceEmail;
  }else if(account.role==='admin')return sourceEmail;
  throw Error('Source access denied');
