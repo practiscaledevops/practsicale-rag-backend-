@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { requireSourcePermission } from "@/lib/connectors/source-access";
+import { requireSourcePermission, requireSourceIdentity } from "@/lib/connectors/source-access";
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 const signal = new AbortController().signal;
 const id = "00000000-0000-4000-8000-000000000001";
@@ -40,3 +40,6 @@ it("fails closed on malformed alias configuration", async () => {
   setup(); vi.stubEnv("SOURCE_ACCOUNT_ALIASES", "not-json");
   await expect(requireSourcePermission("session", "dashboard.view", signal)).rejects.toThrow();
 });
+
+it('checks every requested source permission',async()=>{setup({permissions:['dashboard.view']});await expect(requireSourcePermission('session',['dashboard.view','pipeline.view'],signal)).rejects.toThrow();});
+it('gateway identity checks active verified user without caching grants',async()=>{const f=setup();await expect(requireSourceIdentity('session',signal)).resolves.toBe('person@example.com');expect(f).toHaveBeenCalledTimes(2);});

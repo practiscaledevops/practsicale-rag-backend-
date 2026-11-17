@@ -2,7 +2,7 @@ import { reportingWindow, hourlyReport, comparePayrollCrm } from '@/lib/connecto
 import { renderPayrollFacts } from '@/lib/connectors/payroll-facts';
 import { planPayrollReports, readLivePayroll, sourcePermissions, payrollTotalsFromLive } from '@/lib/connectors/payroll-live';
 import { readGhlOpportunity } from "@/lib/connectors/ghl-opportunity";
-import { requireSourcePermission } from "@/lib/connectors/source-access";
+import { requireSourcePermission, requireSourceIdentity } from "@/lib/connectors/source-access";
 import { payrollAccess, readPayrollClosings, renderPayrollClosings } from "@/lib/connectors/payroll-report";
 // POST /api/v1/chat — grounded, cited, streamed chat over the key's permitted data.
 //
@@ -286,7 +286,8 @@ export async function POST(req: Request) {
         const w=reportingWindow(query,timeZone);
         text=w?await hourlyReport(query,w,timeZone,email,directSignal):'Specify last 1 hour, last 30 minutes, or from 14:00 to 15:00 on 2026-11-17. ISO timestamps with explicit offsets are also supported. No monthly total was substituted.';
       }else if(factReport&&directPlan){
-        const email=await requireSourcePermission(token,sourcePermissions[factReport],directSignal);
+        // Payroll gateway checks the live role and report permission itself.
+        const email=await requireSourceIdentity(token,directSignal);
         text=renderPayrollFacts(query,await readLivePayroll(factReport,email,directPlan.from,directPlan.through,directSignal));
       }
     }catch(error){
