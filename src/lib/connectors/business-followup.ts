@@ -5,6 +5,7 @@ function inheritScope(query:string,prior:string){
  // Source-only switches retain the last user-requested subject and dates.
  if(prior && /^(?:(?:and|also|then|now)\s+)?(?:(?:what\s+(?:is|does)|how about|what about|check|show(?: me)?|in|from)\s+)?(?:(?:in|does|the)\s+)*(?:ghl|crm|call[ -]scoring(?: app)?|payroll)(?:\s+(?:say|says|show|shows))?[?.! ]*$/i.test(query.trim()))
    return prior.split('\nSource requested:')[0]+'\nSource requested: '+query;
+ if(prior && needsSynthesis(query) && /\b(same (?:team|person|period|figure)|which action|which priority)\b/i.test(query) && !/\bteam\s+(?!and\b|or\b|period\b)[a-z]+/i.test(query))return prior+'\nFollow-up requested: '+query;
  const priorPerson=payrollPersonHint(prior);
  if(priorPerson&&/^[a-z]+(?:[ .'-]+[a-z]+){0,2}[.]?$/i.test(query.trim())&&!/\b(yes|no|okay|ok|thanks|today|yesterday|month|week|all|everyone|show|tell|how|what|why|and|please)\b/i.test(query)){
    return prior.replace(priorPerson,query.trim());

@@ -41,3 +41,5 @@ it('preserves Adrian and November across Payroll, Call Scoring, GHL and CRM swit
 });
 it('does not invent a subject for a source-only first question',()=>expect(businessFollowup('what is in crm',[])).toBe('what is in crm'));
 it('an explicit new person and source supersede the old subject',()=>expect(businessFollowup('David M closings in GHL in October',[{role:'user',content:'Adrian closings in November'}])).not.toContain('Adrian'));
+
+it('retains company evidence for same-team action prioritization',()=>{const q=businessFollowup('Which action should we do first and why? Keep the same team and period. Under 90 words.',[{role:'user',content:'Using current Payroll data, coach Team Mike on its November 2026 show rate.'}]);expect(q).toContain('Team Mike');expect(q).toContain('November 2026');expect(planPayrollReports(q,'Asia/Karachi')?.reports).toContain('performance');});
