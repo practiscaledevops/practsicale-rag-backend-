@@ -1,3 +1,4 @@
+import {withRequestBudget} from '@/lib/request-budget';
 import { needsSynthesis, RESPONSE_GUIDANCE } from '@/lib/response-guidance';
 import {businessFollowup} from '@/lib/connectors/business-followup';
 import { multipartNeeds, readMultipart } from '@/lib/connectors/payroll-multipart';
@@ -346,7 +347,7 @@ export async function POST(req: Request) {
       if (error instanceof Error && error.message === 'RETRIEVAL_DEADLINE') return 'The knowledge lookup took too long. No answer was inferred from incomplete records. Please retry with a narrower question.';
       return "The assistant hit an error while generating the answer. Please try again.";
     },
-    execute: (dataStream) => withModelRequest(requestSignal, async () => {
+    execute: (dataStream) => withRequestBudget(body.modelBudgetUsd, () => withModelRequest(requestSignal, async () => {
       requestSignal.throwIfAborted();
       dataStream.writeData({ type: "status", stage: "planning", label: "Understanding the request" });
 
@@ -897,7 +898,7 @@ export async function POST(req: Request) {
           ]);
         })()
       );
-    }),
+    })),
   });
   return new Response(response.body ? cancellableBody(response.body, abort) : null, response);
 }
@@ -980,6 +981,7 @@ const ChatBodySchema = z
     // ignores an invalid value (business-zone default) instead of a 400.
     timeZone: z.unknown().optional(),
     refreshSource: z.boolean().optional(),
+    modelBudgetUsd: z.number().finite().min(0).max(1).optional(),
   })
   .passthrough();
 

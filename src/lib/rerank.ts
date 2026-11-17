@@ -1,3 +1,4 @@
+import {hasRequestBudget} from '@/lib/request-budget';
 import type { RetrievedChunk } from "./retrieval";
 import { getProviderKey } from "@/lib/secrets";
 import { llmRerank } from "@/lib/llm-rerank";
@@ -24,7 +25,7 @@ export async function rerank(
   const key = await getProviderKey("cohere");
 
   // 1. Cohere, when configured.
-  if (key) {
+  if (key && !hasRequestBudget()) {
     const cohere = await cohereRerank(query, chunks, topN, key);
     if (cohere) return cohere;
   }

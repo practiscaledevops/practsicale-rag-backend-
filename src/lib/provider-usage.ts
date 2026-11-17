@@ -1,3 +1,4 @@
+import {reserveRequestCost,hasRequestBudget} from '@/lib/request-budget';
 import { randomUUID } from "node:crypto";
 import { costUsd, PRICING } from "@/lib/pricing";
 import { supabaseAdmin } from "@/lib/supabase";
@@ -10,6 +11,8 @@ export async function reserveUsage(provider: string, model: string, inputBound: 
   if (cap !== null && !Object.keys(PRICING).some(k => model === k || model.startsWith(k + "-"))) {
     throw new Error("Model has no configured budget rate");
   }
+  if(hasRequestBudget()&&!Object.keys(PRICING).some(k=>model===k||model.startsWith(k+'-')))throw new Error('Unknown request budget rate');
+  const settleRequest=reserveRequestCost(costUsd(model,inputBound,outputBound));
   const id = randomUUID();
   const db = supabaseAdmin();
   const { data, error } = await db.rpc("reserve_provider_usage", {
@@ -20,6 +23,7 @@ export async function reserveUsage(provider: string, model: string, inputBound: 
   if (data !== true) throw new Error("Daily model budget reached");
   return async (input: number, output: number) => {
     if (![input, output].every(n => Number.isSafeInteger(n) && n >= 0)) return;
+    settleRequest(costUsd(model,input,output));
     const { error } = await db.from("provider_usage_ledger").update({
       input_tokens: input, output_tokens: output, estimated_usd: costUsd(model, input, output),
     }).eq("id", id).abortSignal(AbortSignal.timeout(3000));
