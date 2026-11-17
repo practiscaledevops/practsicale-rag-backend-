@@ -1,3 +1,4 @@
+import { renderPayrollFacts } from '@/lib/connectors/payroll-facts';
 import { planPayrollReports, readLivePayroll, sourcePermissions, payrollTotalsFromLive } from '@/lib/connectors/payroll-live';
 import { readGhlOpportunity } from "@/lib/connectors/ghl-opportunity";
 import { requireSourcePermission } from "@/lib/connectors/source-access";
@@ -283,6 +284,7 @@ export async function POST(req: Request) {
       if (providerError?.statusCode === 429 && (code === "credit_balance_exhausted" || code === "insufficient_quota")) {
         return "The configured model provider has run out of API credits. Ask your administrator to restore credits for this provider.";
       }
+      if (error instanceof Error && error.message === 'RETRIEVAL_DEADLINE') return 'The knowledge lookup took too long. No answer was inferred from incomplete records. Please retry with a narrower question.';
       return "The assistant hit an error while generating the answer. Please try again.";
     },
     execute: (dataStream) => withModelRequest(requestSignal, async () => {
@@ -320,6 +322,21 @@ export async function POST(req: Request) {
       // Only the simple company-wide total uses the legacy deterministic renderer.
       // Named people, daily ranges and richer questions use the current source reader.
       const simpleMonthlyTotal = /^(?:how much (?:have we |did we |we have )?closed|(?:give me |show me )?(?:total |all )?(?:sales|closings|closing total))(?: in| for)? (?:the month of )?(?:january|february|march|april|may|june|july|august|september|october|november|december)(?: 20\d{2})?[?.! ]*$/i.test(query.trim());
+
+      if (livePlan && !livePlan.unsupported && livePlan.reports.length === 1 && ['people','fines','bonuses','teams'].includes(livePlan.reports[0])) {
+        const report = livePlan.reports[0];
+        try {
+          const email = await requireSourcePermission(req.headers.get('x-chatbot-user-token'), sourcePermissions[report], requestSignal);
+          const source = await readLivePayroll(report, email, livePlan.from, livePlan.through, requestSignal);
+          const text = renderPayrollFacts(query, source);
+          if (text) {
+            dataStream.write(formatDataStreamPart('text', text));
+            dataStream.writeData({type:'generation_receipt',model:'none',engine:'live Payroll database report',mode:'Payroll report',creative:false,words:text.split(/\s+/).length,evidenceDocuments:1,evidenceChunks:0,layers:[],validCitations:0,invalidCitations:0,faithfulness:'Calculated directly from current authorized Payroll rows',warnings:[]});
+            dataStream.write(formatDataStreamPart('finish_message',{finishReason:'stop',usage:{promptTokens:0,completionTokens:0}}));
+            return;
+          }
+        } catch { requestSignal.throwIfAborted(); }
+      }
 
       // A row-based report does not need semantic retrieval, transcript expansion
       // or an LLM to rewrite dates and arithmetic. Keep the same access gates.
@@ -444,15 +461,15 @@ export async function POST(req: Request) {
 
       let out: OrchestrationOutput;
       if (settings.features.orchestrator) {
-        out = await runOrchestratedRetrieval({
+        out = await boundedRetrieval(() => runOrchestratedRetrieval({
           orgId: ctx.orgId, query, history: retrievalHistory, scope, settings, requestedMode, allowedModes,
           knowledgeScope: knowledgeScope.id, capabilities: body.capabilities, timeZone, timeZoneFromUser, onStatus,
           avoidChunkIds: body.creative?.freshness === "fresh" ? body.creative.priorSourceIds : [],
-        });
+        }), requestSignal);
       } else {
         // The classic pipeline has no lanes: a lane scope is ignored here, and a
         // source-type scope ("calls") already narrowed `scope` above.
-        const legacy = await runRetrieval({ orgId: ctx.orgId, query, history: retrievalHistory, scope, settings, onStatus });
+        const legacy = await boundedRetrieval(() => runRetrieval({ orgId: ctx.orgId, query, history: retrievalHistory, scope, settings, onStatus }), requestSignal);
         const mode = normalizeMode(requestedMode) ?? "general";
         out = {
           ...legacy,
@@ -938,4 +955,11 @@ function continueInstruction(soFar: string): string {
     "Keep the same structure, heading numbering, formatting, and citation style, and finish the complete deliverable.\n\n" +
     `The last characters already written were:\n«${tail}»`
   );
+}
+
+async function boundedRetrieval<T>(work:()=>Promise<T>, parent:AbortSignal):Promise<T> {
+ const controller=new AbortController();const signal=AbortSignal.any([parent,controller.signal]);
+ let timer:ReturnType<typeof setTimeout>|undefined;
+ try { return await Promise.race([withModelRequest(signal,work),new Promise<never>((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(new Error('RETRIEVAL_DEADLINE'));},25000);})]); }
+ finally { if(timer)clearTimeout(timer); }
 }
