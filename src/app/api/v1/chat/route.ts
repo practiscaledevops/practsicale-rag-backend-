@@ -323,7 +323,7 @@ export async function POST(req: Request) {
       // Named people, daily ranges and richer questions use the current source reader.
       const simpleMonthlyTotal = /^(?:how much (?:have we |did we |we have )?closed|(?:give me |show me )?(?:total |all )?(?:sales|closings|closing total))(?: in| for)? (?:the month of )?(?:january|february|march|april|may|june|july|august|september|october|november|december)(?: 20\d{2})?[?.! ]*$/i.test(query.trim());
 
-      if (livePlan && !livePlan.unsupported && livePlan.reports.length === 1 && ['people','fines','bonuses','teams'].includes(livePlan.reports[0])) {
+      if (livePlan && !livePlan.unsupported && livePlan.reports.length === 1 && ['people','fines','bonuses','teams','performance','attendance','rules','payroll'].includes(livePlan.reports[0])) {
         const report = livePlan.reports[0];
         try {
           const email = await requireSourcePermission(req.headers.get('x-chatbot-user-token'), sourcePermissions[report], requestSignal);

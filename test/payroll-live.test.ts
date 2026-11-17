@@ -20,3 +20,6 @@ it('rejects mismatched or partial source reports',async()=>{
 });
 
 it('uses current roster for setter headcount, not activity or closing participation',()=>{ expect(planPayrollReports('How many setters are there currently in Practiscale','Asia/Karachi')?.reports).toEqual(['people']); });
+it('routes show-ups to reviewed Payroll performance, not CRM status counts',()=>{expect(planPayrollReports('How many show-ups in November 2026?','Asia/Karachi')?.reports).toEqual(['performance']);});
+it('supports terse current consultant queries',()=>{expect(planPayrollReports('current consultants','Asia/Karachi')?.reports).toEqual(['people']);});
+it('routes ticket requests to attributable sales',()=>{expect(planPayrollReports('List HT closings in November 2026','Asia/Karachi')?.reports).toEqual(['performance']);});

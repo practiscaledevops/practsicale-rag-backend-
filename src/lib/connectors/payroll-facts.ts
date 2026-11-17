@@ -4,8 +4,44 @@ const cell = (v: unknown) => String(v ?? 'Not recorded').replace(/[|\n\r]/g, ' '
 const table = (headers: string[], rows: unknown[][]) => '| '+headers.join(' | ')+' |\n| '+headers.map(()=> '---').join(' | ')+' |\n'+rows.map(r=>'| '+r.map(cell).join(' | ')+' |').join('\n');
 const advisory = /\b(why|improve|recommend|strategy|write|coach|best|compare|comparison|versus|vs\.?|taxonomy|niche)\b/i;
 export function renderPayrollFacts(query: string, source: {report:string;from:string;through:string;date_basis:string;fetched_at:string;data?:unknown}): string | null {
-  if (advisory.test(query)) return null;
+  if (advisory.test(query) && !(source.report === 'performance' && !/\b(why|improve|recommend|strategy|write|coach|compare|comparison|versus|vs)\b/i.test(query))) return null;
   const footer = '\n\nSource: [Sales Payroll](https://payroll.practicescalingsystems.com/admin). '+source.date_basis+'. Checked '+source.fetched_at+'.';
+  if(source.report==='performance') {
+    const group=z.object({label:z.string(),booked:z.number(),showed:z.number(),happened:z.number(),closings:z.number(),usd_minor:z.number()});
+    const d=z.object({summary:z.object({booked:z.number(),showed:z.number(),no_show:z.number(),closings:z.number(),usd_minor:z.number(),absent_shows:z.string().nullable()}),setters:z.array(group),teams:z.array(group),consultants:z.array(group),niches:z.array(group),undated_entries:z.number(),sales:z.array(z.object({client:z.string().nullable(),owner:z.string(),ticket:z.enum(['high_ticket','low_ticket']),usd_minor:z.number(),recorded_date:z.string().nullable(),niche:z.string().nullable()}))}).parse(source.data);
+    if(d.summary.absent_shows) return 'Payroll cannot verify show-up outcomes for this period: '+cell(d.summary.absent_shows)+footer;
+    const owners=[...new Set(d.sales.map(r=>r.owner))].filter(n=>query.toLowerCase().includes(n.toLowerCase()));
+    const ticket=/\b(ht|high[ -]ticket)\b/i.test(query)?'high_ticket':/\b(lt|low[ -]ticket)\b/i.test(query)?'low_ticket':null;
+    const sales=d.sales.filter(r=>(!owners.length||owners.includes(r.owner))&&(!ticket||r.ticket===ticket));
+    if(ticket||owners.length||/\b(names|clients|taxonomy)\b/i.test(query)) {
+      const title=(owners.length?owners.join(', '):'Company-wide')+(ticket?' · '+ticket.replace('_',' '):'');
+      if(/\b(taxonomy|niche)\b/i.test(query)) {
+        const groups=new Map<string,{owner:string;niche:string;count:number;minor:number}>();
+        for(const r of sales){const key=r.owner+'\u0000'+(r.niche??'Not attributed');const g=groups.get(key)??{owner:r.owner,niche:r.niche??'Not attributed',count:0,minor:0};g.count++;g.minor+=r.usd_minor;groups.set(key,g);}
+        return '**Consultant/closer sales by niche — '+source.from+' to '+source.through+'**\n\n'+table(['Consultant/closer','Niche','Closings','Closed USD'],[...groups.values()].sort((a,b)=>b.minor-a.minor).map(g=>[g.owner,g.niche,g.count,(g.minor/100).toFixed(2)]))+'\n\nRanked by closed USD; this does not establish coaching quality. Niche comes from the attributed booking and can be missing.'+footer;
+      }
+      return '**'+cell(title)+' — '+sales.length+' closings · USD '+(sales.reduce((n,r)=>n+r.usd_minor,0)/100).toFixed(2)+'**\n\n'+table(['Client','Closed by','Ticket','USD','Recorded date'],sales.map(r=>[r.client,r.owner,r.ticket,(r.usd_minor/100).toFixed(2),r.recorded_date??'Not recorded']))+'\n\nOne row per closing, not per unique client. Undated admin entries belong to the Payroll month; no exact closing date is inferred.'+footer;
+    }
+    const groupName=/\bteams?\b/i.test(query)?'teams':/\bniches?\b/i.test(query)?'niches':/\b(consultants?|closers?)\b/i.test(query)?'consultants':/\bsetters?\b/i.test(query)?'setters':null;
+    let text='**Payroll performance — '+source.from+' to '+source.through+'**\n\n'+table(['Metric','Total'],[['Booked contacts',d.summary.booked],['Reviewed show-ups',d.summary.showed],['Reviewed/filed no-shows',d.summary.no_show],['Closings',d.summary.closings],['Closed value (USD)',(d.summary.usd_minor/100).toFixed(2)]]);
+    if(groupName){const bySales=groupName==='consultants'||/\b(closed|closings|sales|revenue)\b/i.test(query);const rows=[...d[groupName]].sort((a,b)=>bySales?b.usd_minor-a.usd_minor:b.showed-a.showed);
+      text+='\n\n'+table([groupName,'Booked contacts','Show-ups','Closings','Closed USD'],rows.map(r=>[r.label,groupName==='consultants'?'Not attributed':r.booked,groupName==='consultants'?'Not attributed':r.showed,r.closings,(r.usd_minor/100).toFixed(2)]));
+      text+='\n\nSorted by '+(bySales?'closed USD':'reviewed show-ups')+'. This ranking is not an overall quality judgment. Unattributed sales remain in the company total.';
+    }
+    return text+'\n\nNo-shows are missed meetings, not missed phone calls. '+d.undated_entries+' admin entries have no exact closing date; they cannot be assigned to a day or hour. Booked contacts and paid appointments are different measures.'+footer;
+  }
+  if(source.report==='attendance') {
+    const d=z.object({date:z.string(),counts:z.record(z.number()),unmeasurable:z.number()}).parse(source.data);
+    return '**Attendance — '+d.date+'**\n\n'+table(['Recorded state','People'],[...Object.entries(d.counts),['No measurable position',d.unmeasurable]])+'\n\nNot scanned yet does not prove absence. This is the recorded state, not an inferred attendance ruling.'+footer;
+  }
+  if(source.report==='rules') {
+    const d=z.object({active_criteria:z.object({version:z.number(),effective_from:z.string(),criteria_text:z.string()}).nullable(),operational_rules:z.array(z.object({rule_key:z.string(),enabled:z.boolean(),effective_from:z.string()}))}).parse(source.data);
+    return '**Current Payroll rules**\n\n'+(d.active_criteria?'Version '+d.active_criteria.version+', effective '+d.active_criteria.effective_from+'\n\n'+d.active_criteria.criteria_text.replace(/[<>]/g,''):'No active criteria recorded.')+'\n\n'+table(['Operational rule','Enabled','Effective from'],d.operational_rules.map(r=>[r.rule_key,r.enabled?'Yes':'No',r.effective_from]))+'\n\nCurrent configuration does not prove how an old payslip was calculated. Person-specific overrides are not covered here.'+footer;
+  }
+  if(source.report==='payroll' && /\b(total|summary|cost)\b/i.test(query)) {
+    const d=z.object({totals:z.object({payroll_minor:z.number(),payslips:z.number()}),bill:z.object({run_status:z.string(),last_recalculated_at:z.string().nullable(),composition_reconciles:z.boolean()})}).parse(source.data);
+    return '**Payroll cost: PKR '+(d.totals.payroll_minor/100).toLocaleString('en-US',{minimumFractionDigits:2})+' across '+d.totals.payslips+' payslips.**\n\nRun status: '+cell(d.bill.run_status)+'. Last recalculated: '+cell(d.bill.last_recalculated_at)+'.'+(!d.bill.composition_reconciles?'\n\nPayroll reports that its line-item composition does not reconcile with this total; investigate the source bill before treating the breakdown as reconciled.':'')+footer;
+  }
   if(source.report==='people') {
     if(/\b(yesterday|last|ago|20\d{2})\b/i.test(query)) return null;
     const data=z.object({active:z.number().int(),people:z.array(z.object({name:z.string().nullable(),role:z.string().nullable(),status:z.string()}))}).parse(source.data);

@@ -2,11 +2,11 @@ import { z } from 'zod';
 import { parseCallReviewFilter } from '@/lib/call-review';
 import { todayIn } from '@/lib/timezone';
 
-export const sourcePermissions = { people: 'employees.view', teams: 'teams.view', closings: 'dashboard.view', activity: 'reporting.view', payroll: 'reporting.view', fines: 'fines_bonuses.view', bonuses: 'fines_bonuses.view', rules: 'pay_rules.view', attendance: 'attendance.view' } as const;
+export const sourcePermissions = { performance: 'reporting.view', people: 'employees.view', teams: 'teams.view', closings: 'dashboard.view', activity: 'reporting.view', payroll: 'reporting.view', fines: 'fines_bonuses.view', bonuses: 'fines_bonuses.view', rules: 'pay_rules.view', attendance: 'attendance.view' } as const;
 export type PayrollReport = keyof typeof sourcePermissions;
 export function planPayrollReports(query: string, timeZone: string): { reports: PayrollReport[]; from: string; through: string; unsupported?: string } | null {
   const reports = new Set<PayrollReport>();
-  const headcount = /\b(how many|number of|count|list|names|who)\b/i.test(query) && /\b(setters?|consultants?|closers?|employees?|people|staff)\b/i.test(query) && !/\b(closed|closings|sales|appointments|show[ -]?ups?|calls|dials)\b/i.test(query);
+  const headcount = /\b(how many|number of|count|list|names|who|current|active)\b/i.test(query) && /\b(setters?|consultants?|closers?|employees?|people|staff)\b/i.test(query) && !/\b(closed|closings|sales|appointments|show[ -]?ups?|calls|dials)\b/i.test(query);
   if (headcount) reports.add('people');
   if (/\b(fines?|deductions?|penalt(?:y|ies))\b/i.test(query)) reports.add('fines');
   if (/\b(bonuses|bonus)\b/i.test(query)) reports.add('bonuses');
@@ -17,6 +17,10 @@ export function planPayrollReports(query: string, timeZone: string): { reports: 
   if (/\b(payroll cost|salaries|salary|payslips?|payroll report)\b/i.test(query)) reports.add('payroll');
   if (!headcount && /\b(setters?|appointments?|show[ -]?ups?|no[ -]?shows?|dials?)\b/i.test(query)) reports.add('activity');
   if (!headcount && /\b(sales|closings?|closed|consultants?|closers?)\b/i.test(query) && !/\b(call|transcript|scorecard)\b/i.test(query)) reports.add('closings');
+  if (!headcount && /\b(show[ -]?ups?|no[ -]?shows?|appointments?|setters?|consultants?|closers?|niches?|taxonomy|best team|team performance|ht|lt|high ticket|low ticket)\b/i.test(query) && !/\b(call|transcript|scorecard|dials?)\b/i.test(query)) {
+    reports.delete('closings');reports.delete('activity');reports.delete('teams');reports.add('performance');
+  }
+  if (reports.delete('closings')) reports.add('performance');
   if (!reports.size) return null;
   const today = todayIn(timeZone);
   const filter = parseCallReviewFilter(query, { referenceDate: today, timeZone });
