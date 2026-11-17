@@ -2,6 +2,9 @@ import {payrollPersonHint} from './payroll-person';
 import { needsSynthesis } from '@/lib/response-guidance';
 /** Resolve narrow drill-down follow-ups from user turns only. Never use assistant prose as evidence. */
 function inheritScope(query:string,prior:string){
+ // Source-only switches retain the last user-requested subject and dates.
+ if(prior && /^(?:(?:and|also|then|now)\s+)?(?:(?:what\s+(?:is|does)|how about|what about|check|show(?: me)?|in|from)\s+)?(?:(?:in|does|the)\s+)*(?:ghl|crm|call[ -]scoring(?: app)?|payroll)(?:\s+(?:say|says|show|shows))?[?.! ]*$/i.test(query.trim()))
+   return prior.split('\nSource requested:')[0]+'\nSource requested: '+query;
  const priorPerson=payrollPersonHint(prior);
  if(priorPerson&&/^[a-z]+(?:[ .'-]+[a-z]+){0,2}[.]?$/i.test(query.trim())&&!/\b(yes|no|okay|ok|thanks|today|yesterday|month|week|all|everyone|show|tell|how|what|why|and|please)\b/i.test(query)){
    return prior.replace(priorPerson,query.trim());
@@ -43,4 +46,13 @@ export function businessFollowup(query:string,turns:{role:string;content:string}
  query=normalize(query);
  let previous='';for(const turn of users.slice(-40))previous=inheritScope(normalize(turn.content),previous).slice(-16000);
  return inheritScope(query,previous);
+}
+
+/** Latest explicit source wins; earlier source-switch text is not the current request. */
+export function requestedBusinessSource(query:string) {
+ const task=(query.split('Follow-up requested:').at(-1)??query).split('Source requested:').at(-1)??query;
+ if(/\b(ghl|crm)\b/i.test(task))return 'crm';
+ if(/\bcall[ -]scoring\b/i.test(task))return 'call-scoring';
+ if(/\bpayroll\b/i.test(task))return 'payroll';
+ return null;
 }

@@ -1,7 +1,7 @@
 /** Reporting can be exact; advice and writing need synthesis over authorized evidence. */
 export function needsSynthesis(query: string): boolean {
   const task = query.split('Follow-up requested:').at(-1) ?? query;
-  return /\b(why|how (?:can|should|do) (?:we|i)|improv(?:e|ement|ements|ing)|recommend(?:ation|ations)?|advice|advise|strateg(?:y|ies|ic)|coach(?:ing)?|analy[sz](?:e|is)|diagnos(?:e|is)|explain|interpret|prioriti[sz]e|action plan|next steps?|what should|what would|write|draft|rewrite|revise|edit|shorten|expand|translate|polish|compose|brainstorm|script|campaign|copywriting|make (?:it|this|that)|turn (?:it|this|that))\b/i.test(task);
+  return /\b(why|how (?:(?:can|should|do) (?:we|i)|(?:we|i) (?:can|should))|build|design|create|develop|propose|improv(?:e|ement|ements|ing)|recommend(?:ation|ations)?|advice|advise|strateg(?:y|ies|ic)|coach(?:ing)?|analy[sz](?:e|is)|diagnos(?:e|is)|explain|interpret|prioriti[sz]e|action plan|next steps?|what should|what would|write|draft|rewrite|revise|edit|shorten|expand|translate|polish|compose|brainstorm|script|campaign|copywriting|make (?:it|this|that)|turn (?:it|this|that))\b/i.test(task);
 }
 
 export const RESPONSE_GUIDANCE = `RESPONSE QUALITY — applies to coaching, analysis and writing in every mode:

@@ -280,3 +280,7 @@ describe("runOrchestratedRetrieval — call review gate", () => {
     expect(m.fetchCalls).toHaveBeenCalledTimes(1);
   });
 });
+
+it('does not load unrelated call-score metrics for Payroll aggregate advice',async()=>{
+ const out=await run('Coach Team Mike on Payroll show rate',scope([]));expect(m.perf).not.toHaveBeenCalled();expect(out.performanceBlock).toBe('');
+});

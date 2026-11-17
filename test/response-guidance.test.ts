@@ -24,3 +24,5 @@ it('selects a whole team aggregate without disguising omitted records as zero',(
 });
 
 it('budgets explicitly brief drafts without shrinking long or unspecified requests',()=>{expect(requestedAnswerTokenLimit('Keep it within 140 words',4096)).toBe(816);expect(requestedAnswerTokenLimit('Under 120 words',256)).toBe(256);expect(requestedAnswerTokenLimit('Write a full training',8000)).toBe(8000);});
+
+it.each(['can we build any offer to consultants','how we can improve our closings','design an incentive for consultants','create a training for our setters','develop a sales playbook'])('does not substitute statistics for design or coaching: %s',q=>expect(needsSynthesis(q)).toBe(true));

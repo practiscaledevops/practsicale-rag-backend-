@@ -588,9 +588,11 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
 
   // 4. Parallel lane searches (one embedding per query, shared across lanes).
   const perLane = Math.max(10, Math.min(120, intelligence.laneCandidates));
+  let firstQueryEmbedding:number[]|undefined;
   let laneResults: { lane: Lane | "raw"; chunks: LaneChunk[] }[];
   try {
     const embeddings = await Promise.all(queries.map((q) => embed(q)));
+    firstQueryEmbedding=embeddings[0];
     const jobs: Promise<{ lane: Lane | "raw"; chunks: LaneChunk[] }>[] = [];
     const searchLane = async (lane: Lane | "raw", classes: string[]) => {
       const searches = await Promise.allSettled(
@@ -688,8 +690,10 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
         ? [...active.flatMap((l) => LANE_CLASS[l] as string[]), ...(includeRaw ? ["raw_archive"] : [])]
         : undefined;
       try {
-        const more = await hybridSearchLane({ orgId, query: queries[0], scope, classes: expansionClasses, objectIds: relatedIds, matchCount: 12, fullTextWeight: retrieval.fullTextWeight, semanticWeight: retrieval.semanticWeight, rrfK: retrieval.rrfK });
-        const extraObjects = await getObjectsByIds(db, orgId, relatedIds);
+        const [more, extraObjects] = await Promise.all([
+          hybridSearchLane({ orgId, query: queries[0], queryEmbedding: firstQueryEmbedding, scope, classes: expansionClasses, objectIds: relatedIds, matchCount: 12, fullTextWeight: retrieval.fullTextWeight, semanticWeight: retrieval.semanticWeight, rrfK: retrieval.rrfK }),
+          getObjectsByIds(db, orgId, relatedIds),
+        ]);
         for (const [k, v] of extraObjects) objects.set(k, v);
         const seen = new Set(Array.from(byLane.values()).flat().map((c) => c.id));
         more.forEach((c, i) => {
@@ -825,7 +829,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   //     when the effective scope reaches call_score and the caller's capabilities
   //     allow it — a key / spoke user narrowed away from call scores never sees them.
   //     Both reads are independent, so they share one round trip on the critical path.
-  const wantsPerformance = plan.wantsPerformance && performanceAllowed(scope, gates);
+  const wantsPerformance = !aggregateOnly && plan.wantsPerformance && performanceAllowed(scope, gates);
   const [contradictions, perf] = await Promise.all([
     contextObjectIds.length > 1 ? listContradictionsAmong(db, orgId, contextObjectIds) : Promise.resolve([]),
     wantsPerformance

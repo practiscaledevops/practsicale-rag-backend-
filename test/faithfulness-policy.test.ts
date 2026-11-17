@@ -1,7 +1,8 @@
 import {beforeEach,describe,expect,it,vi} from "vitest";
 const generate=vi.hoisted(()=>vi.fn());
+const resolve=vi.hoisted(()=>vi.fn(async()=>({modelId:"gpt-6-luna"})));
 vi.mock("ai",()=>({generateText:generate}));
-vi.mock("@/lib/llm",()=>({getModel:async()=>({modelId:"gpt-6-luna"})}));
+vi.mock("@/lib/llm",()=>({getModel:resolve}));
 vi.mock("@/lib/demo/mode",()=>({isDemo:()=>false}));
 import {checkFaithfulness} from "@/lib/faithfulness";
 describe("verification uses the same task and approved policy as the answer",()=>{
@@ -20,4 +21,11 @@ describe("verification uses the same task and approved policy as the answer",()=
    expect(verdict.checked&&verdict.grounded).toBe(false);
   }
  });
+});
+
+it('reuses the request model and still checks all supplied evidence before certifying',async()=>{
+ resolve.mockClear();generate.mockResolvedValue({text:'{"grounded":false,"unsupported":["wrong total"]}'});
+ const model={modelId:'gpt-6-luna'} as any;
+ const verdict=await checkFaithfulness('fresh source scope','wrong total','policy','gpt-6-luna',undefined,{question:'shorten this',trustedPolicy:'grounding'},model);
+ expect(resolve).not.toHaveBeenCalled();expect(generate.mock.calls.at(-1)![0].model).toBe(model);expect(verdict.grounded).toBe(false);expect(verdict.checked).toBe(true);
 });

@@ -5,12 +5,12 @@ let crmCooldownUntil=0;
 async function request(path:string,signal:AbortSignal,body?:unknown,retried=false):Promise<unknown>{
  if(crmCooldownUntil>Date.now())await delay(crmCooldownUntil-Date.now(),undefined,{signal});
  const token=process.env.BRAIN_GHL_READ_TOKEN;if(!token)throw Error('Live CRM is not configured');
- const r=await fetch('https://services.leadconnectorhq.com'+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,Version:path.startsWith('/calendars/')?'2021-07-28':'v3',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),cache:'no-store',redirect:'error',signal:AbortSignal.any([signal,AbortSignal.timeout(path.startsWith('/calendars/')?15000:8000)])});
+ const r=await fetch('https://services.leadconnectorhq.com'+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,Version:(path.startsWith('/calendars/')||path.startsWith('/users?'))?'2021-07-28':'v3',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),cache:'no-store',redirect:'error',signal:AbortSignal.any([signal,AbortSignal.timeout(path.startsWith('/calendars/')?15000:8000)])});
  if(r.status===429&&!retried){const raw=r.headers.get('retry-after');const seconds=raw===null?10:/^\d+(?:\.\d+)?$/.test(raw)?Number(raw):Math.max(0,(Date.parse(raw)-Date.now())/1000);if(Number.isFinite(seconds)&&seconds>=0&&seconds<=15){crmCooldownUntil=Math.max(crmCooldownUntil,Date.now()+Math.max(1000,seconds*1000));return request(path,signal,body,true);}}
  if(!r.ok)throw Error('Live CRM '+path.split('?')[0]+' unavailable ('+r.status+')');return r.json();
 }
 function location(){const id=process.env.BRAIN_GHL_LOCATION_ID;if(!id)throw Error('CRM location unavailable');return id;}
-const opportunity=z.object({id:z.string(),locationId:z.string(),name:z.string().optional(),status:z.string(),contactId:z.string().nullable().optional(),contact:z.object({id:z.string(),name:z.string().optional()}).nullable().optional(),monetaryValue:z.number().nullable().optional(),lastStatusChangeAt:z.string().nullable().optional()});
+const opportunity=z.object({id:z.string(),locationId:z.string(),name:z.string().optional(),status:z.string(),assignedTo:z.string().nullable().optional(),contactId:z.string().nullable().optional(),contact:z.object({id:z.string(),name:z.string().optional()}).nullable().optional(),monetaryValue:z.number().nullable().optional(),lastStatusChangeAt:z.string().nullable().optional()});
 // Read-only search; no CRM business records are changed.
 export async function liveWonOpportunities(signal:AbortSignal,w?:TimeWindow){
  const loc=location(),all:z.infer<typeof opportunity>[]=[],seen=new Set<string>();
@@ -71,4 +71,13 @@ export async function liveContactOpportunities(ids:string[],signal:AbortSignal){
 export async function liveAppointmentCounts(w:TimeWindow,signal:AbortSignal,progress?:(label:string)=>void){
  const {rows,calendars}=await liveAppointmentRows(w,signal,progress);const count=(s:string)=>rows.filter(e=>e.appointmentStatus===s).length;
  return {total:rows.length,showed:count('showed'),noshow:count('noshow'),cancelled:count('cancelled')+count('canceled'),invalid:count('invalid'),calendars};
+}
+
+/** Location-scoped directory: only IDs/names are retained, never emails or phone numbers. */
+export async function liveCrmUsers(signal:AbortSignal){
+ const loc=location();
+ const user=z.object({id:z.string().min(1),name:z.string().optional(),firstName:z.string().optional(),lastName:z.string().optional(),roles:z.object({locationIds:z.array(z.string())}).optional()});
+ const result=z.object({users:z.array(user)}).parse(await request('/users?'+new URLSearchParams({locationId:loc}),signal));
+ if(result.users.some(u=>u.roles&&!u.roles.locationIds.includes(loc))||new Set(result.users.map(u=>u.id)).size!==result.users.length)throw Error('CRM user scope mismatch');
+ return result.users.map(u=>({id:u.id,name:(u.name??[u.firstName,u.lastName].filter(Boolean).join(' ')).trim()}));
 }

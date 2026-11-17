@@ -1,5 +1,5 @@
 import {it,expect,vi,afterEach,beforeEach} from 'vitest';
-import {liveCallCounts,liveWonOpportunities,liveAppointmentCounts,liveContactOpportunities} from '@/lib/connectors/live-crm';
+import {liveCallCounts,liveWonOpportunities,liveAppointmentCounts,liveContactOpportunities,liveCrmUsers} from '@/lib/connectors/live-crm';
 const signal=new AbortController().signal,w={start:'2026-11-17T09:00:00Z',end:'2026-11-17T10:00:00Z'};
 beforeEach(()=>{vi.stubEnv('BRAIN_GHL_LOCATION_ID','loc');vi.stubEnv('BRAIN_GHL_READ_TOKEN','fixture');});
 afterEach(()=>{vi.unstubAllGlobals();vi.unstubAllEnvs();});
@@ -29,3 +29,6 @@ it('backs off for the burst window instead of immediately repeating a rate-limit
  const f=vi.fn().mockResolvedValueOnce(new Response(null,{status:429})).mockResolvedValueOnce(Response.json({messages:[],total:0,nextCursor:null}));vi.stubGlobal('fetch',f);
  expect((await liveCallCounts(w,signal)).total).toBe(0);expect(f).toHaveBeenCalledTimes(2);expect(vi.mocked(pause).mock.calls.some(c=>Number(c[0])>=9000)).toBe(true);
 });
+
+it('reads a location-scoped directory without retaining personal contact information',async()=>{const f=vi.fn().mockResolvedValue(Response.json({users:[{id:'a',firstName:'Adrian',lastName:'Cole',email:'private',roles:{locationIds:['loc']}}]}));vi.stubGlobal('fetch',f);expect(await liveCrmUsers(signal)).toEqual([{id:'a',name:'Adrian Cole'}]);expect(f.mock.calls[0][1].method).toBe('GET');expect(f.mock.calls[0][1].headers.Version).toBe('2021-07-28');});
+it('rejects an out-of-location directory',async()=>{vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({users:[{id:'a',name:'Adrian',roles:{locationIds:['other']}}]})));await expect(liveCrmUsers(signal)).rejects.toThrow('scope');});

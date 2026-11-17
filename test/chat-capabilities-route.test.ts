@@ -40,7 +40,7 @@ vi.mock("@/lib/settings", async (orig) => {
 });
 
 vi.mock('@/lib/connectors/payroll-report',()=>({payrollAccess:()=>m.bridge}));
-vi.mock('@/lib/connectors/source-access',()=>({requireSourcePermission:async()=> 'verified@example.com'}));
+vi.mock('@/lib/connectors/source-access',()=>({requireSourcePermission:async()=> 'verified@example.com',requireSourceIdentity:async()=> 'verified@example.com'}));
 vi.mock('@/lib/connectors/payroll-live',async orig=>({...await orig<typeof import('@/lib/connectors/payroll-live')>(),readLivePayroll:m.payroll}));
 import { POST as chat } from "@/app/api/v1/chat/route";
 
@@ -286,7 +286,7 @@ vi.mock("@/lib/ratelimit", async (original) => ({ ...(await original<typeof impo
 
 
 describe('company-grounded synthesis without paid providers',()=>{
- it.each(['Analyze Team Mike show rate this month','Draft a coaching email for Team Mike setters','Recommend next steps for our consultants'])('keeps %s on the synthesis path with current authorized facts',async question=>{
+ it.each(['Analyze Team Mike show rate this month','Draft a coaching email for Team Mike setters','Recommend next steps for our consultants','can we build any offer to consultants'])('keeps %s on the synthesis path with current authorized facts',async question=>{
   vi.stubEnv('PAYROLL_BRIDGE_KEY','mock-only');m.bridge=true;
   m.payroll.mockResolvedValue({report:'performance',from:'2026-11-01',through:'2026-11-18',date_basis:'reviewed outcomes',fetched_at:'2026-11-18T00:00:00Z',data:{teams:[{label:'Team Mike',showed:70,happened:413,show_rate:70/413}]}});
   try {

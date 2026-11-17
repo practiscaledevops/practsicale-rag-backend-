@@ -1,5 +1,5 @@
 import {expect,it} from 'vitest';
-import {businessFollowup} from '@/lib/connectors/business-followup';
+import {businessFollowup,requestedBusinessSource} from '@/lib/connectors/business-followup';
 import {planPayrollReports} from '@/lib/connectors/payroll-live';
 import {renderPayrollFacts} from '@/lib/connectors/payroll-facts';
 const question='how much team fahaad has closed this month?';
@@ -32,3 +32,12 @@ it.each(['hw mch david earnd dis mnth','howmuch david eraned this montth'])('nor
 it('normalizes rough pronoun follow-ups before resolving their subject',()=>{expect(businessFollowup('hw mch he clsoed dis mnth',[{role:'user',content:'hw mch david earnd dis mnth'}])).toBe('how much david closed this month');});
 
 it('keeps the earnings request when the user resolves an ambiguous name',()=>{const turns=[{role:'user',content:'how much david made earned this month'}];const q=businessFollowup('David M',turns);expect(q).toBe('how much David M made earned this month');expect(businessFollowup('how much he closed this month?',[...turns,{role:'user',content:'David M'}])).toBe('how much David M closed this month?');});
+
+it('preserves Adrian and November across Payroll, Call Scoring, GHL and CRM switches',()=>{
+ const questions=['what is the total closing of adrian in november','what does call scoring app says?','and what is in ghl','what is in crm'];
+ const turns:{role:string;content:string}[]=[];
+ questions.forEach((q,i)=>{const resolved=businessFollowup(q,turns);expect(resolved).toContain('adrian');expect(resolved).toContain('november');if(i>1)expect(requestedBusinessSource(resolved)).toBe('crm');if(i===1)expect(requestedBusinessSource(resolved)).toBe('call-scoring');turns.push({role:'user',content:q},{role:'assistant',content:'invented name and figures'});});
+ const advice=businessFollowup('how we can improve our closings',turns);expect(requestedBusinessSource(advice)).toBe(null);
+});
+it('does not invent a subject for a source-only first question',()=>expect(businessFollowup('what is in crm',[])).toBe('what is in crm'));
+it('an explicit new person and source supersede the old subject',()=>expect(businessFollowup('David M closings in GHL in October',[{role:'user',content:'Adrian closings in November'}])).not.toContain('Adrian'));
