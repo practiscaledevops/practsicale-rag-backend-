@@ -22,3 +22,10 @@ it('batches contacts while rejecting records outside the requested identities',a
 it('limits reverse search by status-change dates and also requests undated records',async()=>{const f=vi.fn().mockResolvedValue(Response.json({opportunities:[]}));vi.stubGlobal('fetch',f);await liveWonOpportunities(signal,w);const filters=JSON.parse(f.mock.calls[0][1].body).filters;expect(filters[1].group).toBe('OR');expect(filters[1].filters[1].operator).toBe('not_exists');expect(filters[1].filters[0].value.gte).toBe(w.start);});
 
 it('reads calendars in the same group with one event request',async()=>{const f=vi.fn().mockResolvedValueOnce(Response.json({calendars:[{id:'a',locationId:'loc',groupId:'g'},{id:'b',locationId:'loc',groupId:'g'}]})).mockResolvedValueOnce(Response.json({events:[]}));vi.stubGlobal('fetch',f);expect((await liveAppointmentCounts(w,signal)).calendars).toBe(2);expect(f).toHaveBeenCalledTimes(2);expect(f.mock.calls[1][0]).toContain('groupId=g');expect(f.mock.calls[1][0]).not.toContain('calendarId');});
+
+vi.mock('node:timers/promises',()=>({setTimeout:vi.fn(async()=>undefined)}));
+it('backs off for the burst window instead of immediately repeating a rate-limited read',async()=>{
+ const {setTimeout:pause}=await import('node:timers/promises');vi.mocked(pause).mockClear();
+ const f=vi.fn().mockResolvedValueOnce(new Response(null,{status:429})).mockResolvedValueOnce(Response.json({messages:[],total:0,nextCursor:null}));vi.stubGlobal('fetch',f);
+ expect((await liveCallCounts(w,signal)).total).toBe(0);expect(f).toHaveBeenCalledTimes(2);expect(vi.mocked(pause).mock.calls.some(c=>Number(c[0])>=9000)).toBe(true);
+});
