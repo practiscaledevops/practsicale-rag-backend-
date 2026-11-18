@@ -70,6 +70,7 @@ export async function runRetrieval(opts: {
   scope: ScopeFilters;
   settings: RagSettings;
   onStatus?: (s: RetrievalStatus) => void;
+  resolvedBusinessScope?: boolean;
 }): Promise<RetrievalOutput> {
   const { orgId, query, scope, settings } = opts;
   const history = opts.history ?? [];
@@ -84,7 +85,7 @@ export async function runRetrieval(opts: {
   //      questions skip it (they retrieve fine and stay fast).
   const priorTurns = history.filter((m) => m.role === "user" || m.role === "assistant").length;
   const wordCount = query.trim().split(/\s+/).filter(Boolean).length;
-  const willRewrite = features.queryRewrite && (priorTurns > 1 || wordCount > 6);
+  const willRewrite = !opts.resolvedBusinessScope && features.queryRewrite && (priorTurns > 1 || wordCount > 6);
 
   // Load only the prompts the enabled stages need (one query).
   const needed: string[] = [];

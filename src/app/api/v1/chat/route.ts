@@ -543,7 +543,7 @@ export async function POST(req: Request) {
       } else {
         // The classic pipeline has no lanes: a lane scope is ignored here, and a
         // source-type scope ("calls") already narrowed `scope` above.
-        const legacy = await boundedRetrieval(() => runRetrieval({ orgId: ctx.orgId, query, history: retrievalHistory, scope, settings, onStatus }), requestSignal);
+        const legacy = await boundedRetrieval(() => runRetrieval({ orgId: ctx.orgId, query, history: retrievalHistory, scope, settings, onStatus, resolvedBusinessScope: !!livePlan && !livePlan.unsupported && synthesis && payrollAggregateOnly(query) }), requestSignal);
         const mode = normalizeMode(requestedMode) ?? "general";
         out = {
           ...legacy,
