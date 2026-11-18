@@ -842,6 +842,13 @@ export function resolveReviewFilterWithHistory(
     // continued on the 25th). `active` then holds absolute ISO dates.
     const turnOpts: ParseOpts = { ...parseOpts, referenceDate: turnReferenceDate(t.createdAt, parseOpts.referenceDate, parseOpts.timeZone) };
     if (t.role === "user") {
+      // A clipped older prompt marks an unknown topic boundary. Clear an
+      // older report filter rather than inferring what the omitted prompt did.
+      if (!t.content.trim()) {
+        active = null;
+        prevWasReview = false;
+        continue;
+      }
       const text = t.content.slice(0, MAX_PARSE_CHARS);
       const r = resolveTurn(text, active, prevWasReview, turnOpts);
       if (r.isReview && hasFilterDims(r)) {
@@ -1016,8 +1023,8 @@ export async function fetchCallsByFilter(
   db: SupabaseClient,
   orgId: string,
   filter: CallReviewFilter,
-  opts: { maxCalls: number; maxTokens: number; timeZone?: string; metadataOnly?: boolean }
-): Promise<{ chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number; complete?: boolean; undated?: number; documentIds?: string[] }> {
+  opts: { maxCalls: number; maxTokens: number; timeZone?: string; metadataOnly?: boolean; signal?: AbortSignal }
+): Promise<{ chunks: RetrievedChunk[]; callCount: number; note: string | null; scorecard: ScorecardRow[]; totalMatched: number; complete?: boolean; undated?: number; documentIds?: string[]; scorecardByDocument?: Map<string, ScorecardRow> }> {
   const timeZone = resolveTimeZone(opts.timeZone);
 
 
@@ -1037,8 +1044,9 @@ export async function fetchCallsByFilter(
     const idRows: { document_id: string; metadata: Record<string, unknown> }[] = [];
     let complete = false;
     for (let offset = 0; offset < 10_000; offset += 500) {
-      const { data: page, error } = await applyCallReviewFilter(db.from("documents").select("id, metadata"), orgId, filter, timeZone)
+      const pageQuery = applyCallReviewFilter(db.from("documents").select("id, metadata"), orgId, filter, timeZone)
         .order("id", { ascending: true }).range(offset, offset + 499);
+      const { data: page, error } = await (opts.signal ? pageQuery.abortSignal(opts.signal) : pageQuery);
       if (error) throw new Error(`Call roster read failed: ${error.message}`);
       idRows.push(...(page ?? []).map(r => ({ document_id: String(r.id), metadata: r.metadata ?? {} })));
       if ((page ?? []).length < 500) { complete = true; break; }
@@ -1058,7 +1066,7 @@ export async function fetchCallsByFilter(
     if (totalMatched === 0) {
       return { chunks: [], callCount: 0, note: `No calls found for ${describeFilter(filter)} in the Brain.`, scorecard: [], totalMatched: 0, complete: true, undated };
     }
-    if (opts.metadataOnly) return { chunks: [], callCount: 0, note: null, scorecard, totalMatched, complete: true, undated, documentIds: orderedDocs };
+    if (opts.metadataOnly) return { chunks: [], callCount: 0, note: null, scorecard, totalMatched, complete: true, undated, documentIds: orderedDocs, scorecardByDocument: cardByDoc };
 
     // 2) Full chunks for the chosen calls only, in reading order (created_at ASC
     //    = summary → body by timestamp). Select just the pipeline's fields — never

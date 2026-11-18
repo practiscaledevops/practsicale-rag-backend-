@@ -141,7 +141,9 @@ export async function runRetrieval(opts: {
   let top: RetrievedChunk[];
   if (features.rerank && candidates.length > retrieval.rerankTopN) {
     emit({ stage: "reranking", label: "Ranking the best matches" });
-    top = await rerank(query, candidates, retrieval.rerankTopN);
+    top = await rerank(query, candidates, retrieval.rerankTopN, () => {
+      emit({ stage: "reranking", label: "Continuing with the search results" });
+    });
   } else {
     top = candidates.slice(0, retrieval.rerankTopN);
   }

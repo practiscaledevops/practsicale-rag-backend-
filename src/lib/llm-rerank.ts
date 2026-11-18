@@ -52,7 +52,8 @@ export async function llmRerank(
   query: string,
   candidates: RetrievedChunk[],
   topN: number,
-  tier: "fast" | "recommended" | "max" = "fast"
+  tier: "fast" | "recommended" | "max" = "fast",
+  abortSignal: AbortSignal = AbortSignal.timeout(20_000),
 ): Promise<RetrievedChunk[] | null> {
   if (isDemo() || candidates.length === 0 || !query.trim()) return null;
 
@@ -62,10 +63,12 @@ export async function llmRerank(
     .join("\n\n");
 
   try {
+    abortSignal.throwIfAborted();
     const m = await getModel(tier);
+    abortSignal.throwIfAborted();
     const { text } = await generateText({
       model: m,
-      abortSignal: AbortSignal.timeout(20_000), maxRetries: 0,
+      abortSignal, maxRetries: 0,
       system:
         "You rank passages by how well each one helps answer the user's question. Judge relevance only. Output ONLY compact JSON, no prose.",
       prompt:

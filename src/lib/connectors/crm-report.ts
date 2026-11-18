@@ -1,6 +1,7 @@
 import {liveCrmUsers,liveWonOpportunities} from './live-crm';
 import {resolvePayrollPerson} from './payroll-person';
 import {zonedDayBoundsUTC} from '@/lib/timezone';
+import {ghlOpportunityCitation, ghlOpportunityIdPattern} from './ghl-opportunity';
 const safe=(s:unknown)=>String(s??'Not recorded').replace(/[|<>\r\n]/g,' ');
 /** Current CRM ownership is not interchangeable with Payroll's historical closing attribution. */
 export async function crmSalesReport(query:string,from:string,through:string,timeZone:string,signal:AbortSignal){
@@ -15,7 +16,10 @@ export async function crmSalesReport(query:string,from:string,through:string,tim
  const owned=all.filter(o=>o.assignedTo===owner.id),dated=owned.filter(o=>{const t=Date.parse(o.lastStatusChangeAt??'');return Number.isFinite(t)&&t>=Date.parse(w.start)&&t<Date.parse(w.end)}),undated=owned.filter(o=>!Number.isFinite(Date.parse(o.lastStatusChangeAt??'')));
  const missingValues=dated.filter(o=>o.monetaryValue==null).length;
  const amount=dated.reduce((n,o)=>n+(o.monetaryValue??0),0);
- const rows=[...dated,...undated].map(o=>'| '+[o.name??o.contact?.name??o.id,o.id,o.monetaryValue,o.lastStatusChangeAt??'Not recorded',dated.includes(o)?'In status-change period':'Date unknown; excluded from period count'].map(safe).join(' | ')+' |').join('\n');
+ const rows=[...dated,...undated].map(o=>{
+  const reference=ghlOpportunityIdPattern.test(o.id)?o.id+' ['+ghlOpportunityCitation(o.id)+']':o.id;
+  return '| '+[o.name??o.contact?.name??o.id,reference,o.monetaryValue,o.lastStatusChangeAt??'Not recorded',dated.includes(o)?'In status-change period':'Date unknown; excluded from period count'].map(safe).join(' | ')+' |';
+ }).join('\n');
  return '**GHL / CRM — '+safe(owner.name)+': '+dated.length+' currently won opportunities with a recorded status change in this period**\n\n'+
  'Period: '+from+' through '+through+' · '+safe(timeZone)+'. Current assigned owner: '+safe(owner.name)+'.\n\n'+
  'Sum of recorded opportunity values: '+amount.toFixed(2)+(missingValues?' ('+missingValues+' missing values; value total is incomplete)':'')+'. Currency is not supplied by this response, so no USD or PKR label is inferred.\n\n'+

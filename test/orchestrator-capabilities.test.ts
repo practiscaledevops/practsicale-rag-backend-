@@ -49,6 +49,7 @@ import {
 } from "@/lib/orchestrator";
 import { narrowScope, narrowSourceTypes, type ScopeFilters } from "@/lib/auth/scope";
 import { DEFAULT_SETTINGS } from "@/lib/settings";
+import { getObjectsByIds } from "@/lib/knowledge-store";
 import type { ApiKeyRecord } from "@/lib/auth/context";
 import { hybridSearchLane, expandTranscripts } from "@/lib/retrieval";
 
@@ -169,6 +170,21 @@ beforeEach(() => {
 });
 
 describe("runOrchestratedRetrieval — Performance Memory scope gate", () => {
+  it("starts the authorized metrics read before object metadata finishes", async () => {
+    let releaseObjects!: (objects: Awaited<ReturnType<typeof getObjectsByIds>>) => void;
+    const objects = new Promise<Awaited<ReturnType<typeof getObjectsByIds>>>((resolve) => { releaseObjects = resolve; });
+    vi.mocked(getObjectsByIds).mockReturnValueOnce(objects);
+    const retrieval = run(NUMBERS_Q, scope(["document", "call_score"]));
+    try {
+      await vi.waitFor(() => expect(getObjectsByIds).toHaveBeenCalledTimes(1));
+      expect(m.perf).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseObjects(new Map());
+      await retrieval;
+    }
+    expect((await retrieval).performanceMetrics).toEqual([METRIC]);
+  });
+
   it("unrestricted key, no capabilities: today's behaviour (numbers fetched)", async () => {
     const out = await run(NUMBERS_Q, scope([]));
     expect(m.perf).toHaveBeenCalledTimes(1);

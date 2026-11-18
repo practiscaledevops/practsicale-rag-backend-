@@ -11,3 +11,9 @@ Brain production configuration: PAYROLL_BRAIN_ORG_ID, PAYROLL_BRAIN_KEY_ID, PAYR
 Implemented: model-free monthly company sales totals (and HT/LT headline filters), plus explicit "GHL opportunity <id>" lookups. Payroll reports use source UTC rules, require a single month beginning on day 1, and reject unsupported consultant/practice/outcome filters. CRM records must match the configured subaccount. Neither route sends source data to a model.
 
 Still pending: client-level Payroll lists, team/consultant breakdowns, appointments, show-ups, attendance, QA and separately scoped employee reports; generalized GHL lookup by name and pipeline aggregates; permission-aware source context for coaching/writing. Bank and biometric fields remain outside generic retrieval.
+
+## Weekly Sales Review
+
+The chatbot's company-wide pilot is gated by `SOURCE_REPORTS_ENABLED=true` and `WEEKLY_SALES_REVIEW_ENABLED=true`. The Brain endpoint accepts the Monday date of a completed week. It checks the configured key and organization, verifies the active chatbot admin session, and requires live Payroll `reporting.view`. Call Scoring also requires transcript and call-review access.
+
+The report uses the live Payroll `performance` bridge (`PAYROLL_BRIDGE_KEY`) with inclusive Payroll UTC date labels. It filters dated sales to the week and reconciles ticket subtotals against Payroll's range summary. GHL appointment counts use PKT start-time bounds and the latest complete snapshot covering the period. Call Scoring figures use its indexed roster by source call date. Coaching uses a bounded transcript sample and attaches excerpts from storage. The GHL refresh request updates only the appointment section.

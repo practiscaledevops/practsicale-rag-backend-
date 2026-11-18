@@ -12,6 +12,12 @@ const opportunityResponse = z.object({
   }),
 });
 
+export const ghlOpportunityIdPattern = /^[A-Za-z0-9_-]{15,100}$/;
+
+export function ghlOpportunityCitation(id: string): string {
+  return `ghl-opportunity:${id}`;
+}
+
 /** Fetch a single live CRM record after the caller has authorized its use. */
 export async function readGhlOpportunity(id: string, signal: AbortSignal) {
   if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error("Invalid opportunity ID");

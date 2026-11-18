@@ -19,6 +19,9 @@ export function withModelRequest<T>(signal: AbortSignal, work: () => T): T {
   const fatal=new Promise<never>((_,reject)=>{fail=reject;});fatal.catch(()=>{});
   return requests.run({signal:AbortSignal.any([signal,cancel.signal]),fail:(error)=>{cancel.abort(error);fail(error);}},()=>{const result=work();return result instanceof Promise?Promise.race([result,fatal]) as T:result;});
 }
+export function currentModelRequestSignal(): AbortSignal | undefined {
+  return requests.getStore()?.signal;
+}
 export function modelSignal(timeoutMs: number, caller?: AbortSignal): AbortSignal {
   const request = requests.getStore();
   const signals = [AbortSignal.timeout(timeoutMs)];

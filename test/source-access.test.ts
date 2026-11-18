@@ -3,12 +3,12 @@ import { requireSourcePermission, requireSourceIdentity } from "@/lib/connectors
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 const signal = new AbortController().signal;
 const id = "00000000-0000-4000-8000-000000000001";
-function setup(overrides: { confirmed?: boolean; active?: boolean; sourceActive?: boolean; permissions?: string[] } = {}) {
+function setup(overrides: { confirmed?: boolean; active?: boolean; sourceActive?: boolean; permissions?: string[]; chatbotRole?: string } = {}) {
   vi.stubEnv("CHATBOT_AUTH_URL", "https://fixture.supabase.co");
   vi.stubEnv("CHATBOT_AUTH_PUBLISHABLE_KEY", "public-fixture");
   vi.stubEnv("PAYROLL_REPORTS_SERVER_KEY", "fixture");
   const f = vi.fn().mockResolvedValueOnce(Response.json({ id, email: "person@example.com", email_confirmed_at: overrides.confirmed === false ? null : "2026-01-01" }))
-    .mockResolvedValueOnce(Response.json([{ is_active: overrides.active ?? true }]))
+    .mockResolvedValueOnce(Response.json([{ is_active: overrides.active ?? true, role: overrides.chatbotRole }]))
     .mockResolvedValueOnce(Response.json([{ role: "admin", role_id: id, active: overrides.sourceActive ?? true,admin_roles:{permissions:overrides.permissions??["dashboard.view"]} }]));
   vi.stubGlobal("fetch", f); return f;
 }
@@ -47,4 +47,11 @@ it('overlaps independent permission reads but never grants access before active-
  setup();let release!:(r:Response)=>void;const f=vi.fn().mockResolvedValueOnce(Response.json({id,email:'person@example.com',email_confirmed_at:'2026-01-01'})).mockImplementationOnce(()=>new Promise<Response>(r=>{release=r})).mockResolvedValueOnce(Response.json([{role:'admin',role_id:null,active:true,admin_roles:null}]));vi.stubGlobal('fetch',f);
  let settled=false;const result=requireSourcePermission('session','dashboard.view',signal).finally(()=>{settled=true});const rejected=expect(result).rejects.toThrow('denied');
  await vi.waitFor(()=>expect(f).toHaveBeenCalledTimes(3));expect(settled).toBe(false);release(Response.json([{is_active:false}]));await rejected;
+});
+
+it("requires a current chatbot admin role for the company-wide review", async () => {
+  setup({ chatbotRole: "user", permissions: ["reporting.view"] });
+  await expect(requireSourcePermission("session", "reporting.view", signal, { adminOnly: true })).rejects.toThrow("denied");
+  setup({ chatbotRole: "super_admin", permissions: ["reporting.view"] });
+  await expect(requireSourcePermission("session", "reporting.view", signal, { adminOnly: true })).resolves.toBe("person@example.com");
 });

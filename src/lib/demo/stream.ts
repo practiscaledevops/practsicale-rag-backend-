@@ -2,6 +2,29 @@
 // Vercel AI SDK v4 data-stream protocol so useChat() renders it like the real
 // thing (token-by-token, with a citation chip).
 
+import type { SavedAnswerSource } from "@/lib/saved-answer-followup";
+
+export const demoSavedAnswerSources: readonly SavedAnswerSource[] = [
+  {
+    id: "3b1aaf21-7192-4dbf-91c1-95958bdf302b",
+    document_id: "3b1aaf21-7192-4dbf-91c1-95958bdf302a",
+    content: "Send the first reminder 24 hours before the appointment.",
+    documents: { title: "Appointment Reminder Playbook", created_at: "2026-10-25T12:00:00Z", updated_at: null },
+  },
+  {
+    id: "8cd8e503-34f1-4da0-a105-536d76336c2b",
+    document_id: "8cd8e503-34f1-4da0-a105-536d76336c2a",
+    content: "If the buyer has not confirmed, send a second reminder 2 hours before the appointment. The second reminder is for unconfirmed appointments so buyers who have already confirmed do not receive another reminder.",
+    documents: { title: "Confirmation Follow-up Guide", created_at: "2026-10-26T12:00:00Z", updated_at: null },
+  },
+  {
+    id: "7fc78cab-be13-4176-9467-cc363c99736b",
+    document_id: "7fc78cab-be13-4176-9467-cc363c99736a",
+    content: "Track show-up rate weekly using attended appointments divided by scheduled appointments.",
+    documents: { title: "Show-up Rate Definitions", created_at: "2026-10-27T12:00:00Z", updated_at: null },
+  },
+];
+
 export function demoAnswerText(query: string): string {
   return pickAnswer(query);
 }

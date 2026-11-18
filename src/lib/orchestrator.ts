@@ -361,6 +361,8 @@ export interface OrchestrateOptions {
    * optional `createdAt` (ISO) anchors its relative dates for call review.
    */
   history?: ChatTurn[];
+  /** Exact older user requests for date and scope resolution outside the model window. */
+  callHistory?: ChatTurn[];
   /** Owned prior-draft citations, used only as a soft novelty penalty inside the permitted pool. */
   avoidChunkIds?: string[];
   scope: ScopeFilters;
@@ -471,6 +473,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   // The spoke user's capabilities: can only switch features OFF for this request.
   const gates = capabilityGates(opts.capabilities);
   const history = opts.history ?? [];
+  const callHistory = opts.callHistory ?? history;
   const emit = opts.onStatus ?? (() => {});
   const db = supabaseAdmin();
   const { features, retrieval, intelligence } = settings;
@@ -528,12 +531,12 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   // on this message, and a short turn inside a thread that already reviewed calls
   // (a lowercase first name, "and david?", only resolves against the roster).
   // The full resolve inside decides; a false gate costs one roster read.
-  const reviewProbe = resolveReviewFilterWithHistory(query, history, { referenceDate: todayISO, knownConsultants: [], timeZone });
+  const reviewProbe = resolveReviewFilterWithHistory(query, callHistory, { referenceDate: todayISO, knownConsultants: [], timeZone });
   // A summary turn counts only when it carries a call filter: its "[Conversation
   // summary]" marker alone reads as review intent to looksLikeReview.
   const reviewThread =
     query.trim().split(/\s+/).length <= 8 &&
-    history.some(
+    callHistory.some(
       (t) =>
         t.content.trim() !== query.trim() &&
         (t.role === "user"
@@ -559,7 +562,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
           // "today's calls") makes the deep audit read that day's calls in FULL
           // rather than a diluted history-wide sample.
           const known = await knownConsultants(db, orgId);
-          const filter = resolveReviewFilterWithHistory(query, history, { referenceDate: todayISO, knownConsultants: known, timeZone });
+          const filter = resolveReviewFilterWithHistory(query, callHistory, { referenceDate: todayISO, knownConsultants: known, timeZone });
           if (!filter.isReview) return null;
           emit({ stage: "searching", label: `Pulling every call from ${describeFilter(filter)}` });
           const res = await fetchCallsByFilter(db, orgId, filter, { maxCalls: 25, maxTokens: 140_000, timeZone });
@@ -635,6 +638,15 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     }
     throw e;
   }
+
+  // These metrics need the authorized intent and lane plan, not the ranked
+  // evidence. Read them while the remaining retrieval stages run.
+  const wantsPerformance = !aggregateOnly && plan.wantsPerformance && performanceAllowed(scope, gates);
+  const performancePromise = wantsPerformance
+    ? fetchPerformanceBlock(db, orgId, { query, keyConcepts: intent.keyConcepts, entities: intent.entities, needsNumbers: intent.needsNumbers })
+    : Promise.resolve(null);
+  // Retrieval can end before the eventual join below.
+  void performancePromise.catch(() => {});
 
   // 5. Object metadata for boosting + labelling (one query).
   const objectIds = Array.from(new Set(laneResults.flatMap((r) => r.chunks.map((c) => c.object_id)).filter((x): x is string => !!x)));
@@ -720,7 +732,10 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     // first token) grows with the candidate count, and our finalScore already
     // pre-orders the pool, so the true top-N almost always lives in the window.
     const rerankInput = pool.slice(0, Math.max(retrieval.rerankTopN * 3, 24));
-    const ranked = await rerank(query, rerankInput, isCreativeRequest(query) ? Math.min(rerankInput.length, retrieval.rerankTopN * 2) : retrieval.rerankTopN);
+    const topN = isCreativeRequest(query) ? Math.min(rerankInput.length, retrieval.rerankTopN * 2) : retrieval.rerankTopN;
+    const ranked = await rerank(query, rerankInput, topN, () => {
+      emit({ stage: "reranking", label: "Continuing with the search results" });
+    });
     const byId = new Map(pool.map((c) => [c.id, c]));
     top = ranked.map((r) => ({ ...(byId.get(r.id) ?? (r as OrchestratedChunk)), score: r.score }));
   } else {
@@ -824,18 +839,9 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   //    The model is told which side carries more authority and that the other
   //    exists, instead of silently picking one.
   const contextObjectIds = Array.from(new Set(final.map((c) => c.object_id).filter((x): x is string => !!x)));
-  // 10. Performance Memory (numbers) when the request wants them or the mode leans on it
-  //     (per the lane plan: a fixed knowledge scope may turn it off). Its rows are
-  //     call-score data (per-consultant scores, close rates), so it is fetched ONLY
-  //     when the effective scope reaches call_score and the caller's capabilities
-  //     allow it — a key / spoke user narrowed away from call scores never sees them.
-  //     Both reads are independent, so they share one round trip on the critical path.
-  const wantsPerformance = !aggregateOnly && plan.wantsPerformance && performanceAllowed(scope, gates);
   const [contradictions, perf] = await Promise.all([
     contextObjectIds.length > 1 ? listContradictionsAmong(db, orgId, contextObjectIds) : Promise.resolve([]),
-    wantsPerformance
-      ? fetchPerformanceBlock(db, orgId, { query, keyConcepts: intent.keyConcepts, entities: intent.entities, needsNumbers: intent.needsNumbers })
-      : Promise.resolve(null),
+    performancePromise,
   ]);
   const conflicts = contradictions.length ? pairConflicts(contradictions, objects) : [];
   const performanceBlock = perf?.block ?? "";
