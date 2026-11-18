@@ -49,7 +49,8 @@ import {
 } from "@/lib/orchestrator";
 import { narrowScope, narrowSourceTypes, type ScopeFilters } from "@/lib/auth/scope";
 import { DEFAULT_SETTINGS } from "@/lib/settings";
-import { getObjectsByIds } from "@/lib/knowledge-store";
+import { embed } from "@/lib/embeddings";
+import { rewriteQueries } from "@/lib/query-transform";
 import type { ApiKeyRecord } from "@/lib/auth/context";
 import { hybridSearchLane, expandTranscripts } from "@/lib/retrieval";
 
@@ -169,17 +170,44 @@ beforeEach(() => {
   m.contradictions.mockResolvedValue([]);
 });
 
+it("starts a scoped search as soon as its query vector is ready", async () => {
+  const firstQuery = "appointments";
+  const secondQuery = "reporting";
+  let releaseSecond!: (vector: number[]) => void;
+  const slowVector = new Promise<number[]>(resolve => { releaseSecond = resolve; });
+  vi.mocked(rewriteQueries).mockResolvedValueOnce([firstQuery, secondQuery]);
+  vi.mocked(embed).mockResolvedValueOnce([0.1, 0.2]).mockReturnValueOnce(slowVector);
+  const accountScope = scope(["document"], { collectionIds: ["authorised-collection"] });
+  const retrieval = runOrchestratedRetrieval({
+    orgId: "org-1", query: "Explain the appointment policy and the reporting process",
+    knowledgeScope: "reality", scope: accountScope,
+    settings: { ...settings, features: { ...settings.features, queryRewrite: true } },
+  });
+  try {
+    await vi.waitFor(() => expect(hybridSearchLane).toHaveBeenCalledWith(expect.objectContaining({
+      query: firstQuery, scope: accountScope, queryEmbedding: [0.1, 0.2],
+    })));
+    expect(vi.mocked(hybridSearchLane).mock.calls.every(([args]) => args.query === firstQuery)).toBe(true);
+  } finally {
+    releaseSecond([0.3, 0.4]);
+    await retrieval;
+  }
+  expect(hybridSearchLane).toHaveBeenCalledWith(expect.objectContaining({
+    query: secondQuery, scope: accountScope, queryEmbedding: [0.3, 0.4],
+  }));
+});
+
 describe("runOrchestratedRetrieval — Performance Memory scope gate", () => {
-  it("starts the authorized metrics read before object metadata finishes", async () => {
-    let releaseObjects!: (objects: Awaited<ReturnType<typeof getObjectsByIds>>) => void;
-    const objects = new Promise<Awaited<ReturnType<typeof getObjectsByIds>>>((resolve) => { releaseObjects = resolve; });
-    vi.mocked(getObjectsByIds).mockReturnValueOnce(objects);
+  it("starts the authorized metrics read while the searches are still pending", async () => {
+    let releaseSearch!: (chunks: []) => void;
+    const search = new Promise<[]>(resolve => { releaseSearch = resolve; });
+    vi.mocked(hybridSearchLane).mockReturnValueOnce(search);
     const retrieval = run(NUMBERS_Q, scope(["document", "call_score"]));
     try {
-      await vi.waitFor(() => expect(getObjectsByIds).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(hybridSearchLane).toHaveBeenCalled());
       expect(m.perf).toHaveBeenCalledTimes(1);
     } finally {
-      releaseObjects(new Map());
+      releaseSearch([]);
       await retrieval;
     }
     expect((await retrieval).performanceMetrics).toEqual([METRIC]);

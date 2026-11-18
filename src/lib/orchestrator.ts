@@ -573,6 +573,14 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
         })
       : Promise.resolve(null);
 
+  // The authorized performance lookup does not depend on rewritten queries
+  // or ranked chunks. Start it before the search waits on either one.
+  const wantsPerformance = !aggregateOnly && plan.wantsPerformance && performanceAllowed(scope, gates);
+  const performancePromise = wantsPerformance
+    ? fetchPerformanceBlock(db, orgId, { query, keyConcepts: intent.keyConcepts, entities: intent.entities, needsNumbers: intent.needsNumbers })
+    : Promise.resolve(null);
+  void performancePromise.catch(() => {});
+
   // 2. Search queries: intent's (already discriminative) or the rewrite stage.
   let queries = intent.searchQueries.length ? intent.searchQueries : [query];
   const priorTurns = history.filter((m) => m.role === "user" || m.role === "assistant").length;
@@ -595,12 +603,11 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
   let firstQueryEmbedding:number[]|undefined;
   let laneResults: { lane: Lane | "raw"; chunks: LaneChunk[] }[];
   try {
-    const embeddings = await Promise.all(queries.map((q) => embed(q)));
-    firstQueryEmbedding=embeddings[0];
+    const embeddings = queries.map((q) => embed(q));
     const jobs: Promise<{ lane: Lane | "raw"; chunks: LaneChunk[] }>[] = [];
     const searchLane = async (lane: Lane | "raw", classes: string[]) => {
       const searches = await Promise.allSettled(
-        queries.map((q, i) =>
+        queries.map(async (q, i) =>
           hybridSearchLane({
             orgId,
             query: q,
@@ -610,7 +617,7 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
             fullTextWeight: retrieval.fullTextWeight,
             semanticWeight: retrieval.semanticWeight,
             rrfK: retrieval.rrfK,
-            queryEmbedding: embeddings[i],
+            queryEmbedding: await embeddings[i],
           })
         )
       );
@@ -623,7 +630,10 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     };
     for (const l of active) jobs.push(searchLane(l, LANE_CLASS[l]));
     if (includeRaw) jobs.push(searchLane("raw", ["raw_archive"]));
-    const searches = await Promise.allSettled(jobs);
+    // Start every query's lane searches as soon as its own vector is ready.
+    // The final merge still sees the same ordered lists and strict embed errors.
+    const [searches, vectors] = await Promise.all([Promise.allSettled(jobs), Promise.all(embeddings)]);
+    firstQueryEmbedding = vectors[0];
     laneResults = searches.flatMap(search => search.status === "fulfilled" ? [search.value] : []);
     for (const search of searches) {
       if (search.status === "rejected" && (!isSearchTimeout(search.reason) || !laneResults.some(lane => lane.chunks.length))) {
@@ -638,15 +648,6 @@ export async function runOrchestratedRetrieval(opts: OrchestrateOptions): Promis
     }
     throw e;
   }
-
-  // These metrics need the authorized intent and lane plan, not the ranked
-  // evidence. Read them while the remaining retrieval stages run.
-  const wantsPerformance = !aggregateOnly && plan.wantsPerformance && performanceAllowed(scope, gates);
-  const performancePromise = wantsPerformance
-    ? fetchPerformanceBlock(db, orgId, { query, keyConcepts: intent.keyConcepts, entities: intent.entities, needsNumbers: intent.needsNumbers })
-    : Promise.resolve(null);
-  // Retrieval can end before the eventual join below.
-  void performancePromise.catch(() => {});
 
   // 5. Object metadata for boosting + labelling (one query).
   const objectIds = Array.from(new Set(laneResults.flatMap((r) => r.chunks.map((c) => c.object_id)).filter((x): x is string => !!x)));

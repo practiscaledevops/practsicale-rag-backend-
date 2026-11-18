@@ -90,8 +90,8 @@ import { runRetrieval } from "@/lib/pipeline";
 import { runOrchestratedRetrieval, capabilityGates, performanceAllowed, callReviewInScope, buildDateNote, type OrchestrationOutput } from "@/lib/orchestrator";
 import { metricEventRows } from "@/lib/performance-memory";
 import { detectLearning, looksLikeLearning } from "@/lib/learning-detect";
-import { extractCitationIds, validateCitations, checkFaithfulness, type FaithfulnessVerdict } from "@/lib/faithfulness";
-import { verifyAndRepairAnswer } from "@/lib/answer-verification";
+import { extractCitationIds, validateCitations, checkFaithfulness, documentVerificationPolicy, type FaithfulnessVerdict } from "@/lib/faithfulness";
+import { matchesRequestedVerbatimQuote, verifyAndRepairAnswer } from "@/lib/answer-verification";
 import { resolveContext, AuthError } from "@/lib/auth/context";
 import { requireCapability, narrowScope, narrowSourceTypes, matchesNoSourceType } from "@/lib/auth/scope";
 import { KNOWLEDGE_SCOPE_IDS, knowledgeScopeDef, scopeUnavailableMessage } from "@/lib/knowledge-scopes";
@@ -1101,8 +1101,21 @@ export async function POST(req: Request) {
         // private, so there is no generated claim for the verifier to check.
         fullText = fullOriginalQuote;
         verificationLabel = "Quoted from the original sources";
+      } else if (verifyBeforeRelease && !creative && !clipped && !hasAttachments &&
+        (!wordLimit || answerWords(fullText) <= wordLimit) &&
+        matchesRequestedVerbatimQuote(lastUser?.content ?? query, fullText, chunks)) {
+        factualVerdict = { checked: true, grounded: true, unsupported: [] };
+        verificationLabel = "Exact quotation checked against the cited document";
       } else if (verifyBeforeRelease) {
         dataStream.writeData({ type: "status", stage: "quality", label: "Verifying claims against the evidence" });
+        const documentLookup = effectiveMode === "general" && !synthesis && !creative && !deepAnalysis &&
+          !hasAttachments && !directives && !livePlan && !out.callReview && !performanceBlock && !recalledScope &&
+          chunks.length > 0 && chunks.every(chunk => chunk.source_type === "document");
+        const verificationTask = {
+          question: lastUser?.content ?? query,
+          trustedPolicy: `${groundingPrompt}\n\n${modeBlock}\n\n${RESPONSE_GUIDANCE}`,
+          documentLookupPolicy: documentLookup ? documentVerificationPolicy(groundingPrompt) : undefined,
+        };
         let fp: string | undefined;
         const checked = await verifyAndRepairAnswer({
           text: fullText,
@@ -1114,7 +1127,7 @@ export async function POST(req: Request) {
             if(!fp)return null;
             return checkFaithfulness(context + performanceSection + (hasAttachments ? attachmentBlock : "") + recalledScopeContext, text, fp, verifierModel,
               AbortSignal.timeout(Math.max(1000, Math.min(shortAnswer ? 12_000 : 45_000, deadline - Date.now() - 5000))),
-              { question: lastUser?.content ?? query, trustedPolicy: `${groundingPrompt}\n\n${modeBlock}\n\n${RESPONSE_GUIDANCE}` },resolvedModel);
+              verificationTask, resolvedModel);
           },
           canRepair: () => Date.now() < deadline - 80_000,
           repair: async (text, unsupported, fabricated) => {
