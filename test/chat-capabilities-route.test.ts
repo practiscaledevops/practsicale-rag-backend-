@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const m = vi.hoisted(() => ({
   bridge: false,
   payroll: vi.fn(),
+  scoring: vi.fn(),
   resolveContext: vi.fn(),
   orchestrate: vi.fn(),
   insert: vi.fn(),
@@ -14,6 +15,7 @@ const m = vi.hoisted(() => ({
   streamText: vi.fn(),
   readDocumentDates: vi.fn(),
   readSavedChunks: vi.fn(),
+  requireSourceIdentity: vi.fn(),
   requireSourcePermission: vi.fn(),
   readGhlOpportunity: vi.fn(),
 }));
@@ -55,9 +57,13 @@ vi.mock("@/lib/settings", async (orig) => {
 });
 
 vi.mock('@/lib/connectors/payroll-report',()=>({payrollAccess:()=>m.bridge}));
-vi.mock('@/lib/connectors/source-access',()=>({requireSourcePermission:m.requireSourcePermission,requireSourceIdentity:async()=> 'verified@example.com'}));
+vi.mock('@/lib/connectors/source-access',()=>({requireSourcePermission:m.requireSourcePermission,requireSourceIdentity:m.requireSourceIdentity}));
 vi.mock('@/lib/connectors/ghl-opportunity',async orig=>({...await orig<typeof import('@/lib/connectors/ghl-opportunity')>(),readGhlOpportunity:m.readGhlOpportunity}));
 vi.mock('@/lib/connectors/payroll-live',async orig=>({...await orig<typeof import('@/lib/connectors/payroll-live')>(),readLivePayroll:m.payroll}));
+vi.mock("@/lib/call-review", async orig => ({
+  ...(await orig<typeof import("@/lib/call-review")>()),
+  fetchCallsByFilter: m.scoring,
+}));
 import { POST as chat } from "@/app/api/v1/chat/route";
 import { GET as readCitation } from "@/app/api/v1/citations/[id]/route";
 import { demoSavedAnswerSources as savedSources } from "@/lib/demo/stream";
@@ -156,9 +162,112 @@ async function send(source_types: string[], body: Record<string, unknown>) {
   return { res, text: await res.text() };
 }
 
+const payrollScoringPrompt = {
+  role: "user",
+  content: "compare this month total HT+LT calls from sales payroll and call scoring app",
+  createdAt: "2026-11-18T21:41:00.000Z",
+};
+const differencePrompt = {
+  role: "user",
+  content: "is there any difference?",
+  createdAt: "2026-12-02T10:00:00.000Z",
+};
+const comparisonRequest = { capabilities: ALL_CAPS, timeZone: "Asia/Karachi" };
+
+function mockComparisonReports(complete = true) {
+  m.bridge = true;
+  m.payroll.mockResolvedValueOnce({ data: { sales: [
+    { ticket: "high_ticket", recorded_date: "2026-11-04" },
+    { ticket: "low_ticket", recorded_date: null },
+  ] } });
+  m.scoring.mockResolvedValueOnce({ complete, scorecard: [
+    { closingType: "High Ticket", outcome: "Closed" },
+    { closingType: "Low Ticket", outcome: "Closed" },
+    { closingType: "High Ticket", outcome: "Not Closed" },
+    { closingType: "Unclassified", outcome: "Pending" },
+  ] });
+}
+
+describe("Sales Payroll and Call Scoring comparison", () => {
+  it.each(["new", "saved", "compacted"] as const)("compares both sources in a %s chat", async kind => {
+    mockComparisonReports();
+    const previousReport = { role: "assistant", content: "Call report · CRM closed. Earlier total: 20." };
+    const history = kind === "new"
+      ? { messages: [{ role: "user", content: "Show CRM closed calls." }, previousReport, payrollScoringPrompt] }
+      : kind === "saved"
+        ? { savedConversation: true, messages: [payrollScoringPrompt, previousReport, differencePrompt] }
+        : { savedConversation: true, earlierContext: { userTurns: [{
+            content: payrollScoringPrompt.content, createdAt: payrollScoringPrompt.createdAt,
+          }] }, messages: [differencePrompt] };
+    const { res, text } = await send([], { ...comparisonRequest, ...history });
+
+    expect(res.headers.get("x-model")).toBe("none");
+    expect(m.payroll).toHaveBeenCalledTimes(1);
+    expect(m.payroll).toHaveBeenCalledWith("performance", "verified@example.com", "2026-11-01", "2026-11-19", expect.any(AbortSignal));
+    expect(m.scoring).toHaveBeenCalledTimes(1);
+    expect(m.scoring).toHaveBeenCalledWith(expect.anything(), "org-1",
+      { isReview: true, dateFrom: "2026-11-01", dateTo: "2026-11-19" },
+      expect.objectContaining({ metadataOnly: true, maxCalls: 0, timeZone: "Asia/Karachi" }));
+    expect(text).toContain("HT/LT comparison · 2026-11-01 to 2026-11-19");
+    expect(text).toContain("**1 more HT/LT record**");
+    expect(text).toContain("| High ticket (HT) | 1 | 2 | +1 |");
+    expect(text).toContain("| Low ticket (LT) | 1 | 1 | 0 |");
+    expect(text).toContain("| Combined HT + LT | 2 | 3 | +1 |");
+    expect(text).toContain("[Sales Payroll](https://payroll.practicescalingsystems.com/admin)");
+    expect(text).toContain("[Call Scoring](https://scoring.practicescalingsystems.com/)");
+    expect(text).not.toContain("Per-call details");
+    expect(m.orchestrate).not.toHaveBeenCalled();
+    expect(m.streamText).not.toHaveBeenCalled();
+  });
+
+  it("keeps the Payroll count and withholds differences when the scoring roster is incomplete", async () => {
+    mockComparisonReports(false);
+    const { text } = await send([], { ...comparisonRequest, messages: [payrollScoringPrompt] });
+    expect(text).toContain("| Combined HT + LT | 2 | Unavailable | — |");
+    expect(text).toContain("[Sales Payroll](https://payroll.practicescalingsystems.com/admin)");
+    expect(text).not.toContain("[Call Scoring](");
+  });
+
+  it("counts only currently closed calls if the comparison asks for closings", async () => {
+    mockComparisonReports();
+    const prompt = { ...payrollScoringPrompt, content: "Compare HT and LT closings from Sales Payroll and Call Scoring this month." };
+    const { text } = await send([], { ...comparisonRequest, messages: [prompt] });
+    expect(text).toContain("Both sources show the same combined HT/LT count.");
+    expect(text).toContain("calls marked CRM Closed");
+    expect(text).toContain("| Combined HT + LT | 2 | 2 | 0 |");
+  });
+
+  it("checks the source scope before reading either report", async () => {
+    m.bridge = true;
+    const { text } = await send(["document"], { ...comparisonRequest, messages: [payrollScoringPrompt] });
+    expect(text).toContain("needs access to both Sales Payroll and Call Scoring");
+    expect(m.payroll).not.toHaveBeenCalled();
+    expect(m.scoring).not.toHaveBeenCalled();
+  });
+
+  it("asks for dates when the saved relative-date request has no timestamp", async () => {
+    m.bridge = true;
+    const { text } = await send([], { ...comparisonRequest, savedConversation: true,
+      messages: [{ ...payrollScoringPrompt, createdAt: undefined }, differencePrompt] });
+    expect(text).toContain("original request’s date isn’t available");
+    expect(m.payroll).not.toHaveBeenCalled();
+    expect(m.scoring).not.toHaveBeenCalled();
+  });
+
+  it("requires an active verified source identity before reading the comparison", async () => {
+    m.bridge = true;
+    m.requireSourceIdentity.mockRejectedValueOnce(new Error("Source access denied"));
+    const { text } = await send([], { ...comparisonRequest, messages: [payrollScoringPrompt] });
+    expect(text).toContain("couldn’t verify the comparison");
+    expect(m.payroll).not.toHaveBeenCalled();
+    expect(m.scoring).not.toHaveBeenCalled();
+  });
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   m.bridge=false;
+  m.requireSourceIdentity.mockResolvedValue("verified@example.com");
   m.requireSourcePermission.mockResolvedValue("verified@example.com");
   m.insert.mockResolvedValue({ error: null });
   m.orchestrate.mockImplementation(async (o: { scope: { sourceTypes: string[] } }) => retrieval(o.scope.sourceTypes));

@@ -1,5 +1,6 @@
 import { recallUserStatement } from "@/lib/conversation-recall";
 import { formatReportRange, recallRequestedReportScope, reportSourceLabels, resolveReportFollowup, supplementRecalledReportScope } from "@/lib/connectors/report-followup";
+import { readPayrollScoringComparison, resolvePayrollScoringComparison } from "@/lib/connectors/payroll-scoring-comparison";
 import { demoScopedReport, readScopedReport } from "@/lib/connectors/scoped-report";
 import {answerWordLimit,answerWords} from '@/lib/answer-length';
 import {crmSalesReport} from '@/lib/connectors/crm-report';
@@ -413,6 +414,44 @@ export async function POST(req: Request) {
 
   // Exact business reports bypass prompt/model setup and all paid retrieval.
   const businessAllowed = payrollAccess(ctx.orgId, ctx.key.id) && gates.callReview && callReviewInScope(scope) && knowledgeScope.retrieval.callReview !== "off";
+  const payrollScoring = !hasTurnAttachments && (!body.outputType || body.outputType === "answer")
+    ? resolvePayrollScoringComparison([...olderUserTurns, ...recentTurns], timeZone)
+    : null;
+  if (payrollScoring) {
+    return createDataStreamResponse({
+      headers: { ...rateLimitHeaders(rl), "x-model": "none", "x-provider": "none" },
+      async execute(stream) {
+        let text = "The comparison needs access to both Sales Payroll and Call Scoring. Check your source access and selection.";
+        if ("clarification" in payrollScoring) {
+          text = payrollScoring.clarification;
+        } else if (businessAllowed && knowledgeScope.id !== "calls") {
+          const signal = AbortSignal.any([req.signal, AbortSignal.timeout(40_000)]);
+          stream.writeData({ type: "status", stage: "business-report", label: "Reading Sales Payroll and Call Scoring" });
+          try {
+            const email = await requireSourceIdentity(req.headers.get("x-chatbot-user-token"), signal);
+            const { from, through } = payrollScoring;
+            text = await readPayrollScoringComparison(payrollScoring, timeZone, {
+              signal: req.signal,
+              async payroll() {
+                return (await readLivePayroll("performance", email, from, through, signal)).data;
+              },
+              async scoring() {
+                const report = await fetchCallsByFilter(supabaseAdmin(), ctx.orgId,
+                  { isReview: true, dateFrom: from, dateTo: through },
+                  { maxCalls: 0, maxTokens: 0, timeZone, metadataOnly: true, signal });
+                return { rows: report.scorecard, complete: report.complete === true };
+              },
+            });
+          } catch {
+            req.signal.throwIfAborted();
+            text = "I couldn’t verify the comparison. Check your source access or retry the report.";
+          }
+        }
+        stream.write(formatDataStreamPart("text", text));
+        stream.write(formatDataStreamPart("finish_message", { finishReason: "stop", usage: { promptTokens: 0, completionTokens: 0 } }));
+      },
+    });
+  }
   const synthesis = needsSynthesis(query);
   const crmMatch = query.match(/\b(?:ghl|crm|gohighlevel)\s+opportunity\s+([A-Za-z0-9_-]{15,100})(?![A-Za-z0-9_-])/i);
   if (crmMatch && !synthesis) {
