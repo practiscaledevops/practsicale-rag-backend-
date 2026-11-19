@@ -5,9 +5,37 @@ import { z } from 'zod';
 const cell = (v: unknown) => String(v ?? 'Not recorded').replace(/[|\n\r]/g, ' ').replace(/[<>]/g, '');
 const table = (headers: string[], rows: unknown[][]) => '| '+headers.join(' | ')+' |\n| '+headers.map(()=> '---').join(' | ')+' |\n'+rows.map(r=>'| '+r.map(cell).join(' | ')+' |').join('\n');
 const advisory = /\b(why|improve|recommend|strategy|write|coach|best|compare|comparison|versus|vs\.?|taxonomy|niche)\b/i;
+const commissionMinor = z.number().int().safe().nonnegative();
+const recordedCommission = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('verified'), person: z.string().min(1), currency: z.literal('PKR'),
+    high_ticket_minor: commissionMinor, low_ticket_minor: commissionMinor, calculated_at: z.string().datetime({ offset: true }) }),
+  z.object({ status: z.literal('unavailable'), reason: z.enum(['person_not_found','ambiguous_person','no_exact_payslip','unverified_split']) }),
+]);
 export function renderPayrollFacts(query: string, source: {report:string;from:string;through:string;date_basis:string;fetched_at:string;data?:unknown}): string | null {
   if (advisory.test(query) && !(source.report === 'performance' && !/\b(why|improve|recommend|strategy|write|coach|compare|comparison|versus|vs)\b/i.test(query))) return null;
   const footer = '\n\nSource: [Sales Payroll](https://payroll.practicescalingsystems.com/admin). '+source.date_basis+'. Checked '+source.fetched_at+'.';
+  if (source.report === 'ticket_commissions') {
+    const result = recordedCommission.parse(source.data);
+    const period = '**Requested period: '+source.from+' to '+source.through+'**\n\n';
+    const hint = payrollPersonHint(query);
+    if (!hint) throw new Error('Missing requested Payroll commission subject');
+    if (result.status === 'unavailable') {
+      const reasons = {
+        person_not_found: 'Payroll could not find a person named '+cell(hint)+'.',
+        ambiguous_person: 'More than one Payroll person matches '+cell(hint)+'. Which record should I use?',
+        no_exact_payslip: 'Payroll has no current payslip for '+cell(hint)+' covering exactly these dates.',
+        unverified_split: 'Payroll could not verify both commission lines on the payslip for '+cell(hint)+'.',
+      };
+      return period+reasons[result.reason]+footer;
+    }
+    if (!resolvePayrollPerson(query, [result.person], { strictHint: true }).matches.length) {
+      throw new Error('Unexpected Payroll commission subject');
+    }
+    const amount = (minor: number) => (minor / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return period+'**'+cell(result.person)+' — recorded commissions**\n\n'+
+      table(['Ticket type','Commission (PKR)'], [['High ticket (HT)',amount(result.high_ticket_minor)], ['Low ticket (LT)',amount(result.low_ticket_minor)]])+
+      '\n\nThese are the commission lines recorded on the payslip. Other payslip adjustments are separate. Payroll run calculated '+new Date(result.calculated_at).toISOString()+'.'+footer;
+  }
   if(source.report==='performance') {
     const group=z.object({label:z.string(),booked:z.number(),showed:z.number(),happened:z.number(),show_rate:z.number().nullable().optional(),closings:z.number(),usd_minor:z.number()});
     const d=z.object({summary:z.object({booked:z.number(),showed:z.number(),happened:z.number().optional(),show_rate:z.number().nullable().optional(),no_show:z.number(),closings:z.number(),usd_minor:z.number(),absent_shows:z.string().nullable()}),setters:z.array(group),teams:z.array(group),consultants:z.array(group),niches:z.array(group),undated_entries:z.number(),sales:z.array(z.object({client:z.string().nullable(),owner:z.string(),ticket:z.enum(['high_ticket','low_ticket']),usd_minor:z.number(),recorded_date:z.string().nullable(),niche:z.string().nullable(),team:z.string().nullable().optional(),setter:z.string().nullable().optional(),ticket_assumed:z.boolean().optional(),origin:z.string().optional()}))}).parse(source.data);

@@ -3,7 +3,7 @@ import { parseCallReviewFilter } from '@/lib/call-review';
 import { localDate, todayIn } from '@/lib/timezone';
 import { requestedBusinessSource } from './business-followup';
 
-export const sourcePermissions = { performance: 'reporting.view', people: 'employees.view', teams: 'teams.view', closings: 'dashboard.view', activity: 'reporting.view', payroll: 'reporting.view', fines: 'fines_bonuses.view', bonuses: 'fines_bonuses.view', rules: 'pay_rules.view', attendance: 'attendance.view' } as const;
+export const sourcePermissions = { performance: 'reporting.view', people: 'employees.view', teams: 'teams.view', closings: 'dashboard.view', activity: 'reporting.view', payroll: 'reporting.view', ticket_commissions: 'reporting.view', fines: 'fines_bonuses.view', bonuses: 'fines_bonuses.view', rules: 'pay_rules.view', attendance: 'attendance.view' } as const;
 export type PayrollReport = keyof typeof sourcePermissions;
 
 const ticketType = /\b(ht|lt|high[ -]ticket|low[ -]ticket)\b/i;
@@ -78,13 +78,19 @@ export function planPayrollReports(query: string, timeZone: string, earningsCont
   return { reports: [...reports], from, through, unsupported };
 }
 const envelope = z.object({ report: z.string(), from: z.string(), through: z.string(), date_basis: z.string(), fetched_at: z.string(), source: z.literal('Sales Payroll'), complete: z.literal(true), warnings: z.array(z.string()), data: z.unknown() });
-export async function readLivePayroll(report: PayrollReport, email: string, from: string, through: string, signal: AbortSignal) {
+export class UnsupportedPayrollTicketReportError extends Error {}
+
+export async function readLivePayroll(report: PayrollReport, email: string, from: string, through: string, signal: AbortSignal, person?: string) {
   const key = process.env.PAYROLL_BRIDGE_KEY;
   if (!key) throw new Error('Payroll live bridge not configured');
   const response = await fetch('https://payroll.practicescalingsystems.com/api/brain/reports', {
     method: 'POST', redirect: 'error', cache: 'no-store', signal: AbortSignal.any([signal, AbortSignal.timeout(20000)]),
-    headers: { Authorization: 'Bearer '+key, 'Content-Type': 'application/json' }, body: JSON.stringify({ email, report, from, through }),
+    headers: { Authorization: 'Bearer '+key, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, report, from, through, ...(person ? { person } : {}) }),
   });
+  if (report === 'ticket_commissions' && response.status === 400) {
+    throw new UnsupportedPayrollTicketReportError('Payroll does not support the requested ticket commission report');
+  }
   if (!response.ok) throw new Error('Payroll '+report+' unavailable or outside supported scope');
   const result = envelope.parse(await response.json());
   if (result.report !== report || result.from !== from || result.through !== through) throw new Error('Unexpected report scope');

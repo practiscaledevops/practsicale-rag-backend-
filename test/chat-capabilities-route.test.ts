@@ -61,6 +61,7 @@ vi.mock('@/lib/connectors/payroll-live',async orig=>({...await orig<typeof impor
 import { POST as chat } from "@/app/api/v1/chat/route";
 import { GET as readCitation } from "@/app/api/v1/citations/[id]/route";
 import { demoSavedAnswerSources as savedSources } from "@/lib/demo/stream";
+import { UnsupportedPayrollTicketReportError } from '@/lib/connectors/payroll-live';
 
 const ALL_CAPS = ["chat.knowledge", "chat.source_scope", "chat.call_review", "knowledge.performance", "knowledge.conflicts", "learning.write"];
 const QUESTION = "We tried a new follow-up cadence and our show-up rate went up — what should we do next?";
@@ -491,20 +492,13 @@ vi.mock("@/lib/ratelimit", async (original) => ({ ...(await original<typeof impo
 it.each(['original turn', 'saved follow-up', 'compacted follow-up'])('keeps the date and person on the exact HT/LT pay prompt (%s)', async scenario => {
   m.bridge = true;
   m.payroll.mockResolvedValueOnce({
-    report: 'payroll',
+    report: 'ticket_commissions',
     from: '2026-11-01',
     through: '2026-11-19',
-    date_basis: 'Whole Payroll month 2026-11',
+    date_basis: 'Recorded payslip commission for the exact Payroll run dates',
     fetched_at: '2026-11-20T10:00:00Z',
-    data: { bill: {
-      people: [
-        { employee_id: 'other', name: 'Another Consultant', role: 'consultant', minor: 15000000 },
-        { employee_id: 'kate', name: 'Kate Melody', role: 'consultant', minor: 9000000 },
-      ],
-      run_status: 'open',
-      last_recalculated_at: null,
-      composition_reconciles: true,
-    } },
+    data: { status: 'verified', person: 'Kate Melody', currency: 'PKR',
+      low_ticket_minor: 2200000, high_ticket_minor: 3300000, calculated_at: '2026-11-19T08:30:00Z' },
   });
   const earlierReport = { content: 'Show HT and LT closing totals this month from Sales Payroll.', createdAt: '2026-11-18T21:38:00Z' };
   const savedConversation = scenario !== 'original turn';
@@ -528,13 +522,29 @@ it.each(['original turn', 'saved follow-up', 'compacted follow-up'])('keeps the 
 
   expect(res.status).toBe(200);
   expect(m.payroll).toHaveBeenCalledTimes(1);
-  expect(m.payroll).toHaveBeenCalledWith('payroll', 'verified@example.com', '2026-11-01', '2026-11-19', expect.any(AbortSignal));
+  expect(m.payroll).toHaveBeenCalledWith('ticket_commissions', 'verified@example.com', '2026-11-01', '2026-11-19', expect.any(AbortSignal), 'kate melody');
   expect(text).toContain('Requested period: 2026-11-01 to 2026-11-19');
-  expect(text).toContain('earnings split by ticket type (HT/LT) for **Kate Melody**');
-  expect(text).toContain('whole-month payslip total');
+  expect(text).toContain('**Kate Melody — recorded commissions**');
+  expect(text).toContain('| High ticket (HT) | 33,000.00 |');
+  expect(text).toContain('| Low ticket (LT) | 22,000.00 |');
   expect(text).toContain('[Sales Payroll](https://payroll.practicescalingsystems.com/admin)');
   expect(text).not.toMatch(/Another Consultant|150,000|90,000|Closed value|closing totals|19,700/);
   expect(m.streamText).not.toHaveBeenCalled();
+});
+
+it('keeps the source limitation when an older Payroll bridge lacks the commission report', async () => {
+  m.bridge = true;
+  m.payroll.mockRejectedValueOnce(new UnsupportedPayrollTicketReportError()).mockResolvedValueOnce({
+    report: 'payroll', from: '2026-11-01', through: '2026-11-19', date_basis: 'Whole Payroll month', fetched_at: '2026-11-19T09:00:00Z',
+    data: { bill: { people: [{ employee_id: 'kate', name: 'Kate Melody', role: 'consultant', minor: 9000000 }],
+      run_status: 'open', last_recalculated_at: null, composition_reconciles: true } },
+  });
+  const { text } = await send([], { capabilities: ALL_CAPS, timeZone: 'Asia/Karachi', messages: [{
+    role: 'user', content: 'how in LT and HT earning by kate melody only?', createdAt: '2026-11-18T21:39:10Z',
+  }] });
+  expect(m.payroll).toHaveBeenCalledTimes(2);
+  expect(text).toContain('does not provide a verified earnings split');
+  expect(text).not.toContain('90,000');
 });
 
 describe('company-grounded synthesis without paid providers',()=>{

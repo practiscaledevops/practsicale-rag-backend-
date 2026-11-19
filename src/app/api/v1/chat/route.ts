@@ -10,7 +10,8 @@ import {businessFollowup,requestedBusinessSource} from '@/lib/connectors/busines
 import { multipartNeeds, readMultipart } from '@/lib/connectors/payroll-multipart';
 import { reportingWindow, hourlyReport, comparePayrollCrm } from '@/lib/connectors/exact-report';
 import { renderPayrollFacts } from '@/lib/connectors/payroll-facts';
-import { planPayrollReports, readLivePayroll, sourcePermissions, payrollTotalsFromLive } from '@/lib/connectors/payroll-live';
+import { isPayrollTicketEarningsRequest, planPayrollReports, readLivePayroll, sourcePermissions, payrollTotalsFromLive, UnsupportedPayrollTicketReportError } from '@/lib/connectors/payroll-live';
+import { payrollPersonHint } from '@/lib/connectors/payroll-person';
 import { ghlOpportunityCitation, readGhlOpportunity } from "@/lib/connectors/ghl-opportunity";
 import { requireSourcePermission, requireSourceIdentity } from "@/lib/connectors/source-access";
 import { payrollAccess, readPayrollClosings, renderPayrollClosings } from "@/lib/connectors/payroll-report";
@@ -554,7 +555,15 @@ export async function POST(req: Request) {
         // Payroll gateway checks the live role and report permission itself.
         const email=await requireSourceIdentity(token,directSignal);
         identityFinished=Date.now();
-        text=renderPayrollFacts(query,await readLivePayroll(factReport,email,directPlan.from,directPlan.through,directSignal));
+        const { from, through } = directPlan;
+        const person = factReport === 'payroll' && isPayrollTicketEarningsRequest(query) ? payrollPersonHint(query) : null;
+        const commission = person?.includes(' ')
+          ? await readLivePayroll('ticket_commissions', email, from, through, directSignal, person).catch(error => {
+            if (error instanceof UnsupportedPayrollTicketReportError) return null;
+            throw error;
+          })
+          : null;
+        text = renderPayrollFacts(query, commission ?? await readLivePayroll(factReport, email, from, through, directSignal));
       }
     }catch(error){
       if(req.signal.aborted) throw error;
