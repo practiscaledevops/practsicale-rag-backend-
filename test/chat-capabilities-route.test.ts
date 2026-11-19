@@ -488,6 +488,54 @@ describe("POST /api/v1/chat — message timestamps", () => {
 
 vi.mock("@/lib/ratelimit", async (original) => ({ ...(await original<typeof import("@/lib/ratelimit")>()), checkRateLimit: async () => ({ok:true,limit:120,remaining:119,retryAfter:60}) }));
 
+it.each(['original turn', 'saved follow-up', 'compacted follow-up'])('keeps the date and person on the exact HT/LT pay prompt (%s)', async scenario => {
+  m.bridge = true;
+  m.payroll.mockResolvedValueOnce({
+    report: 'payroll',
+    from: '2026-11-01',
+    through: '2026-11-19',
+    date_basis: 'Whole Payroll month 2026-11',
+    fetched_at: '2026-11-20T10:00:00Z',
+    data: { bill: {
+      people: [
+        { employee_id: 'other', name: 'Another Consultant', role: 'consultant', minor: 15000000 },
+        { employee_id: 'kate', name: 'Kate Melody', role: 'consultant', minor: 9000000 },
+      ],
+      run_status: 'open',
+      last_recalculated_at: null,
+      composition_reconciles: true,
+    } },
+  });
+  const earlierReport = { content: 'Show HT and LT closing totals this month from Sales Payroll.', createdAt: '2026-11-18T21:38:00Z' };
+  const savedConversation = scenario !== 'original turn';
+  const { res, text } = await send([], {
+    capabilities: ALL_CAPS,
+    timeZone: 'Asia/Karachi',
+    savedConversation,
+    messages: [
+      ...(scenario === 'saved follow-up' ? [
+        { role: 'user', ...earlierReport },
+        { role: 'assistant', content: 'Payroll report for 2026-11-01 to 2026-11-19. Combined closed value: USD 19,700.' },
+      ] : []),
+      {
+        role: 'user',
+        content: 'how in LT and HT earning by kate melody only?',
+        createdAt: savedConversation ? '2026-11-20T10:00:00Z' : '2026-11-18T21:39:10Z',
+      },
+    ],
+    earlierContext: { userTurns: scenario === 'compacted follow-up' ? [earlierReport] : [] },
+  });
+
+  expect(res.status).toBe(200);
+  expect(m.payroll).toHaveBeenCalledTimes(1);
+  expect(m.payroll).toHaveBeenCalledWith('payroll', 'verified@example.com', '2026-11-01', '2026-11-19', expect.any(AbortSignal));
+  expect(text).toContain('Requested period: 2026-11-01 to 2026-11-19');
+  expect(text).toContain('earnings split by ticket type (HT/LT) for **Kate Melody**');
+  expect(text).toContain('whole-month payslip total');
+  expect(text).toContain('[Sales Payroll](https://payroll.practicescalingsystems.com/admin)');
+  expect(text).not.toMatch(/Another Consultant|150,000|90,000|Closed value|closing totals|19,700/);
+  expect(m.streamText).not.toHaveBeenCalled();
+});
 
 describe('company-grounded synthesis without paid providers',()=>{
  it.each(['Analyze Team Mike show rate this month','Draft a coaching email for Team Mike setters','Recommend next steps for our consultants','can we build any offer to consultants'])('keeps %s on the synthesis path with current authorized facts',async question=>{

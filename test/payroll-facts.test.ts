@@ -17,6 +17,19 @@ it('answers named earnings from payslip minor units, not closed revenue',()=>{co
 it('never guesses among two David payslips',()=>{const a=renderPayrollFacts('how much david earned this month',{...pay,data:{bill:{...pay.data.bill,people:[...pay.data.bill.people,{employee_id:'3',name:'David Jones',role:'consultant',minor:500}]}}});expect(a).toContain('Which person');expect(a).not.toContain('125,000');});
 it('does not treat missing payslips as zero earnings',()=>{expect(renderPayrollFacts('how much unknown earned this month',pay)).toContain('does not establish zero');});
 
+it('does not substitute a first-name match for an unrecognized full name on ticket earnings', () => {
+  const answer = renderPayrollFacts('HT and LT earning by Kate Morris only?', pay);
+  expect(answer).toContain('did not return a matching payslip for Kate Morris');
+  expect(answer).not.toContain('Kate Melody');
+  expect(answer).not.toContain('98,000');
+});
+
+it('asks for clarification if a ticket earnings query matches duplicate Payroll identities', () => {
+  const duplicate = { ...pay.data.bill.people[1], employee_id: 'another-kate' };
+  const data = { bill: { ...pay.data.bill, people: [...pay.data.bill.people, duplicate] } };
+  expect(renderPayrollFacts('HT and LT earning by Kate Melody only?', { ...pay, data })).toContain('More than one record matches');
+});
+
 const namedSales={...performance,data:{...performance.data,sales:[{...performance.data.sales[0],owner:'Adrian Cole'},{...performance.data.sales[1],owner:'Kate Melody'}]}};
 it.each(['what is the total closing of adrian in november','adrian closing total nov','tell me adrian total sales','Adrian closings please',"what is adrian’s sales total",'how much has adrian closed this month'])('resolves source first names across wording: %s',q=>{const a=renderPayrollFacts(q,namedSales);expect(a).toContain('Adrian Cole — 1 closings');expect(a).not.toContain('Client B');expect(a).not.toContain('Company-wide');});
 it('does not widen a named unknown closing request to company data',()=>{expect(renderPayrollFacts('total closing of unknown in november',namedSales)).toContain('No company-wide total');});

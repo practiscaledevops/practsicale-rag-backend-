@@ -1,10 +1,57 @@
 import { z } from 'zod';
 import { parseCallReviewFilter } from '@/lib/call-review';
-import { todayIn } from '@/lib/timezone';
+import { localDate, todayIn } from '@/lib/timezone';
+import { requestedBusinessSource } from './business-followup';
 
 export const sourcePermissions = { performance: 'reporting.view', people: 'employees.view', teams: 'teams.view', closings: 'dashboard.view', activity: 'reporting.view', payroll: 'reporting.view', fines: 'fines_bonuses.view', bonuses: 'fines_bonuses.view', rules: 'pay_rules.view', attendance: 'attendance.view' } as const;
 export type PayrollReport = keyof typeof sourcePermissions;
-export function planPayrollReports(query: string, timeZone: string): { reports: PayrollReport[]; from: string; through: string; unsupported?: string } | null {
+
+const ticketType = /\b(ht|lt|high[ -]ticket|low[ -]ticket)\b/i;
+const personalPay = /\b(earn(?:ed|s|ings?)?|commissions?|salary|salaries|payslips?|pay|paid)\b/i;
+
+export function isPayrollTicketEarningsRequest(query: string): boolean {
+  const task = query.split('Follow-up requested:').at(-1) ?? query;
+  return ticketType.test(task) && personalPay.test(task) && !/\b(top|best|highest|most|rank(?:ing)?|leading)\b/i.test(task);
+}
+
+type TicketEarningsContext = {
+  sentAt?: string;
+  previousTurns: readonly { role: string; content: string; createdAt?: string }[];
+};
+
+function payrollReportDates(query: string, referenceDate: string, timeZone: string) {
+  const filter = parseCallReviewFilter(query, { referenceDate, timeZone });
+  const from = filter.dateFrom ?? filter.date;
+  const through = filter.dateTo ?? filter.date;
+  return from && through ? { from, through } : undefined;
+}
+
+function ticketEarningsDates(query: string, timeZone: string, context?: TicketEarningsContext) {
+  const referenceDay = (createdAt: string | undefined) =>
+    createdAt && Number.isFinite(Date.parse(createdAt)) ? localDate(createdAt, timeZone) : undefined;
+  const day = referenceDay(context?.sentAt) ?? todayIn(timeZone);
+  const explicit = payrollReportDates(query, day, timeZone);
+  if (explicit) return explicit;
+
+  const prior = context?.previousTurns.slice().reverse().find(turn => {
+    if (turn.role !== 'user') return false;
+    const source = requestedBusinessSource(turn.content);
+    return (source === 'payroll' || source === null) &&
+      (ticketType.test(turn.content) || personalPay.test(turn.content) || /\b(closings?|closed value|closed sales)\b/i.test(turn.content));
+  });
+  if (prior) {
+    const priorDay = referenceDay(prior.createdAt);
+    const dates = payrollReportDates(prior.content, priorDay ?? day, timeZone);
+    if (dates) return dates;
+    if (priorDay) return { from: priorDay.slice(0, 7) + '-01', through: priorDay };
+  }
+  return { from: day.slice(0, 7) + '-01', through: day };
+}
+
+export function planPayrollReports(query: string, timeZone: string, earningsContext?: TicketEarningsContext): { reports: PayrollReport[]; from: string; through: string; unsupported?: string } | null {
+  if (isPayrollTicketEarningsRequest(query)) {
+    return { reports: ['payroll'], ...ticketEarningsDates(query, timeZone, earningsContext) };
+  }
   const reports = new Set<PayrollReport>();
   const headcount = !/\b(top|best|highest|ranking|rank|leading)\b/i.test(query) && /\b(how many|number of|count|list|names|who|current|active)\b/i.test(query) && /\b(setters?|consultants?|closers?|employees?|people|staff)\b/i.test(query) && !/\b(closed|closings|sales|appointments|show[ -]?rate|show[ -]?ups?|calls|dials)\b/i.test(query);
   if (headcount) reports.add('people');

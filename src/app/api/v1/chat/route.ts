@@ -509,7 +509,13 @@ export async function POST(req: Request) {
   const comparison = /\b(payroll)\b/i.test(query) && /\b(ghl|crm)\b/i.test(query) && /\b(compare|comparison|versus|vs|conflict|difference|reconcile|match)\b/i.test(query);
   const hourly = /\b(calls?|dials?|activity|sales|closed|closings?|appointments?|meetings?|show[ -]?ups?|no[ -]?shows?|fines?|bonuses?|attendance|payroll)\b/i.test(query) && /\b(hours?|minutes?)\b|\b\d{1,2}:\d{2}\b/i.test(query);
   const crmReport=businessSource==='crm'&&!comparison&&!hourly&&!crmMatch;
-  const directPlan = businessAllowed && businessSource!=='call-scoring' ? planPayrollReports(query,timeZone) : null;
+  const userTurns = recentTurns.filter(turn => turn.role === 'user');
+  const directPlan = businessAllowed && businessSource!=='call-scoring'
+    ? planPayrollReports(query, timeZone, {
+      sentAt: userTurns.at(-1)?.createdAt,
+      previousTurns: [...olderUserTurns, ...userTurns.slice(0, -1)],
+    })
+    : null;
   const factReport = directPlan?.reports.length === 1 && !directPlan.unsupported ? directPlan.reports[0] : null;
   const multipart = businessAllowed && multipartNeeds(query).handled && !/\b(why|improve|recommend|strategy|write|coach|compare|versus|vs)\b/i.test(query);
   const directFact = factReport && ['people','fines','bonuses','teams','performance','attendance','rules','payroll'].includes(factReport) && !/\b(why|improve|recommend|strategy|write|coach|compare|comparison|versus|vs)\b/i.test(query);

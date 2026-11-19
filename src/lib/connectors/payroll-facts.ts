@@ -1,4 +1,5 @@
 import {payrollPersonHint,resolvePayrollPerson} from './payroll-person';
+import {isPayrollTicketEarningsRequest} from './payroll-live';
 import { z } from 'zod';
 
 const cell = (v: unknown) => String(v ?? 'Not recorded').replace(/[|\n\r]/g, ' ').replace(/[<>]/g, '');
@@ -55,9 +56,23 @@ export function renderPayrollFacts(query: string, source: {report:string;from:st
     const d=z.object({active_criteria:z.object({version:z.number(),effective_from:z.string(),criteria_text:z.string()}).nullable(),operational_rules:z.array(z.object({rule_key:z.string(),enabled:z.boolean(),effective_from:z.string()}))}).parse(source.data);
     return '**Current Payroll rules**\n\n'+(d.active_criteria?'Version '+d.active_criteria.version+', effective '+d.active_criteria.effective_from+'\n\n'+d.active_criteria.criteria_text.replace(/[<>]/g,''):'No active criteria recorded.')+'\n\n'+table(['Operational rule','Enabled','Effective from'],d.operational_rules.map(r=>[r.rule_key,r.enabled?'Yes':'No',r.effective_from]))+'\n\nCurrent configuration does not prove how an old payslip was calculated. Person-specific overrides are not covered here.'+footer;
   }
-  if(source.report==='payroll' && (payrollPersonHint(query)||/\b(earnings?|earned|commission)\b/i.test(query))) {
+  const ticketEarnings = isPayrollTicketEarningsRequest(query);
+  if(source.report==='payroll' && (ticketEarnings||payrollPersonHint(query)||/\b(earnings?|earned|commission)\b/i.test(query))) {
     const d=z.object({bill:z.object({people:z.array(z.object({employee_id:z.string(),name:z.string(),role:z.string(),minor:z.number()})),run_status:z.string(),last_recalculated_at:z.string().nullable(),composition_reconciles:z.boolean()})}).parse(source.data);
-    const person=resolvePayrollPerson(query,d.bill.people.map(p=>p.name));
+    const person=resolvePayrollPerson(query,d.bill.people.map(p=>p.name), { strictHint: ticketEarnings });
+    if (ticketEarnings) {
+      const period = '**Requested period: '+source.from+' to '+source.through+'**\n\n';
+      const ids = new Set(d.bill.people.filter(p => person.matches.includes(p.name)).map(p => p.employee_id));
+      if (person.matches.length > 1 || ids.size > 1) {
+        return period+'Which Payroll person do you mean? More than one record matches.'+footer;
+      }
+      if (!person.matches.length) {
+        return period+(person.hint
+          ? 'Payroll did not return a matching payslip for '+cell(person.hint)+'. I can’t verify the earnings split by ticket type.'
+          : 'Whose Payroll earnings should I check?')+footer;
+      }
+      return period+'Payroll does not provide a verified earnings split by ticket type (HT/LT) for **'+cell(person.matches[0])+'**. The authorized report contains a whole-month payslip total and cannot verify earnings for individual ticket types or specific days.'+footer;
+    }
     if(person.hint||person.matches.length){
       if(person.matches.length!==1)return (person.matches.length?'Which person do you mean: '+person.matches.map(cell).join(', ')+'?':'No matching payslip was returned for '+cell(person.hint)+' in this authorized Payroll run. This does not establish zero earnings.')+footer;
       const rows=d.bill.people.filter(p=>p.name===person.matches[0]);

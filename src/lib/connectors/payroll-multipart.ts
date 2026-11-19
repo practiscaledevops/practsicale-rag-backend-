@@ -1,5 +1,5 @@
 import {z} from 'zod';
-import {readLivePayroll} from './payroll-live';
+import {isPayrollTicketEarningsRequest,readLivePayroll} from './payroll-live';
 const safe=(v:unknown)=>String(v??'Not recorded').replace(/[|<>\r\n]/g,' ');
 const table=(h:string[],r:unknown[][])=>'| '+h.join(' | ')+' |\n| '+h.map(()=> '---').join(' | ')+' |\n'+r.map(x=>'| '+x.map(safe).join(' | ')+' |').join('\n');
 export function multipartNeeds(query:string){
@@ -8,7 +8,7 @@ export function multipartNeeds(query:string){
  const closingLeaders=/\b(top|most|highest)\b/i.test(query)&&/\bclosings?\b/i.test(query)&&! /\b(setters?|teams?)\b/i.test(query);
  const consultant=closingLeaders||/\bconsultants?\b/i.test(query)&&/\b(top|best|highest|earner|earning|earners)\b/i.test(query);
  const earnings=consultant&&/\b(earners?|earnings?|paid|salary|pay)\b/i.test(query);
- return {setters,high,low,consultant,earnings,closingLeaders,handled:[setters,high,low,consultant].filter(Boolean).length>=2||setters||earnings||consultant};
+ return {setters,high,low,consultant,earnings,closingLeaders,handled:!isPayrollTicketEarningsRequest(query)&&([setters,high,low,consultant].filter(Boolean).length>=2||setters||earnings||consultant)};
 }
 type Source={data?:unknown;fetched_at:string};
 export function renderMultipart(query:string,from:string,through:string,sources:Partial<Record<'performance'|'people'|'teams'|'payroll',Source>>){
