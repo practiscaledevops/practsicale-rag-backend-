@@ -11,6 +11,13 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { isDemo } from "@/lib/demo/mode";
 
 export async function middleware(req: NextRequest) {
+  // Bridge endpoints verify their own one-time transaction and stage session
+  // cookies until the configured account and organization have been checked.
+  if (
+    req.nextUrl.pathname === "/auth/portal/start" ||
+    req.nextUrl.pathname === "/auth/portal/callback"
+  ) return NextResponse.next({ request: req });
+
   // DEMO MODE: no Supabase session — let every route through (getAdmin() returns
   // the demo admin, so the dashboard renders). isDemo() ignores the client flag
   // in production builds, so a leaked NEXT_PUBLIC_DEMO_MODE can't open the gate.

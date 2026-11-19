@@ -43,7 +43,11 @@ function LoginForm() {
   const demo = process.env.NEXT_PUBLIC_DEMO_MODE === "1";
   const [email, setEmail] = React.useState(demo ? "demo@practiscale.co" : "");
   const [password, setPassword] = React.useState(demo ? "demo" : "");
-  const [error, setError] = React.useState<string | null>(null);
+  const [error, setError] = React.useState<string | null>(
+    params.get("portal_login_error") === "1"
+      ? "Could not complete sign-in from CEO Portal. Try again there or sign in below."
+      : null,
+  );
   const [loading, setLoading] = React.useState(false);
 
   async function onSubmit(e: React.FormEvent) {
