@@ -602,7 +602,12 @@ export async function POST(req: Request) {
             throw error;
           })
           : null;
-        text = renderPayrollFacts(query, commission ?? await readLivePayroll(factReport, email, from, through, directSignal));
+        let source = commission ?? await readLivePayroll(factReport, email, from, through, directSignal);
+        if(factReport==='performance'&&query.includes('\nClient requested:')&&from.slice(0,7)===through.slice(0,7)&&!from.endsWith('-01')){
+          const month=await readLivePayroll('performance',email,from.slice(0,7)+'-01',through,directSignal);
+          source={...month,from,through};
+        }
+        text = renderPayrollFacts(query, source);
       }
     }catch(error){
       if(req.signal.aborted) throw error;

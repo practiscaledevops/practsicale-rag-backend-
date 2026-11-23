@@ -58,7 +58,20 @@ export function renderPayrollFacts(query: string, source: {report:string;from:st
     const owners=person.matches;
     const bothTickets=/\b(ht|high[ -]ticket)\b/i.test(query)&&/\b(lt|low[ -]ticket)\b/i.test(query);
     const ticket=bothTickets?null:/\b(ht|high[ -]ticket)\b/i.test(query)?'high_ticket':/\b(lt|low[ -]ticket)\b/i.test(query)?'low_ticket':null;
-    const sales=d.sales.filter(r=>(!owners.length||owners.includes(r.owner))&&(!ticket||r.ticket===ticket)&&(!mentionedTeams.length||mentionedTeams.some(t=>t.label===r.team)));
+    const monthly=source.from.endsWith('-01')&&source.from.slice(0,7)===source.through.slice(0,7);
+    const inPeriod=(r:typeof d.sales[number])=>{
+      if(!r.recorded_date)return monthly;
+      const day=/^\d{4}-\d{2}-\d{2}$/.test(r.recorded_date)?r.recorded_date:Number.isFinite(Date.parse(r.recorded_date))?new Date(r.recorded_date).toISOString().slice(0,10):null;
+      return !!day&&day>=source.from&&day<=source.through;
+    };
+    const clientQuery=query.split('\nClient requested:')[1]?.trim();
+    if(clientQuery){
+      const key=normalize(clientQuery),matches=d.sales.filter(r=>r.client&&(' '+normalize(r.client)+' ').includes(' '+key+' ')&&(!owners.length||owners.includes(r.owner)));
+      if(!matches.length)return 'No matching Payroll sale for '+cell(clientQuery)+' was returned for '+source.from+' through '+source.through+'. This does not establish that the client has no sale elsewhere. A scored call marked Closed is separate from a Payroll sale; its call date does not establish a closing date.'+footer;
+      return '**Payroll lookup: '+cell(clientQuery)+'**\n\n'+table(['Client','Closed by','USD','Recorded date','Requested period'],matches.map(r=>[r.client,r.owner,(r.usd_minor/100).toFixed(2),r.recorded_date??'Not recorded',inPeriod(r)?'Included':'Outside requested dates or undated; excluded']))+'\n\nCall dates and current Closed status do not establish when this Payroll sale occurred.'+footer;
+    }
+    const excluded=d.sales.filter(r=>!inPeriod(r)&&(!owners.length||owners.includes(r.owner))).length;
+    const sales=d.sales.filter(r=>inPeriod(r)).filter(r=>(!owners.length||owners.includes(r.owner))&&(!ticket||r.ticket===ticket)&&(!mentionedTeams.length||mentionedTeams.some(t=>t.label===r.team)));
     if(ticket||owners.length||mentionedTeams.length||/\b(names|clients|taxonomy|closing|closings|closed|sales)\b/i.test(query)) {
       const title=(mentionedTeams.length?mentionedTeams.map(t=>t.label).join(', '):owners.length?owners.join(', '):'Company-wide')+(ticket?' · '+ticket.replace('_',' '):'');
       if(/\b(taxonomy|niche)\b/i.test(query)) {
@@ -66,7 +79,7 @@ export function renderPayrollFacts(query: string, source: {report:string;from:st
         for(const r of sales){const key=r.owner+'\u0000'+(r.niche??'Not attributed');const g=groups.get(key)??{owner:r.owner,niche:r.niche??'Not attributed',count:0,minor:0};g.count++;g.minor+=r.usd_minor;groups.set(key,g);}
         return '**Consultant/closer sales by niche — '+source.from+' to '+source.through+'**\n\n'+table(['Consultant/closer','Niche','Closings','Closed USD'],[...groups.values()].sort((a,b)=>b.minor-a.minor).map(g=>[g.owner,g.niche,g.count,(g.minor/100).toFixed(2)]))+'\n\nRanked by closed USD; this does not establish coaching quality. Niche comes from the attributed booking and can be missing.'+footer;
       }
-      return '**'+cell(title)+' — '+sales.length+' closings · USD '+(sales.reduce((n,r)=>n+r.usd_minor,0)/100).toFixed(2)+'**\n\n'+'Period: '+source.from+' through '+source.through+'.\n\n'+table(['Client','Closed by','Ticket','USD','Recorded date','Setter','Attributed team','Niche','Source'],sales.map(r=>[r.client,r.owner,r.ticket.replace('_',' ')+(r.ticket_assumed?' (assumed by Payroll)':''),(r.usd_minor/100).toFixed(2),r.recorded_date??'Not recorded',r.setter??'Not attributed',r.team??'Not attributed',r.niche??'Not attributed',r.origin==='entry'?'Admin entry':r.origin==='form'?'Form':'Not supplied']))+'\n\nOne row per closing, not per unique client. Undated admin entries belong to the Payroll month; no exact closing date is inferred.'+footer;
+      return '**'+cell(title)+' — '+sales.length+' closings · USD '+(sales.reduce((n,r)=>n+r.usd_minor,0)/100).toFixed(2)+'**\n\n'+'Period: '+source.from+' through '+source.through+'.\n\n'+table(['Client','Closed by','Ticket','USD','Recorded date','Setter','Attributed team','Niche','Source'],sales.map(r=>[r.client,r.owner,r.ticket.replace('_',' ')+(r.ticket_assumed?' (assumed by Payroll)':''),(r.usd_minor/100).toFixed(2),r.recorded_date??'Not recorded',r.setter??'Not attributed',r.team??'Not attributed',r.niche??'Not attributed',r.origin==='entry'?'Admin entry':r.origin==='form'?'Form':'Not supplied']))+'\n\nOne row per closing, not per unique client. '+excluded+' out-of-period or undated source rows excluded. Payroll reporting dates use UTC. Undated entries are included only for month-to-date scopes starting on day one; no exact closing date is inferred.'+footer;
     }
     const groupName=/\bteams?\b/i.test(query)?'teams':/\bniches?\b/i.test(query)?'niches':/\b(consultants?|closers?)\b/i.test(query)?'consultants':/\bsetters?\b/i.test(query)?'setters':null;
     let text='**Payroll performance — '+source.from+' to '+source.through+'**\n\n'+table(['Metric','Total'],[['Booked contacts',d.summary.booked],['Reviewed show-ups',d.summary.showed],['Reviewed/filed no-shows',d.summary.no_show],['Closings',d.summary.closings],['Closed value (USD)',(d.summary.usd_minor/100).toFixed(2)]]);

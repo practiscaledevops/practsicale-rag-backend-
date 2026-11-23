@@ -6,6 +6,8 @@ function inheritScope(query:string,prior:string){
  if(prior && /^(?:(?:and|also|then|now)\s+)?(?:(?:what\s+(?:is|does)|how about|what about|check|show(?: me)?|in|from)\s+)?(?:(?:in|does|the)\s+)*(?:ghl|crm|call[ -]scoring(?: app)?|payroll)(?:\s+(?:say|says|show|shows))?[?.! ]*$/i.test(query.trim()))
    return prior.split('\nSource requested:')[0]+'\nSource requested: '+query;
  if(prior && needsSynthesis(query) && /\b(same (?:team|person|period|figure)|which action|which priority)\b/i.test(query) && !/\bteam\s+(?!and\b|or\b|period\b)[a-z]+/i.test(query))return prior+'\nFollow-up requested: '+query;
+ const missingClient=/^(?:and\s+)?(?:where\s+is|what\s+about|where\s+was)\s+([a-z][a-z .'-]{1,70})[?.! ]*$/i.exec(query.trim());
+ if(prior && missingClient && /\b(closings?|closed|sales)\b/i.test(prior) && !/\b(team|ghl|crm|payroll|call scoring)\b/i.test(missingClient[1]))return prior.split('\nClient requested:')[0]+'\nClient requested: '+missingClient[1].trim();
  const priorPerson=payrollPersonHint(prior);
  if(priorPerson&&/^[a-z]+(?:[ .'-]+[a-z]+){0,2}[.]?$/i.test(query.trim())&&!/\b(yes|no|okay|ok|thanks|today|yesterday|month|week|all|everyone|show|tell|how|what|why|and|please)\b/i.test(query)){
    return prior.replace(priorPerson,query.trim());
